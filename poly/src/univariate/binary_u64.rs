@@ -3,18 +3,17 @@ use crate::{
     univariate::{dense::DensePolynomial, prepare_projection},
 };
 use core::mem::MaybeUninit;
-use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
+use crypto_primitives::{FieldConfig, Wrapper, boolean::Boolean};
 use derive_more::{AsRef, Display};
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
+use num_traits::{CheckedAdd, CheckedMul, One, Zero};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
     hash::Hash,
-    iter::{Product, Sum},
     marker::PhantomData,
-    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+    ops::{Add, Mul},
 };
-use zinc_transcript::delegate_const_transcribable;
+use zinc_transcript::{delegate_const_transcribable, traits::ConstTranscribable};
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, InnerProductError},
@@ -25,7 +24,9 @@ use zinc_utils::{
 
 #[derive(AsRef, Clone, Debug, Default, Display, Hash, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 64, which is ok for now
+pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64);
+
+// we can fit up to degree 64, which is ok for now
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     const _DEGREE_CHECK: () = {
@@ -90,22 +91,9 @@ impl<const DEGREE_PLUS_ONE: usize> From<u64> for BinaryU64Poly<DEGREE_PLUS_ONE> 
 }
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
-    /// Create a new polynomial with the given coefficients.
-    /// If the input has fewer than N+1 coefficients, the remaining slots will
-    /// be filled with zeros. If the input has more than N+1 coefficients,
-    /// it will panic.
     #[inline(always)]
-    pub fn new(coeffs: impl AsRef<[Boolean]>) -> Self {
-        // Self(DensePolynomial::new(coeffs))
-        let coeffs = coeffs.as_ref();
-        assert!(coeffs.len() <= DEGREE_PLUS_ONE);
-        let mut value: u64 = 0;
-        for (i, coeff) in coeffs.iter().enumerate() {
-            if coeff.inner() {
-                value |= 1 << i;
-            }
-        }
-        Self(value)
+    pub fn new(coeffs: [Boolean; DEGREE_PLUS_ONE]) -> Self {
+        BinaryU64Poly::new_padded(coeffs)
     }
 
     /// Create a new polynomial with the given coefficients.
@@ -118,7 +106,7 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
         assert!(coeffs.len() <= DEGREE_PLUS_ONE);
         let mut value: u64 = 0;
         for (i, coeff) in coeffs.iter().enumerate() {
-            if coeff.inner() {
+            if *coeff.inner() {
                 value |= 1 << i;
             }
         }
@@ -159,150 +147,20 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Add<&'a Self> for BinaryU64Poly<DEGREE_PL
 impl<const DEGREE_PLUS_ONE: usize> Add for BinaryU64Poly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
-    fn add(self, rhs: Self) -> Self::Output {
-        self.add(&rhs)
-    }
-}
-
-impl<'a, const DEGREE_PLUS_ONE: usize> Sub<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects, clippy::suspicious_arithmetic_impl)]
-    #[inline(always)]
-    fn sub(self, rhs: &'a Self) -> Self::Output {
-        // subtraction in GF(2) is XOR
-        Self(self.0 ^ rhs.0)
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> Sub for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    #[inline(always)]
-    fn sub(self, rhs: Self) -> Self::Output {
-        self.sub(&rhs)
+    fn add(self, _rhs: Self) -> Self::Output {
+        panic!("Binary polynomials addition is not defined")
     }
 }
 
 impl<const DEGREE_PLUS_ONE: usize> Mul for BinaryU64Poly<DEGREE_PLUS_ONE> {
     type Output = Self;
 
-    #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
-    fn mul(self, rhs: Self) -> Self::Output {
-        self.mul(&rhs)
+    fn mul(self, _rhs: Self) -> Self::Output {
+        panic!("Binary polynomials multiplication is not defined")
     }
 }
-
-impl<'a, const DEGREE_PLUS_ONE: usize> Mul<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    type Output = Self;
-
-    #[allow(clippy::arithmetic_side_effects)]
-    #[inline(always)]
-    fn mul(self, _rhs: &'a Self) -> Self::Output {
-        unimplemented!("Multiplication for BinaryU64Poly is not implemented yet");
-    }
-}
-
-#[allow(clippy::suspicious_op_assign_impl)]
-impl<'a, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn add_assign(&mut self, rhs: &'a Self) {
-        // addition in GF(2) is XOR
-        self.0 ^= rhs.0;
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> AddAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn add_assign(&mut self, rhs: Self) {
-        self.add_assign(&rhs);
-    }
-}
-
-#[allow(clippy::suspicious_op_assign_impl)]
-impl<'a, const DEGREE_PLUS_ONE: usize> SubAssign<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn sub_assign(&mut self, rhs: &'a Self) {
-        // subtraction in GF(2) is XOR
-        self.0 ^= rhs.0;
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> SubAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn sub_assign(&mut self, rhs: Self) {
-        self.sub_assign(&rhs);
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> MulAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn mul_assign(&mut self, _rhs: Self) {
-        unimplemented!("Multiplication for BinaryU64Poly is not implemented yet");
-    }
-}
-
-impl<'a, const DEGREE_PLUS_ONE: usize> MulAssign<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn mul_assign(&mut self, _rhs: &'a Self) {
-        unimplemented!("Multiplication for BinaryU64Poly is not implemented yet");
-        // self.0.mul_assign(&rhs.0);
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> CheckedAdd for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn checked_add(&self, other: &Self) -> Option<Self> {
-        // If any bit is set in both operands, addition would overflow (1+1)
-        if (self.0 & other.0) != 0 {
-            None
-        } else {
-            // addition in GF(2) is XOR
-            Some(Self(self.0 ^ other.0))
-        }
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> CheckedSub for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn checked_sub(&self, other: &Self) -> Option<Self> {
-        // If any bit is 0 in self and 1 in other, subtraction would overflow (0-1)
-        if ((!self.0) & other.0) != 0 {
-            // There exists a bit where self is 0 and other is 1
-            None
-        } else {
-            // subtraction in GF(2) is XOR
-            Some(Self(self.0 ^ other.0))
-        }
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> CheckedMul for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn checked_mul(&self, _other: &Self) -> Option<Self> {
-        unimplemented!("Checked multiplication for BinaryU64Poly is not implemented yet");
-    }
-}
-
-impl<'a, const DEGREE_PLUS_ONE: usize> Sum<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.sum()
-    }
-}
-
-impl<'a, const DEGREE_PLUS_ONE: usize> Product<&'a Self> for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    #[inline(always)]
-    fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.product()
-    }
-}
-
-impl<const DEGREE_PLUS_ONE: usize> Semiring for BinaryU64Poly<DEGREE_PLUS_ONE> {}
 
 impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryU64Poly<DEGREE_PLUS_ONE>>
     for StandardUniform
@@ -352,7 +210,7 @@ impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usi
 }
 
 impl<const DEGREE_PLUS_ONE: usize> ConstCoeffBitWidth for BinaryU64Poly<DEGREE_PLUS_ONE> {
-    const COEFF_BIT_WIDTH: usize = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::COEFF_BIT_WIDTH;
+    const COEFF_BIT_WIDTH: usize = Boolean::NUM_BITS;
 }
 
 impl<const DEGREE_PLUS_ONE: usize> Named for BinaryU64Poly<DEGREE_PLUS_ONE> {
@@ -418,7 +276,8 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
 #[derive(Clone, Debug)]
 pub struct BinaryU64PolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
-impl<Rhs, Out, const DEGREE_PLUS_ONE: usize> InnerProduct<BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
+impl<Ctx, Rhs, Out, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<Ctx, BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
     for BinaryU64PolyInnerProduct<Rhs, DEGREE_PLUS_ONE>
 where
     Rhs: Clone,
@@ -427,6 +286,7 @@ where
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // By design
     fn inner_product<const CHECK: bool>(
+        _ctx: &Ctx,
         lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
@@ -456,25 +316,26 @@ where
     }
 }
 
-impl<F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F> for BinaryU64Poly<DEGREE_PLUS_ONE>
+impl<C, const DEGREE_PLUS_ONE: usize> ProjectableToField<C> for BinaryU64Poly<DEGREE_PLUS_ONE>
 where
-    F: PrimeField + FromRef<F> + 'static,
+    C: FieldConfig + Clone + Send + Sync + 'static,
 {
-    fn prepare_projection(sampled_value: &F) -> impl Fn(&Self) -> F + 'static {
-        prepare_projection::<F, Self, _, DEGREE_PLUS_ONE>(sampled_value, |poly, i| {
+    fn prepare_projection(cfg: &C, sampled_value: &C::Element) -> impl Fn(&Self) -> C::Element {
+        prepare_projection::<C, Self, _, DEGREE_PLUS_ONE>(cfg, sampled_value, |poly, i| {
             (poly.0 & (1 << i)) != 0
         })
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize> MulByScalar<&i64, DensePolynomial<i64, DEGREE_PLUS_ONE>>
-    for BinaryU64Poly<DEGREE_PLUS_ONE>
+impl<const DEGREE_PLUS_ONE: usize>
+    MulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, i64, DensePolynomial<i64, DEGREE_PLUS_ONE>> for ()
 {
     fn mul_by_scalar<const CHECK: bool>(
         &self,
+        lhs: BinaryU64Poly<DEGREE_PLUS_ONE>,
         rhs: &i64,
     ) -> Option<DensePolynomial<i64, DEGREE_PLUS_ONE>> {
-        Some(widen_simd::<DEGREE_PLUS_ONE>(self, *rhs))
+        Some(widen_simd::<DEGREE_PLUS_ONE>(&lhs, *rhs))
     }
 }
 
@@ -756,7 +617,7 @@ mod tests {
             for scalar in [1, 42, -7, 100, -100, i64::MAX, i64::MIN] {
                 let result_simd_ref = widen_ref(&poly, scalar);
                 let result_simd = widen_simd(&poly, scalar);
-                let result_ref = poly_ref.mul_by_scalar::<CHECKED>(&scalar).unwrap();
+                let result_ref = ().mul_by_scalar::<CHECKED>(poly_ref.clone(), &scalar).unwrap();
 
                 assert_eq!(
                     result_simd_ref.coeffs, result_simd.coeffs,
@@ -779,13 +640,13 @@ mod tests {
         .map(|x| (x != 0).into())
         .collect();
 
-        let poly32 = BinaryU64Poly::<32>::new(coeffs.clone());
-        let poly32_ref = BinaryRefPoly::<32>::new(coeffs);
+        let poly32 = BinaryU64Poly::<32>::new_padded(coeffs.clone());
+        let poly32_ref = BinaryRefPoly::<32>::new_padded(coeffs);
 
         for scalar in [1, 42, -7, 100, -100] {
             let result_simd_ref = widen_ref(&poly32, scalar);
             let result_simd = widen_simd(&poly32, scalar);
-            let result_ref = poly32_ref.mul_by_scalar::<CHECKED>(&scalar).unwrap();
+            let result_ref = ().mul_by_scalar::<CHECKED>(poly32_ref.clone(), &scalar).unwrap();
             assert_eq!(
                 result_simd_ref.coeffs, result_simd.coeffs,
                 "Mismatch for degree 32 with scalar {}",

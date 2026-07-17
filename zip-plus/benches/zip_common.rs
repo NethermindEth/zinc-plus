@@ -5,10 +5,10 @@
 #![allow(clippy::eq_op, clippy::arithmetic_side_effects, clippy::unwrap_used)]
 
 use criterion::{BenchmarkGroup, measurement::WallTime};
-use crypto_bigint::U64;
 use crypto_primitives::{
-    DenseRowMatrix, Field, FromPrimitiveWithConfig, FromWithConfig, IntoWithConfig,
+    DenseRowMatrix, ProjectElementWithConfig,
     crypto_bigint_monty::MontyField,
+    crypto_bigint_uint::{U64, Uint},
 };
 use itertools::Itertools;
 use num_traits::One;
@@ -19,10 +19,7 @@ use std::{
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
-    projectable_to_field::ProjectableToField,
-};
+use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
@@ -32,21 +29,19 @@ use zip_plus::{
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
-type F = MontyField<{ INT_LIMBS * 4 }>;
+type Cfg = MontyField<{ INT_LIMBS * 4 }>;
+type CfgInt = Uint<{ INT_LIMBS * 4 }>;
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
     make_linear_code: impl Fn(/* poly_size: */ usize) -> Option<Lc> + Copy,
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
-    F: FromPrimitiveWithConfig
-        + FromRef<F>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
-    <F as Field>::Integer: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Eval: ProjectableToField<F>,
+    Cfg: ProjectElementWithConfig<Zt::CombR>
+        + ProjectElementWithConfig<Zt::Chal>
+        + ProjectElementWithConfig<Zt::Pt>,
+    CfgInt: FromRef<Zt::Fmod>,
+    (): MulByScalar<Zt::CombR, Zt::Chal>,
 {
     encode_rows::<Zt, Lc, 12>(group, make_linear_code);
     encode_rows::<Zt, Lc, 13>(group, make_linear_code);
@@ -240,12 +235,9 @@ pub fn prove<
     make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
-    <F as Field>::Integer: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Eval: ProjectableToField<F>,
+    Cfg: ProjectElementWithConfig<Zt::CombR> + ProjectElementWithConfig<Zt::Pt>,
+    CfgInt: FromRef<Zt::Fmod>,
+    (): MulByScalar<Zt::CombR, Zt::Chal>,
 {
     let mut rng = ThreadRng::default();
 
@@ -266,14 +258,16 @@ pub fn prove<
     let mut transcript = PcsProverTranscript::new_from_commitment(&commitment);
     let field_cfg = transcript
         .fs_transcript
-        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        .get_random_field_cfg::<Cfg, Zt::Fmod, Zt::PrimeTest>();
 
     let point = vec![Zt::Pt::one(); P];
 
     macro_rules! do_prove {
         ($t:expr) => {
-            ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>($t, &params, &polys, &point, &hint, &field_cfg)
-                .expect("Prove failed")
+            ZipPlus::prove::<Cfg, CHECK_FOR_OVERFLOWS>(
+                $t, &params, &polys, &point, &hint, &field_cfg,
+            )
+            .expect("Prove failed")
         };
     }
 
@@ -326,14 +320,11 @@ pub fn verify<
     make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    F: FromPrimitiveWithConfig
-        + FromRef<F>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
-    <F as Field>::Integer: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Eval: ProjectableToField<F>,
+    Cfg: ProjectElementWithConfig<Zt::CombR>
+        + ProjectElementWithConfig<Zt::Chal>
+        + ProjectElementWithConfig<Zt::Pt>,
+    CfgInt: FromRef<Zt::Fmod>,
+    (): MulByScalar<Zt::CombR, Zt::Chal>,
 {
     let mut rng = ThreadRng::default();
     let poly_size: usize = 1 << P;
@@ -353,10 +344,10 @@ pub fn verify<
     let mut transcript = PcsProverTranscript::new_from_commitment(&commitment);
     let field_cfg = transcript
         .fs_transcript
-        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        .get_random_field_cfg::<Cfg, Zt::Fmod, Zt::PrimeTest>();
     let point = vec![Zt::Pt::one(); P];
 
-    let eval_f = ZipPlus::prove::<F, CHECK_FOR_OVERFLOWS>(
+    let eval_f = ZipPlus::prove::<Cfg, CHECK_FOR_OVERFLOWS>(
         &mut transcript,
         &params,
         &polys,
@@ -366,7 +357,10 @@ pub fn verify<
     )
     .expect("Prove failed");
 
-    let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
+    let point_f = point
+        .iter()
+        .map(|v| field_cfg.project(v))
+        .collect::<Vec<_>>();
 
     let transcript = transcript.into_verification_transcript();
 
@@ -397,9 +391,9 @@ pub fn verify<
                     transcript.fs_transcript.absorb_slice(&commitment.root);
                     let field_cfg = transcript
                         .fs_transcript
-                        .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+                        .get_random_field_cfg::<Cfg, Zt::Fmod, Zt::PrimeTest>();
 
-                    ZipPlus::verify::<F, CHECK_FOR_OVERFLOWS>(
+                    ZipPlus::verify::<Cfg, CHECK_FOR_OVERFLOWS>(
                         &mut transcript,
                         &params,
                         &commitment,

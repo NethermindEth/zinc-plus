@@ -1,7 +1,9 @@
 use crate::{
-    ConstraintBuilder, TraceRow, Uair, dummy_semiring::DummySemiring, ideal::ImpossibleIdeal,
+    ConstraintBuilder, TraceRow, Uair,
+    dummy_semiring::{DUMMY_SEMIRING_CONFIG, DummySemiring},
+    ideal::ImpossibleIdeal,
 };
-use zinc_utils::add;
+use zinc_utils::{add, from_ref::FromRef};
 
 /// Per-family breakdown of constraint counts. Returned by
 /// [`count_constraints_split`].
@@ -39,7 +41,16 @@ pub fn count_constraints<U: Uair>() -> ConstraintCount {
     let down_row =
         TraceRow::from_slice_with_layout(&down_dummy, sig.down_cols().as_column_layout());
 
-    U::constrain(&mut cc, up_row, down_row);
+    U::constrain_general(
+        &mut cc,
+        &DUMMY_SEMIRING_CONFIG,
+        up_row,
+        down_row,
+        |_| DummySemiring,
+        |_, _| Some(DummySemiring),
+        ImpossibleIdeal::from_ref,
+        ImpossibleIdeal::from_ref,
+    );
 
     ConstraintCount { q: cc.q, fq: cc.fq }
 }

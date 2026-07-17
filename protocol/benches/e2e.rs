@@ -4,10 +4,11 @@ use criterion::{
     BatchSize, BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main,
     measurement::WallTime,
 };
-use crypto_bigint::U64;
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, Field, FixedSemiring, FromWithConfig, HasPrimeFieldConfig,
-    crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    ConstIntRing, ConstIntSemiring, Semiring,
+    crypto_bigint_int::Int,
+    crypto_bigint_monty::{MontyField, MontyFieldElement},
+    crypto_bigint_uint::{U64, Uint},
 };
 use rand::rng;
 use std::{fmt::Debug, hint::black_box, marker::PhantomData, ops::Neg};
@@ -16,7 +17,7 @@ use zinc_poly::{
     univariate::{
         binary::{BinaryPoly, BinaryPolyInnerProduct},
         dense::{DensePolyInnerProduct, DensePolynomial},
-        dynamic::over_field::DynamicPolynomialF,
+        dynamic::{DynamicPolynomial, DynamicPolynomialConfig},
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
@@ -39,7 +40,6 @@ use zinc_utils::{
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
     named::Named,
-    projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     code::iprs::{IprsCode, PnttConfigF65537},
@@ -109,20 +109,16 @@ impl<Eval, Cw, Fmod, PrimeTest, Chal, Pt, CombR, Comb, EvalDotChal, CombDotChal,
     >
 where
     Eval: ConstCoeffBitWidth + Default + Named + Clone + Debug + Send + Sync,
-    Cw: FixedSemiring + ConstCoeffBitWidth + ConstTranscribable + FromRef<Eval> + Named + Copy,
+    Cw: Semiring + ConstCoeffBitWidth + ConstTranscribable + FromRef<Eval> + Named + Copy,
     Fmod: ConstIntSemiring + ConstTranscribable + Named,
     PrimeTest: PrimalityTest<Fmod> + Send + Sync,
     Chal: ConstIntRing + ConstTranscribable + Named,
     Pt: ConstIntRing,
-    CombR: ConstIntRing
-        + Neg<Output = CombR>
-        + ConstTranscribable
-        + FromRef<CombR>
-        + for<'a> MulByScalar<&'a Chal>,
-    Comb: FixedSemiring + Polynomial<CombR> + FromRef<Eval> + FromRef<Cw> + Named,
-    EvalDotChal: InnerProduct<Eval, Chal, CombR> + Clone + Debug + Send + Sync,
-    CombDotChal: InnerProduct<Comb, Chal, CombR> + Clone + Debug + Send + Sync,
-    ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Clone + Debug + Send + Sync,
+    CombR: ConstIntRing + Neg<Output = CombR> + ConstTranscribable + FromRef<CombR>,
+    Comb: Semiring + Polynomial<CombR> + FromRef<Eval> + FromRef<Cw> + Named,
+    EvalDotChal: InnerProduct<(), Eval, Chal, CombR> + Clone + Debug + Send + Sync,
+    CombDotChal: InnerProduct<(), Comb, Chal, CombR> + Clone + Debug + Send + Sync,
+    ArrCombRDotChal: InnerProduct<(), [CombR], Chal, CombR> + Clone + Debug + Send + Sync,
 {
     const NUM_COLUMN_OPENINGS: usize = 100;
     type Eval = Eval;
@@ -167,7 +163,6 @@ impl<
     for GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, D, HALF_D, QUARTER_D>
 where
     Int: ConstIntSemiring
-        + for<'a> MulByScalar<&'a i64, CwR>
         + Named
         + ConstCoeffBitWidth
         + ConstTranscribable
@@ -176,8 +171,7 @@ where
         + Send
         + Sync
         + 'static,
-    CwR: FixedSemiring
-        + for<'a> MulByScalar<&'a i64>
+    CwR: Semiring
         + ConstCoeffBitWidth
         + ConstTranscribable
         + Named
@@ -189,8 +183,6 @@ where
     CombR: ConstIntRing
         + Polynomial<CombR>
         + Neg<Output = CombR>
-        + for<'a> MulByScalar<&'a i64>
-        + for<'a> MulByScalar<&'a Chal>
         + ConstTranscribable
         + Named
         + FromRef<i64>
@@ -200,6 +192,10 @@ where
         + FromRef<CombR>,
     Fmod: ConstIntSemiring + ConstTranscribable + Named + FromRef<Fmod>,
     PrimeTest: PrimalityTest<Fmod> + Debug + Send + Sync,
+    (): MulByScalar<Int, i64, CwR>
+        + MulByScalar<CwR, i64>
+        + MulByScalar<CombR, i64>
+        + MulByScalar<CombR, Chal>,
 {
     type Int = Int;
     type Chal = Chal;
@@ -218,7 +214,7 @@ where
         CombR,
         DensePolynomial<CombR, QUARTER_D>,
         BinaryPolyInnerProduct<Chal, QUARTER_D>,
-        DensePolyInnerProduct<CombR, Chal, CombR, MBSInnerProduct, QUARTER_D>,
+        DensePolyInnerProduct<(), CombR, Chal, CombR, MBSInnerProduct, QUARTER_D>,
         MBSInnerProduct,
     >;
     type ArbitraryZt = GenericBenchZipTypes<
@@ -230,8 +226,8 @@ where
         Pt,
         CombR,
         DensePolynomial<CombR, D>,
-        DensePolyInnerProduct<Int, Chal, CombR, MBSInnerProduct, D>,
-        DensePolyInnerProduct<CombR, Chal, CombR, MBSInnerProduct, D>,
+        DensePolyInnerProduct<(), Int, Chal, CombR, MBSInnerProduct, D>,
+        DensePolyInnerProduct<(), CombR, Chal, CombR, MBSInnerProduct, D>,
         MBSInnerProduct,
     >;
     type IntZt = GenericBenchZipTypes<
@@ -267,6 +263,8 @@ const INT_LIMBS: usize = U64::LIMBS;
 const FIELD_LIMBS: usize = U64::LIMBS * 3;
 
 type F = MontyField<FIELD_LIMBS>;
+type E = MontyFieldElement<FIELD_LIMBS>;
+type ZtFmod = Uint<FIELD_LIMBS>;
 
 type BenchZincTypes = GenericBenchZincTypes<
     /* Int = */ i64,
@@ -327,30 +325,19 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     num_vars: usize,
     pp: &Pp<Zt>,
     trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
-    project_scalar: impl Fn(&U::Scalar, &<F as HasPrimeFieldConfig>::Config) -> DynamicPolynomialF<F>
-    + Copy,
-    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as HasPrimeFieldConfig>::Config) -> IdealOverF
-    + Copy,
+    project_scalar: impl Fn(&U::Scalar, &F) -> DynamicPolynomial<E> + Copy,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F) -> IdealOverF + Copy,
 ) where
-    Zt: ZincTypes<D, QUARTER_D>,
-    Zt::Int: ProjectableToField<F>,
-    <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
-    <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-    <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
-    <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-    F: Field<Integer = Zt::Fmod>
-        + FromWithConfig<Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>
-        + FromRef<F>
-        + Send
-        + Sync
-        + 'static,
+    Zt: ZincTypes<
+            D,
+            QUARTER_D,
+            Fmod = ZtFmod,
+            Int = i64,
+            Chal = i128,
+            CombR = Int<{ INT_LIMBS * 6 }>,
+        >,
     U: Uair<Prime = Zt::Fmod> + 'static,
-    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    IdealOverF: Ideal + for<'cfg> IdealCheck<DynamicPolynomialConfig<'cfg, F>>,
 {
     let params = format!("{label}/nvars={num_vars}");
 
@@ -379,7 +366,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     bench_prove!("Prove (Combined)", false);
     bench_prove!("Prove (MLE-first)", true);
 
-    let proof: Proof<F> =
+    let proof: Proof<E> =
         <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 
@@ -420,29 +407,19 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     num_vars: usize,
     pp: &Pp<Zt>,
     trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
-    project_scalar: fn(&U::Scalar, &<F as HasPrimeFieldConfig>::Config) -> DynamicPolynomialF<F>,
-    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as HasPrimeFieldConfig>::Config) -> IdealOverF
-    + Copy,
+    project_scalar: fn(&U::Scalar, &F) -> DynamicPolynomial<E>,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F) -> IdealOverF + Copy,
 ) where
-    Zt: ZincTypes<D, QUARTER_D>,
-    Zt::Int: ProjectableToField<F>,
-    <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
-    <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-    <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
-    <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-    F: Field<Integer = Zt::Fmod>
-        + FromWithConfig<Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>
-        + FromRef<F>
-        + Send
-        + Sync
-        + 'static,
+    Zt: ZincTypes<
+            D,
+            QUARTER_D,
+            Fmod = ZtFmod,
+            Int = i64,
+            Chal = i128,
+            CombR = Int<{ INT_LIMBS * 6 }>,
+        >,
     U: Uair<Prime = Zt::Fmod> + 'static,
-    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    IdealOverF: Ideal + for<'cfg> IdealCheck<DynamicPolynomialConfig<'cfg, F>>,
 {
     let params = format!("{label}/nvars={num_vars}");
 
@@ -561,7 +538,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         };
     }
 
-    let proof: Proof<F> =
+    let proof: Proof<E> =
         <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 
@@ -655,22 +632,20 @@ where
     U: Uair<
             Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
             Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int, 32>,
-            Prime = <F as Field>::Integer,
+            Prime = ZtFmod,
         > + GenerateRandomTrace<
             D,
             PolyCoeff = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
             Int = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
         > + 'static,
-    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
 {
     let mut rng = rng();
     let trace = U::generate_random_trace(num_vars, &mut rng);
 
     let pp = setup_pp(num_vars);
 
-    let proj_ideal = |ideal: &IdealOrZero<U::Ideal>,
-                      field_cfg: &<F as HasPrimeFieldConfig>::Config| {
-        ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
+    let proj_ideal = |ideal: &IdealOrZero<U::Ideal>, field_cfg: &F| {
+        ideal.map(|i| DegreeOneIdeal::project(field_cfg, i))
     };
 
     do_bench_e2e::<BenchZincTypes, U, _>(
@@ -689,22 +664,20 @@ where
     U: Uair<
             Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
             Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int, 32>,
-            Prime = <F as Field>::Integer,
+            Prime = ZtFmod,
         > + GenerateRandomTrace<
             D,
             PolyCoeff = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
             Int = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
         > + 'static,
-    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
 {
     let mut rng = rng();
     let trace = U::generate_random_trace(num_vars, &mut rng);
 
     let pp = setup_pp(num_vars);
 
-    let proj_ideal = |ideal: &IdealOrZero<U::Ideal>,
-                      field_cfg: &<F as HasPrimeFieldConfig>::Config| {
-        ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
+    let proj_ideal = |ideal: &IdealOrZero<U::Ideal>, field_cfg: &F| {
+        ideal.map(|i| DegreeOneIdeal::project(field_cfg, i))
     };
 
     do_bench_steps::<BenchZincTypes, U, _>(

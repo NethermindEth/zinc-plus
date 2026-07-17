@@ -1,39 +1,42 @@
 use std::ops::Range;
 
-use crypto_bigint::Random;
-use crypto_primitives::PrimeField;
+use crypto_primitives::{FieldConfig, ProjectElementWithConfig};
 use itertools::Itertools;
 use rand::prelude::*;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 
 #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
-pub(crate) fn rand_poly<F: PrimeField + Random, G: Rng>(
+pub(crate) fn rand_poly<C, G: Rng>(
     nv: usize,
     num_multiplicands_range: Range<usize>,
     num_products: usize,
     rng: &mut G,
-    config: &F::Config,
+    config: &C,
 ) -> Result<
     (
-        (Vec<DenseMultilinearExtension<F::Inner>>, usize),
-        Vec<(F, Vec<usize>)>,
-        F,
+        (Vec<DenseMultilinearExtension<C::Element>>, usize),
+        Vec<(C::Element, Vec<usize>)>,
+        C::Element,
     ),
     ArithErrors,
-> {
-    let mut sum = F::zero_with_cfg(config);
-    let mut mles: Vec<DenseMultilinearExtension<F>> = vec![];
+>
+where
+    C: FieldConfig + ProjectElementWithConfig<u128>,
+{
+    let mut sum = config.zero();
+    let mut mles: Vec<DenseMultilinearExtension<C::Element>> = vec![];
     let mut products = Vec::with_capacity(num_products);
     let mut degree = 0;
     let mut current_mle_index = 0;
     for _ in 0..num_products {
         let num_multiplicands = rng.random_range(num_multiplicands_range.clone());
         degree = num_multiplicands.max(degree);
-        let (product, product_sum) = random_mle_list(nv, num_multiplicands, rng, config.clone());
+        let (product, product_sum) = random_mle_list(nv, num_multiplicands, rng, config);
 
-        let coefficient = F::try_random_from_rng(rng).expect("sampling coefficient failed");
+        let coefficient = config.project(&rng.random::<u128>());
         mles.extend(product);
-        sum += &(product_sum * &coefficient);
+        let term = config.mul(&product_sum, &coefficient);
+        config.add_assign(&mut sum, &term);
 
         let indices: Vec<usize> =
             (current_mle_index..current_mle_index + num_multiplicands).collect();
@@ -41,37 +44,25 @@ pub(crate) fn rand_poly<F: PrimeField + Random, G: Rng>(
         current_mle_index += num_multiplicands;
     }
 
-    let mles = mles
-        .into_iter()
-        .map(|mle| DenseMultilinearExtension {
-            evaluations: mle
-                .evaluations
-                .into_iter()
-                .map(|x| x.into_inner())
-                .collect(),
-            num_vars: mle.num_vars,
-        })
-        .collect();
-
     Ok(((mles, degree), products, sum))
 }
 
-pub fn rand_poly_comb_fn<F: PrimeField>(
-    vals: &[F],
-    products: &[(F, Vec<usize>)],
-    config: F::Config,
-) -> F {
-    let mut result = F::zero_with_cfg(&config);
+pub fn rand_poly_comb_fn<C: FieldConfig>(
+    config: &C,
+    vals: &[C::Element],
+    products: &[(C::Element, Vec<usize>)],
+) -> C::Element {
+    let mut result = config.zero();
     for (coef, indices) in products {
-        let term = coef.clone()
-            * indices
-                .iter()
-                .map(|&i| &vals[i])
-                .fold(F::one_with_cfg(&config), |mut acc, next| {
-                    acc *= next;
-                    acc
-                });
-        result += &term;
+        let product = indices
+            .iter()
+            .map(|&i| &vals[i])
+            .fold(config.one(), |mut acc, next| {
+                config.mul_assign(&mut acc, next);
+                acc
+            });
+        let term = config.mul(coef, &product);
+        config.add_assign(&mut result, &term);
     }
 
     result
@@ -81,31 +72,34 @@ pub fn rand_poly_comb_fn<F: PrimeField>(
 /// Returns
 /// - the list of polynomials,
 /// - its sum of polynomial evaluations over the boolean hypercube.
-pub fn random_mle_list<F: PrimeField + Random, G: Rng>(
+pub fn random_mle_list<C, G: Rng>(
     nv: usize,
     degree: usize,
     rng: &mut G,
-    config: F::Config,
-) -> (Vec<DenseMultilinearExtension<F>>, F) {
+    config: &C,
+) -> (Vec<DenseMultilinearExtension<C::Element>>, C::Element)
+where
+    C: FieldConfig + ProjectElementWithConfig<u128>,
+{
     let mut multiplicands = (0..degree)
         .map(|_| Vec::with_capacity(1 << nv))
         .collect_vec();
-    let mut sum = F::zero_with_cfg(&config);
+    let mut sum = config.zero();
 
     for _ in 0..1 << nv {
-        let mut product = F::one_with_cfg(&config);
+        let mut product = config.one();
 
         for e in multiplicands.iter_mut() {
-            let val = F::try_random_from_rng(rng).expect("sampling random value failed");
+            let val = config.project(&rng.random::<u128>());
             e.push(val.clone());
-            product *= &val;
+            config.mul_assign(&mut product, &val);
         }
-        sum += &product;
+        config.add_assign(&mut sum, &product);
     }
 
     let list = multiplicands
         .into_iter()
-        .map(|x| DenseMultilinearExtension::from_evaluations_vec(nv, x, F::zero_with_cfg(&config)))
+        .map(|x| DenseMultilinearExtension::from_evaluations_vec(nv, x, config.zero()))
         .collect();
 
     (list, sum)

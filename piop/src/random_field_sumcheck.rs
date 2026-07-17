@@ -4,40 +4,43 @@
 use rayon::prelude::*;
 use std::marker::PhantomData;
 
-use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, PrimeField, Semiring};
+use crypto_primitives::{
+    BaseFieldConfig, ProjectPrimitiveIntegersWithConfig, SetConfig, SetElement,
+};
 use thiserror::Error;
 use zinc_poly::mle::{DenseMultilinearExtension, dense::project_coeffs};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::{
-    cfg_into_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
-    projectable_to_field::ProjectableToField,
-};
+use zinc_utils::{cfg_into_iter, projectable_to_field::ProjectableToField};
 
 use crate::sumcheck::{
     MLSumcheck, SumCheckError, SumcheckProof, prover::ProverState, verifier::Subclaim,
 };
 
-pub struct RFSumcheck<F, R>(PhantomData<(F, R)>);
+pub struct RFSumcheck<C, R>(PhantomData<(C, R)>);
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RFSumcheckProof<F: PrimeField, R>(pub SumcheckProof<F>, PhantomData<R>);
+pub struct RFSumcheckProof<F, R>(pub SumcheckProof<F>, PhantomData<R>);
 
-impl<F: PrimeField, R> RFSumcheckProof<F, R> {
+impl<F, R> RFSumcheckProof<F, R> {
     pub fn new(inner: SumcheckProof<F>) -> Self {
         Self(inner, Default::default())
     }
 }
 
-pub struct RFProverState<F: PrimeField, R>(pub ProverState<F>, PhantomData<R>);
+pub struct RFProverState<C: SetConfig, R>(pub ProverState<C>, PhantomData<R>);
 
-impl<F: PrimeField, R> RFProverState<F, R> {
-    pub fn new(sumcheck_prover_state: ProverState<F>) -> Self {
+impl<C: SetConfig, R> RFProverState<C, R> {
+    pub fn new(sumcheck_prover_state: ProverState<C>) -> Self {
         Self(sumcheck_prover_state, Default::default())
     }
 }
 
-impl<F: PrimeField + FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>>
-    RFSumcheck<F, R>
+impl<C, R> RFSumcheck<C, R>
+where
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
+    C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
+    R: SetElement + ProjectableToField<C>,
 {
     /// Random field sumcheck prover.
     /// Samples a random field element, projects the input MLEs
@@ -67,20 +70,16 @@ impl<F: PrimeField + FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
         mles: Vec<DenseMultilinearExtension<R>>,
-        mles_f: Vec<DenseMultilinearExtension<F::Inner>>,
+        mles_f: Vec<DenseMultilinearExtension<C::Element>>,
         nvars: usize,
         degree: usize,
-        comb_fn: impl Fn(&F, &[F]) -> F + Send + Sync,
-        field_cfg: &F::Config,
-    ) -> (RFSumcheckProof<F, R>, RFProverState<F, R>)
-    where
-        F: InnerTransparentField,
-        F::Integer: ConstTranscribable + ConstIntSemiring + FromRef<F::Integer>,
-    {
-        let projecting_element: F = transcript.get_field_challenge(field_cfg);
+        comb_fn: impl Fn(&C::Element, &[C::Element]) -> C::Element + Send + Sync,
+        field_cfg: &C,
+    ) -> (RFSumcheckProof<C::Element, R>, RFProverState<C, R>) {
+        let projecting_element: C::Element = transcript.get_field_challenge(field_cfg);
 
         let field_mles = cfg_into_iter!(mles)
-            .map(|mle| project_coeffs(mle, &projecting_element))
+            .map(|mle| project_coeffs(field_cfg, mle, &projecting_element))
             .chain(mles_f)
             .collect();
 
@@ -113,16 +112,13 @@ impl<F: PrimeField + FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F
         transcript: &mut impl Transcript,
         num_vars: usize,
         degree: usize,
-        proof: &RFSumcheckProof<F, R>,
-        field_cfg: F::Config,
-    ) -> Result<Subclaim<F>, RFSumcheckError<F>>
-    where
-        F::Integer: ConstTranscribable + ConstIntSemiring,
-    {
+        proof: &RFSumcheckProof<C::Element, R>,
+        field_cfg: C,
+    ) -> Result<Subclaim<C::Element>, RFSumcheckError<C::Element>> {
         // Simulate getting the projecting element
         // Verifier does not use that element as it verifies only over RC,
         // but we keep it here for stability of FS sampling.
-        let _ = transcript.get_field_challenge::<F>(&field_cfg);
+        let _: C::Element = transcript.get_field_challenge(&field_cfg);
 
         let subclaim =
             MLSumcheck::verify_as_subprotocol(transcript, num_vars, degree, &proof.0, &field_cfg)?;
@@ -132,12 +128,12 @@ impl<F: PrimeField + FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F
 }
 
 #[derive(Error, Debug)]
-pub enum RFSumcheckError<F: PrimeField> {
+pub enum RFSumcheckError<F> {
     #[error("underlying sumcheck error: {0}")]
     SumCheckError(SumCheckError<F>),
 }
 
-impl<F: PrimeField> From<SumCheckError<F>> for RFSumcheckError<F> {
+impl<F> From<SumCheckError<F>> for RFSumcheckError<F> {
     fn from(value: SumCheckError<F>) -> Self {
         Self::SumCheckError(value)
     }
@@ -145,11 +141,14 @@ impl<F: PrimeField> From<SumCheckError<F>> for RFSumcheckError<F> {
 
 #[cfg(test)]
 mod tests {
-    use crypto_primitives::{Field, FromWithConfig, crypto_bigint_monty::MontyField};
+    use crypto_primitives::{
+        ProjectElementWithConfig, SemiringConfig, WithAssociatedInteger,
+        crypto_bigint_monty::MontyField,
+    };
     use num_traits::Zero;
     use rand::prelude::*;
     use zinc_poly::{
-        mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r_inner,
+        mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r,
     };
     use zinc_primality::MillerRabin;
     use zinc_transcript::{Blake3Transcript, traits::Transcript};
@@ -193,9 +192,10 @@ mod tests {
 
         let mut transcript = Blake3Transcript::new();
 
-        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Integer, MillerRabin>();
+        let field_cfg: F = transcript
+            .get_random_field_cfg::<F, <F as WithAssociatedInteger>::Integer, MillerRabin>();
 
-        let eq_r = build_eq_x_r_inner(&vec![F::from_with_cfg(2u32, &field_cfg); nvars], &field_cfg)
+        let eq_r = build_eq_x_r(&field_cfg, &vec![field_cfg.project(&2u32); nvars])
             .expect("Failed to build eq_r");
 
         let proof = (RFSumcheck::<F, _>::prove_as_subprotocol(
@@ -204,7 +204,12 @@ mod tests {
             vec![eq_r],
             nvars,
             3,
-            |_x, vals| (&vals[0] * &vals[1] - &vals[2]) * &vals[3],
+            |_x, vals| {
+                field_cfg.mul(
+                    &field_cfg.sub(&field_cfg.mul(&vals[0], &vals[1]), &vals[2]),
+                    &vals[3],
+                )
+            },
             &field_cfg,
         ))
         .0;

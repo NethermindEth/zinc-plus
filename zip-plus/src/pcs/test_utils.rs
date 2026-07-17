@@ -16,7 +16,7 @@ use crate::{
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
 };
 use crypto_primitives::{
-    FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
+    BaseFieldConfig, IntSemiring, ProjectElementWithConfig, crypto_bigint_int::Int,
     crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
@@ -28,13 +28,12 @@ use zinc_poly::{
     },
 };
 use zinc_primality::MillerRabin;
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{
     CHECKED,
     from_ref::FromRef,
     inner_product::{MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField,
 };
 
 pub const IPRS_DEPTH: usize = 1;
@@ -78,6 +77,7 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
     type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
     type CombDotChal = DensePolyInnerProduct<
+        (),
         Self::CombR,
         Self::Chal,
         Self::CombR,
@@ -124,7 +124,7 @@ pub fn setup_poly_test_params<const K: usize, const M: usize, const DEGREE_PLUS_
                 .collect_vec();
             eval_coeffs
                 .chunks_exact(degree)
-                .map(BinaryPoly::new)
+                .map(BinaryPoly::new_padded)
                 .collect_vec()
         },
     )
@@ -151,7 +151,7 @@ pub fn setup_test_params_inner<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     (pp, poly)
 }
 
-pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
+pub fn setup_full_protocol<C, const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
 ) -> (
     ZipPlusParams<
@@ -159,25 +159,25 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
         IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     ZipPlusCommitment,
-    Vec<F>,
-    F,
+    Vec<C::Element>,
+    C::Element,
     PcsVerifierTranscript,
 )
 where
-    F: PrimeField<Integer = <TestZipTypes<N, K, M> as ZipTypes>::Fmod>
-        + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
-        + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
-        + for<'a> MulByScalar<&'a F>
-        + FromRef<F>,
-    <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
+    C: BaseFieldConfig
+        + ProjectElementWithConfig<<TestZipTypes<N, K, M> as ZipTypes>::Pt>
+        + ProjectElementWithConfig<<TestZipTypes<N, K, M> as ZipTypes>::CombR>
+        + Sync,
+    C::Element: ConstTranscribable,
+    C::Integer: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
+    setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }
 
 pub fn setup_full_protocol_poly<
-    F,
+    C,
     const N: usize,
     const K: usize,
     const M: usize,
@@ -190,61 +190,57 @@ pub fn setup_full_protocol_poly<
         IprsCode<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     ZipPlusCommitment,
-    Vec<F>,
-    F,
+    Vec<C::Element>,
+    C::Element,
     PcsVerifierTranscript,
 )
 where
-    F: PrimeField<Integer = <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod>
-        + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
-        + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
-        + for<'a> MulByScalar<&'a F>
-        + FromRef<F>
-        + 'static,
+    C: BaseFieldConfig
+        + ProjectElementWithConfig<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Pt>
+        + ProjectElementWithConfig<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
+        + Sync,
+    C::Element: ConstTranscribable,
+    C::Integer: FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod>,
 {
-    setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
+    setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
     })
 }
 
-pub fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
+pub fn setup_full_protocol_inner<Zt, Lc, C, const N: usize>(
     num_vars: usize,
     setup: impl FnOnce(usize) -> (ZipPlusParams<Zt, Lc>, DenseMultilinearExtension<Zt::Eval>),
     prepare_evaluation_point: impl FnOnce() -> Vec<Zt::Pt>,
 ) -> (
     ZipPlusParams<Zt, Lc>,
     ZipPlusCommitment,
-    Vec<F>,
-    F,
+    Vec<C::Element>,
+    C::Element,
     PcsVerifierTranscript,
 )
 where
     Zt: ZipTypes,
     Lc: LinearCode<Zt>,
-    F: PrimeField<Integer = Zt::Fmod>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
-        + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>
-        + FromRef<F>,
-    F::Integer: FromRef<Zt::Fmod> + Transcribable,
-    Zt::Eval: ProjectableToField<F>,
+    C: BaseFieldConfig
+        + ProjectElementWithConfig<Zt::Pt>
+        + ProjectElementWithConfig<Zt::CombR>
+        + Sync,
+    C::Element: ConstTranscribable,
+    C::Integer: FromRef<Zt::Fmod>,
+    (): MulByScalar<Zt::CombR, Zt::Chal>,
 {
     let (pp, poly) = setup(num_vars);
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();
 
     let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-    let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+    let field_cfg = get_field_cfg::<Zt, C>(&mut transcript.fs_transcript);
     let point: Vec<Zt::Pt> = prepare_evaluation_point();
 
     let eval_f =
-        ZipPlus::prove_single::<F, CHECKED>(&mut transcript, &pp, &poly, &point, &hint, &field_cfg)
+        ZipPlus::prove_single::<C, CHECKED>(&mut transcript, &pp, &poly, &point, &hint, &field_cfg)
             .unwrap();
 
-    let point_f = point
-        .iter()
-        .map(|v| v.into_with_cfg(&field_cfg))
-        .collect_vec();
+    let point_f = point.iter().map(|v| field_cfg.project(v)).collect_vec();
 
     let mut transcript = transcript.into_verification_transcript();
 
@@ -253,11 +249,11 @@ where
     (pp, comm, point_f, eval_f, transcript)
 }
 
-pub fn get_field_cfg<Zt, F>(transcript: &mut impl Transcript) -> F::Config
+pub fn get_field_cfg<Zt, C>(transcript: &mut impl Transcript) -> C
 where
     Zt: ZipTypes,
-    F: PrimeField<Integer = Zt::Fmod>,
-    Zt::Fmod: FromRef<Zt::Fmod>,
+    C: BaseFieldConfig,
+    C::Integer: FromRef<Zt::Fmod>,
 {
-    transcript.get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>()
+    transcript.get_random_field_cfg::<C, Zt::Fmod, Zt::PrimeTest>()
 }

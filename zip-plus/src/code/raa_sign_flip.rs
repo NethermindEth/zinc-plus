@@ -1,12 +1,10 @@
 use super::raa::*;
 use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Ring};
-use num_traits::{CheckedAdd, CheckedNeg};
-use std::{
-    fmt::Debug,
-    ops::{AddAssign, Neg},
+use crypto_primitives::{
+    BaseFieldConfig, FixedConfig, ProjectPrimitiveIntegersWithConfig, Ring, RingConfig,
 };
-use zinc_utils::{from_ref::FromRef, neg};
+use std::fmt::Debug;
+use zinc_utils::from_ref::FromRef;
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes.
 /// Flips signs of every second entry in the codeword, starting from the second
@@ -27,14 +25,10 @@ where
     }
 
     /// Do the actual encoding, as per RAA spec
-    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
+    fn encode_inner<In, C, Map>(&self, cfg: &C, row: &[In], map: Map) -> Vec<C::Element>
     where
-        Out: Neg<Output = Out>
-            + CheckedNeg
-            + CheckedAdd
-            + for<'a> AddAssign<&'a Out>
-            + FromRef<In>
-            + Clone,
+        C: RingConfig,
+        Map: Fn(&In) -> C::Element + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -42,28 +36,28 @@ where
             "Row length must match the code's row length"
         );
 
-        let mut result: Vec<Out> = repeat(row, REP);
-        flip_even_signs(&mut result, Config::CHECK_FOR_OVERFLOWS);
+        let mut result: Vec<C::Element> = repeat(row, REP, map);
+        flip_even_signs(cfg, &mut result, Config::CHECK_FOR_OVERFLOWS);
         if Config::PERMUTE_IN_PLACE {
             shuffle_seeded(&mut result, self.raa.perm_1_seed);
         } else {
             result = clone_shuffled(&result, &self.raa.perm_1);
         }
         if Config::CHECK_FOR_OVERFLOWS {
-            accumulate(&mut result);
+            accumulate(cfg, &mut result);
         } else {
-            accumulate_unchecked(&mut result);
+            accumulate_unchecked(cfg, &mut result);
         }
-        flip_even_signs(&mut result, Config::CHECK_FOR_OVERFLOWS);
+        flip_even_signs(cfg, &mut result, Config::CHECK_FOR_OVERFLOWS);
         if Config::PERMUTE_IN_PLACE {
             shuffle_seeded(&mut result, self.raa.perm_2_seed);
         } else {
             result = clone_shuffled(&result, &self.raa.perm_2);
         }
         if Config::CHECK_FOR_OVERFLOWS {
-            accumulate(&mut result);
+            accumulate(cfg, &mut result);
         } else {
-            accumulate_unchecked(&mut result);
+            accumulate_unchecked(cfg, &mut result);
         }
         debug_assert_eq!(result.len(), self.codeword_len());
         result
@@ -91,18 +85,18 @@ where
     }
 
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
-        self.encode_inner(row)
+        self.encode_inner(&FixedConfig::default(), row, Zt::Cw::from_ref)
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner(row)
+        self.encode_inner(&FixedConfig::default(), row, |v| v.clone())
     }
 
-    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
+    fn encode_f<C>(&self, cfg: &C, row: &[C::Element]) -> Vec<C::Element>
     where
-        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>,
+        C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
     {
-        self.encode_inner(row)
+        self.encode_inner(cfg, row, |v| v.clone())
     }
 }
 
@@ -131,35 +125,13 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Eq
 {
 }
 
-/// Flip every other entry in the codeword, starting from the second one.
-fn flip_even_signs<Out>(result: &mut [Out], check_for_overflows: bool)
-where
-    Out: Neg<Output = Out> + CheckedNeg + Clone,
-{
-    if check_for_overflows {
-        flip_even_signs_checked(result);
-    } else {
-        flip_even_signs_unchecked(result);
-    }
-}
-
-fn flip_even_signs_checked<Out>(result: &mut [Out])
-where
-    Out: CheckedNeg + Clone,
-{
+fn flip_even_signs<C: RingConfig>(cfg: &C, result: &mut [C::Element], check_for_overflows: bool) {
     // Flip every other entry in the codeword
     for i in (1..result.len()).step_by(2) {
-        result[i] = neg!(result[i]);
-    }
-}
-
-/// Flip every other entry in the codeword, starting from the second one.
-fn flip_even_signs_unchecked<Out>(result: &mut [Out])
-where
-    Out: Neg<Output = Out> + Clone,
-{
-    // Flip every other entry in the codeword
-    for i in (1..result.len()).step_by(2) {
-        result[i] = result[i].clone().neg();
+        if check_for_overflows {
+            result[i] = cfg.checked_neg(&result[i]).expect("Negation overflow");
+        } else {
+            cfg.neg_assign(&mut result[i]);
+        }
     }
 }

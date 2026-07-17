@@ -7,34 +7,30 @@ mod octet_reversal;
 pub mod params;
 
 use itertools::Itertools;
-use num_traits::{CheckedAdd, CheckedMul};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::{array, fmt::Debug, ops::Add};
-use zinc_utils::{add, cfg_chunks_mut, cfg_into_iter, from_ref::FromRef};
+use std::{array, fmt::Debug};
+use zinc_utils::{cfg_chunks_mut, cfg_into_iter};
 
 use butterfly::*;
 use octet_reversal::*;
 use params::*;
 
 /// The main entrypoint of the radix-8 pseudo NTT algorithm.
-pub(crate) fn pntt<In, Out, C, const CHECK: bool>(
+///
+/// All arithmetic on the output type is provided by the caller.
+pub(crate) fn pntt<In, Out, C>(
     input: &[In],
     params: &Radix8PnttParams<C>,
+    map_to_out: impl Fn(&In) -> Out + Copy + Sync,
     mul_in_by_twiddle: impl Fn(&In, &PnttInt) -> Out + Copy + Sync,
     mul_out_by_twiddle: impl Fn(&Out, &PnttInt) -> Out + Copy + Sync,
+    add_out: impl Fn(Out, &Out) -> Out + Copy + Sync,
 ) -> Vec<Out>
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: CheckedAdd
-        + CheckedMul
-        + FromRef<In>
-        + Clone
-        + Send
-        + Sync
-        + Debug
-        + for<'a> Add<&'a Out, Output = Out>,
+    Out: Clone + Send + Sync + Debug,
 {
     assert_eq!(
         params.row_len,
@@ -44,9 +40,10 @@ where
         input.len()
     );
 
-    let mut output = base_multiply_into_output::<_, _, _, CHECK>(input, params, mul_in_by_twiddle);
+    let mut output =
+        base_multiply_into_output(input, params, map_to_out, mul_in_by_twiddle, add_out);
 
-    combine_stages::<_, _, CHECK>(&mut output, params, mul_out_by_twiddle);
+    combine_stages(&mut output, params, mul_out_by_twiddle, add_out);
 
     output
 }
@@ -55,13 +52,14 @@ where
 /// Assumes `out` contains the result of multiplications of the base chunks
 /// with the `base_matrix`.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_stages<R, C, const CHECK: bool>(
+fn combine_stages<R, C>(
     out: &mut [R],
     params: &Radix8PnttParams<C>,
     mul_by_twiddle: impl Fn(&R, &PnttInt) -> R + Copy + Sync,
+    add_out: impl Fn(R, &R) -> R + Copy + Sync,
 ) where
     C: Config,
-    R: CheckedAdd + CheckedMul + for<'a> Add<&'a R, Output = R> + Clone + Send + Sync + Debug,
+    R: Clone + Send + Sync + Debug,
 {
     for k in 0..params.depth {
         // The length of chunks in the current layer.
@@ -101,11 +99,12 @@ fn combine_stages<R, C, const CHECK: bool>(
                     .expect("We are guaranteed to have the right length here");
 
                 // Perform butterflies.
-                apply_radix_8_butterflies::<_, _, CHECK>(
+                apply_radix_8_butterflies(
                     ys,
                     &subresults,
                     &layer_twiddles[i],
                     mul_by_twiddle,
+                    add_out,
                 );
             }
         });
@@ -114,21 +113,17 @@ fn combine_stages<R, C, const CHECK: bool>(
 
 /// Allocates the output vector and performs base layer multiplications.
 #[allow(clippy::arithmetic_side_effects)]
-fn base_multiply_into_output<In, Out, C, const CHECK: bool>(
+fn base_multiply_into_output<In, Out, C>(
     input: &[In],
     params: &Radix8PnttParams<C>,
+    map_to_out: impl Fn(&In) -> Out + Copy + Sync,
     mul_by_twiddle: impl Fn(&In, &PnttInt) -> Out + Copy + Sync,
+    add_out: impl Fn(Out, &Out) -> Out + Copy + Sync,
 ) -> Vec<Out>
 where
     C: Config,
     In: Clone + Send + Sync,
-    Out: Clone
-        + CheckedAdd
-        + CheckedMul
-        + FromRef<In>
-        + Send
-        + Sync
-        + for<'a> Add<&'a Out, Output = Out>,
+    Out: Clone + Send + Sync,
 {
     cfg_into_iter!(0..params.codeword_len)
         .map(|i| {
@@ -146,14 +141,14 @@ where
             // We always know that the first column of the Vandermonde matrix
             // consists of 1's.
             params.base_matrix[row][1..].iter().enumerate().fold(
-                Out::from_ref(&input[oct_rev_chunk]),
+                map_to_out(&input[oct_rev_chunk]),
                 |acc, (col, bm_row_col)| {
                     let term = mul_by_twiddle(
                         &input[oct_rev_chunk | ((col + 1) << (3 * params.depth))],
                         bm_row_col,
                     );
 
-                    if CHECK { add!(acc, &term) } else { acc + &term }
+                    add_out(acc, &term)
                 },
             )
         })
@@ -161,12 +156,13 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::clone_on_copy)]
 mod tests {
-    #![allow(clippy::arithmetic_side_effects)]
     use ark_ff::{Field, PrimeField, Zero};
     use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-    use crypto_primitives::crypto_bigint_int::Int;
+    use crypto_primitives::{Wrapper, crypto_bigint_int::Int};
     use itertools::Itertools;
+    use num_traits::CheckedAdd;
     use octet_reversal::octet_reversal;
     use zinc_utils::{CHECKED, mul_by_scalar::MulByScalar};
 
@@ -201,9 +197,13 @@ mod tests {
         };
 
         let our_res = {
-            let output = base_multiply_into_output::<_, _, _, CHECKED>(&input, params, |a, b| {
-                a.mul_by_scalar::<CHECKED>(b).unwrap()
-            });
+            let output = base_multiply_into_output(
+                &input,
+                params,
+                |v| *v,
+                |a, b| ().mul_by_scalar::<CHECKED>(*a, b).unwrap(),
+                |a: PnttInt, b: &PnttInt| a.checked_add(*b).unwrap(),
+            );
 
             output.into_iter().map(C::Field::from).collect_vec()
         };
@@ -224,7 +224,7 @@ mod tests {
     fn pntt_against_arkworks_generic<C: Config>(params: &Radix8PnttParams<C>)
     where
         C::Field: From<PnttInt>,
-        Int<4>: From<PnttInt> + for<'a> MulByScalar<&'a PnttInt>,
+        Int<4>: From<PnttInt>,
     {
         let input: Vec<PnttInt> = (0..params.row_len)
             .map(|x| PnttInt::try_from(x).unwrap())
@@ -245,11 +245,13 @@ mod tests {
         let our_res = {
             let input: Vec<Int<4>> = input.into_iter().map(|x| x.into()).collect_vec();
 
-            let res: Vec<Int<4>> = pntt::<_, _, _, CHECKED>(
+            let res: Vec<Int<4>> = pntt(
                 &input,
                 params,
-                |a, b| a.mul_by_scalar::<CHECKED>(b).unwrap(),
-                |a, b| a.mul_by_scalar::<CHECKED>(b).unwrap(),
+                |v| v.clone(),
+                |a: &Int<4>, b| ().mul_by_scalar::<CHECKED>(*a, b).unwrap(),
+                |a: &Int<4>, b| ().mul_by_scalar::<CHECKED>(*a, b).unwrap(),
+                |a: Int<4>, b: &Int<4>| a.checked_add(b).unwrap(),
             );
 
             res.into_iter()

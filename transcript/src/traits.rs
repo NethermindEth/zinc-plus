@@ -2,14 +2,16 @@
 // Transcribable and Transcript
 //
 
-use crypto_bigint::Word;
+use crypto_bigint::{Word, modular::ConstMontyParams};
 use crypto_primitives::{
-    ConstIntSemiring, PrimeField, Semiring, WORD_FACTOR, boolean::Boolean,
-    crypto_bigint_boxed_uint::BoxedUint, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    BaseFieldConfig, ConstIntSemiring, FieldConfig, ProjectElementWithConfig, Semiring, Wrapper,
+    boolean::Boolean, crypto_bigint_boxed_uint::BoxedUint,
+    crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int,
+    crypto_bigint_monty::MontyFieldElement, crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
 use zinc_primality::PrimalityTest;
-use zinc_utils::{add, from_ref::FromRef, mul};
+use zinc_utils::{from_ref::FromRef, mul};
 
 /// Common trait for both `Transcribable` and `ConstTranscribable` to avoid code
 /// duplication in their implementations.
@@ -331,12 +333,13 @@ pub trait Transcript {
     /// current transcript state, updating it.
     fn get_challenge<T: ConstTranscribable>(&mut self) -> T;
 
-    fn get_field_challenge<F: PrimeField>(&mut self, cfg: &F::Config) -> F
+    fn get_field_challenge<C>(&mut self, cfg: &C) -> C::Element
     where
-        F::Integer: ConstTranscribable,
+        C: FieldConfig + ProjectElementWithConfig<C::Integer>,
+        C::Integer: ConstTranscribable,
     {
-        let random_inner: F::Integer = self.get_challenge();
-        F::from_with_cfg(random_inner, cfg)
+        let random_integer: C::Integer = self.get_challenge();
+        cfg.project(&random_integer)
     }
 
     /// Generates a pseudorandom transcribable values as challenges based on the
@@ -345,9 +348,10 @@ pub trait Transcript {
     //             to call in a batch because each call allocates its own buffer.
     //             It might make sense to make a separate `get_challenge_with_buf`
     //             alternative to `get_challenge`.
-    fn get_field_challenges<F: PrimeField>(&mut self, n: usize, cfg: &F::Config) -> Vec<F>
+    fn get_field_challenges<C>(&mut self, n: usize, cfg: &C) -> Vec<C::Element>
     where
-        F::Integer: ConstTranscribable,
+        C: FieldConfig + ProjectElementWithConfig<C::Integer>,
+        C::Integer: ConstTranscribable,
     {
         (0..n).map(|_| self.get_field_challenge(cfg)).collect()
     }
@@ -360,16 +364,16 @@ pub trait Transcript {
 
     fn get_prime<R: ConstIntSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R;
 
-    fn get_random_field_cfg<F, FMod, T>(&mut self) -> F::Config
+    fn get_random_field_cfg<C, FMod, T>(&mut self) -> C
     where
-        F: PrimeField,
+        C: BaseFieldConfig,
+        C::Integer: FromRef<FMod>,
         FMod: ConstTranscribable + ConstIntSemiring,
-        F::Integer: FromRef<FMod>,
         T: PrimalityTest<FMod>,
     {
         let prime = self.get_prime::<FMod, T>();
 
-        F::make_cfg(&F::Integer::from_ref(&prime)).expect("prime is guaranteed to be prime")
+        C::new(&C::Integer::from_ref(&prime)).expect("prime is guaranteed to be prime")
     }
 
     /// Absorbs a byte slice into the hash sponge.
@@ -384,22 +388,31 @@ pub trait Transcript {
         self.absorb_inner(&[0x7]);
     }
 
-    /// Absorbs a field element into the transcript.
-    fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
+    /// Absorbs a field element (its raw inner representation) into the
+    /// transcript.
+    ///
+    /// The field modulus is NOT absorbed here: it is bound into the transcript
+    /// separately, when the field is sampled.
+    fn absorb_field_element<E>(&mut self, v: &E, buf: &mut [u8])
     where
-        F: PrimeField,
-        F::Integer: Transcribable,
+        E: Transcribable,
     {
         self.absorb_inner(&[0x3]);
-        F::modulus(v.cfg()).write_transcription_bytes_exact(buf);
+        v.write_transcription_bytes_exact(buf);
         self.absorb_inner(buf);
         self.absorb_inner(&[0x5]);
+    }
 
-        self.absorb_random_int(&v.lift_to_integer(), buf);
+    /// Absorbs a slice of field element into the transcript.
+    fn absorb_field_element_slice<E>(&mut self, v: &[E], buf: &mut [u8])
+    where
+        E: Transcribable,
+    {
+        v.iter().for_each(|x| self.absorb_field_element(x, buf));
     }
 
     /// Absorbs an integer into the transcript.
-    fn absorb_random_int<S>(&mut self, v: &S, buf: &mut [u8])
+    fn absorb_int<S>(&mut self, v: &S, buf: &mut [u8])
     where
         S: Semiring + Transcribable,
     {
@@ -407,15 +420,6 @@ pub trait Transcript {
         v.write_transcription_bytes_exact(buf);
         self.absorb_inner(buf);
         self.absorb_inner(&[0x3])
-    }
-
-    /// Absorbs a slice of field element into the transcript.
-    fn absorb_random_field_slice<F>(&mut self, v: &[F], buf: &mut [u8])
-    where
-        F: PrimeField,
-        F::Integer: Transcribable,
-    {
-        v.iter().for_each(|x| self.absorb_random_field(x, buf));
     }
 }
 
@@ -467,7 +471,7 @@ impl<const LIMBS: usize> GenTranscribable for Uint<LIMBS> {
         // crypto_bigint::Uint stores limbs in least-to-most significant order.
         // It matches little-endian order ef limbs encoding, so platform pointer width
         // does not matter.
-        let (chunked, rem) = bytes.as_chunks::<{ 8 / WORD_FACTOR }>();
+        let (chunked, rem) = bytes.as_chunks::<{ Word::NUM_BYTES }>();
         assert!(rem.is_empty(), "Invalid byte slice length for Uint");
         let words = chunked
             .iter()
@@ -493,7 +497,7 @@ impl<const LIMBS: usize> GenTranscribable for Uint<LIMBS> {
 }
 
 impl<const LIMBS: usize> ConstTranscribable for Uint<LIMBS> {
-    const NUM_BYTES: usize = 8 * LIMBS / WORD_FACTOR;
+    const NUM_BYTES: usize = LIMBS * Word::NUM_BYTES;
 }
 
 impl<const LIMBS: usize> GenTranscribable for Int<LIMBS> {
@@ -515,7 +519,7 @@ impl GenTranscribable for BoxedUint {
         // crypto_bigint::BoxedUint stores limbs in least-to-most significant order.
         // It matches little-endian order ef limbs encoding, so platform pointer width
         // does not matter.
-        let (chunked, rem) = bytes.as_chunks::<{ 8 / WORD_FACTOR }>();
+        let (chunked, rem) = bytes.as_chunks::<{ Word::NUM_BYTES }>();
         assert!(rem.is_empty(), "Invalid byte slice length for BoxedUint");
         let words = chunked
             .iter()
@@ -557,46 +561,59 @@ impl Transcribable for BoxedUint {
     }
 }
 
-impl<F> GenTranscribable for Vec<F>
-where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
+// Field elements are transcribed as their raw inner representations: the
+// field config is bound into the transcript separately, when the field is
+// sampled, so no modulus rides along with the elements.
+delegate_const_transcribable!(MontyFieldElement<const LIMBS: usize>(Uint<LIMBS>));
+
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> GenTranscribable
+    for ConstMontyField<Mod, LIMBS>
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
-        if bytes.is_empty() {
-            return Vec::new();
-        }
-        let mod_size = F::Integer::NUM_BYTES;
-        let cfg = super::read_field_cfg::<F>(&bytes[..mod_size]);
-        super::read_field_vec_with_cfg(&bytes[mod_size..], &cfg)
+        Self::new_unchecked(Uint::<LIMBS>::read_transcription_bytes_exact(bytes))
     }
 
     fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
-        if self.is_empty() {
-            return;
-        }
-        let buf = super::append_field_cfg::<F>(buf, &F::modulus(self[0].cfg()));
-        let buf = super::append_field_vec_lifted(buf, self);
-        assert!(
-            buf.is_empty(),
-            "Buffer size mismatch for Vec<F> transcription"
-        );
+        self.inner().write_transcription_bytes_exact(buf)
     }
 }
 
-impl<F> Transcribable for Vec<F>
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstTranscribable
+    for ConstMontyField<Mod, LIMBS>
+{
+    const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
+}
+
+impl<T> GenTranscribable for Vec<T>
 where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
+    T: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let chunks = bytes.chunks_exact(T::NUM_BYTES);
+        assert!(
+            chunks.remainder().is_empty(),
+            "Invalid byte slice length for Vec transcription"
+        );
+        chunks.map(T::read_transcription_bytes_exact).collect()
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        assert_eq!(
+            buf.len(),
+            mul!(self.len(), T::NUM_BYTES),
+            "Buffer size mismatch for Vec transcription"
+        );
+        for (elem, chunk) in self.iter().zip(buf.chunks_exact_mut(T::NUM_BYTES)) {
+            elem.write_transcription_bytes_exact(chunk);
+        }
+    }
+}
+
+impl<T> Transcribable for Vec<T>
+where
+    T: ConstTranscribable,
 {
     fn get_num_bytes(&self) -> usize {
-        if self.is_empty() {
-            0
-        } else {
-            add!(
-                F::Integer::NUM_BYTES,
-                mul!(self.len(), F::Integer::NUM_BYTES)
-            )
-        }
+        mul!(self.len(), T::NUM_BYTES)
     }
 }

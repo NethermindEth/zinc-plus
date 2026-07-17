@@ -2,12 +2,12 @@
 
 use std::slice;
 
-use crypto_primitives::PrimeField;
+use crypto_primitives::{SemiringConfig, SetConfig};
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtension};
 use zinc_transcript::{delegate_transcribable, traits::ConstTranscribable};
-use zinc_utils::{cfg_into_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_into_iter, cfg_iter_mut};
 
 /// Evaluation of a polynomial on natural points without the constant term.
 #[repr(transparent)]
@@ -38,22 +38,22 @@ impl<F> std::ops::DerefMut for NatEvaluatedPolyWithoutConstant<F> {
 }
 
 delegate_transcribable!(NatEvaluatedPolyWithoutConstant<F> { tail_evaluations: Vec<F> }
-    where F: PrimeField, F::Integer: ConstTranscribable);
+    where F: ConstTranscribable);
 
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProverMsg<F>(pub NatEvaluatedPolyWithoutConstant<F>);
 
 delegate_transcribable!(ProverMsg<F>(NatEvaluatedPolyWithoutConstant<F>)
-    where F: PrimeField, F::Integer: ConstTranscribable);
+    where F: ConstTranscribable);
 
-/// Sumcheck Prover State.
-pub struct ProverState<F: PrimeField> {
+/// Sumcheck Prover State, generic over the field config `C`.
+pub struct ProverState<C: SetConfig> {
     /// Sampled randomness given by the verifier.
-    pub randomness: Vec<F>,
+    pub randomness: Vec<C::Element>,
     /// Stores the list of multilinear extensions
     /// the sumcheck polynomial is comprised of.
-    pub mles: Vec<DenseMultilinearExtension<F::Inner>>,
+    pub mles: Vec<DenseMultilinearExtension<C::Element>>,
     /// Number of variables.
     pub num_vars: usize,
     /// Max degree.
@@ -61,20 +61,20 @@ pub struct ProverState<F: PrimeField> {
     /// The current round number.
     pub round: usize,
     /// Claimed sum for the first round polynomial.
-    pub asserted_sum: Option<F>,
+    pub asserted_sum: Option<C::Element>,
     /// When `true`, the next [`Self::prove_round`] invocation pushes the
     /// verifier challenge into `randomness` but skips the
-    /// `fix_variables_with_config` fold of `mles`. Used by round-1 fast
+    /// `fix_variables` fold of `mles`. Used by round-1 fast
     /// paths (see that pre-fold the MLEs as part of their setup.
     /// The flag is reset to `false` after the skipped fold.
     pub skip_next_fold: bool,
 }
 
-impl<F: PrimeField> ProverState<F> {
+impl<C: SetConfig> ProverState<C> {
     /// Initialize the prover to argue for the sum of products of
     /// MLE's in {0,1}^`num_vars`.
     pub fn new(
-        mles: Vec<DenseMultilinearExtension<F::Inner>>,
+        mles: Vec<DenseMultilinearExtension<C::Element>>,
         nvars: usize,
         degree: usize,
     ) -> Self {
@@ -90,10 +90,7 @@ impl<F: PrimeField> ProverState<F> {
     }
 }
 
-impl<F> ProverState<F>
-where
-    F: InnerTransparentField,
-{
+impl<C: SemiringConfig> ProverState<C> {
     /// Receive message from verifier, generate prover message, and proceed to
     /// next round.
     ///
@@ -102,10 +99,10 @@ where
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove_round(
         &mut self,
-        v_msg: &Option<F>,
-        comb_fn: impl Fn(&[F]) -> F + Send + Sync,
-        config: &F::Config,
-    ) -> ProverMsg<F> {
+        v_msg: &Option<C::Element>,
+        comb_fn: impl Fn(&[C::Element]) -> C::Element + Send + Sync,
+        config: &C,
+    ) -> ProverMsg<C::Element> {
         if let Some(msg) = v_msg {
             if self.round == 0 {
                 panic!("first round should be prover first.");
@@ -121,7 +118,7 @@ where
                 let r = self.randomness[i - 1].clone();
 
                 cfg_iter_mut!(self.mles).for_each(|multiplicand| {
-                    multiplicand.fix_variables_with_config(slice::from_ref(&r), config);
+                    multiplicand.fix_variables(config, slice::from_ref(&r));
                 });
             }
         } else if self.round > 0 {
@@ -148,7 +145,7 @@ where
             vals: Vec<R>,
             levals: Vec<R>,
         }
-        let zero = F::zero_with_cfg(config);
+        let zero = config.zero();
         let zero_vec_deg = vec![zero.clone(); degree + 1];
         let zero_vec_poly = vec![zero.clone(); polys.len()];
         let scratch = || Scratch {
@@ -183,24 +180,24 @@ where
             s.vals0
                 .iter_mut()
                 .zip(polys.iter())
-                .for_each(|(v0, poly)| *v0.inner_mut() = poly[index].clone());
+                .for_each(|(v0, poly)| *v0 = poly[index].clone());
             s.levals[0] = comb_fn(&s.vals0);
 
             if degree > 0 {
                 s.vals1
                     .iter_mut()
                     .zip(polys.iter())
-                    .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
+                    .for_each(|(v1, poly)| *v1 = poly[index + 1].clone());
                 s.levals[1] = comb_fn(&s.vals1);
 
                 for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {
-                    s.steps[i] = v1.clone() - v0.clone();
+                    s.steps[i] = config.sub(v1, v0);
                     s.vals[i] = v1.clone();
                 }
 
                 for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
                     for poly_i in 0..polys.len() {
-                        s.vals[poly_i] += &s.steps[poly_i];
+                        config.add_assign(&mut s.vals[poly_i], &s.steps[poly_i]);
                     }
                     *eval_point = comb_fn(&s.vals);
                 }
@@ -214,7 +211,7 @@ where
             s.evals
                 .iter_mut()
                 .zip(s.levals.iter())
-                .for_each(|(e, l)| *e += l);
+                .for_each(|(e, l)| config.add_assign(e, l));
 
             s
         });
@@ -227,7 +224,7 @@ where
                 evaluations
                     .iter_mut()
                     .zip(evals)
-                    .for_each(|(e, l)| *e += &l);
+                    .for_each(|(e, l)| config.add_assign(e, &l));
                 evaluations
             },
         );
@@ -241,10 +238,10 @@ where
                 .first()
                 .expect("evaluations should always contain the constant term");
             let sum = if degree > 0 {
-                p0.clone()
-                    + evaluations
-                        .get(1)
-                        .expect("degree > 0 implies evaluation at 1 is present")
+                let eval = evaluations
+                    .get(1)
+                    .expect("degree > 0 implies evaluation at 1 is present");
+                config.add(p0, eval)
             } else {
                 p0.clone()
             };

@@ -1,21 +1,28 @@
-#![allow(clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_copy,
+    clippy::redundant_clone
+)]
 
 use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use crypto_primitives::{
-    FromWithConfig, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    ProjectElementWithConfig, SemiringConfig,
+    crypto_bigint_monty::{MontyField, MontyFieldElement},
+    crypto_bigint_uint::Uint,
 };
 use rand::prelude::*;
 use zinc_piop::multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs};
 
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_primality::MillerRabin;
 use zinc_transcript::{Blake3Transcript, traits::Transcript};
 use zinc_uair::ShiftSpec;
 
 const FIELD_LIMBS: usize = 4;
 type F = MontyField<FIELD_LIMBS>;
+type E = MontyFieldElement<FIELD_LIMBS>;
 
 fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let mut rng = rand::rng();
@@ -24,29 +31,29 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
 
     let mut transcript = Blake3Transcript::new();
     let field_cfg = transcript.get_random_field_cfg::<F, Uint<FIELD_LIMBS>, MillerRabin>();
-    let zero_inner = F::from_with_cfg(0u32, &field_cfg).into_inner();
+    let zero = field_cfg.zero();
 
     // Build random trace MLEs.
     let trace_mles: Vec<DenseMultilinearExtension<_>> = (0..num_cols)
         .map(|_| {
             let evals: Vec<_> = (0..n)
-                .map(|_| F::from_with_cfg(rng.random::<u32>(), &field_cfg).into_inner())
+                .map(|_| field_cfg.project(&rng.random::<u32>()))
                 .collect();
-            DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero_inner)
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero.clone())
         })
         .collect();
 
     // Random evaluation point.
-    let eval_point: Vec<F> = (0..num_vars)
-        .map(|_| F::from_with_cfg(rng.random::<u32>(), &field_cfg))
+    let eval_point: Vec<E> = (0..num_vars)
+        .map(|_| field_cfg.project(&rng.random::<u32>()))
         .collect();
 
     // Compute up_evals = v_j(r').
-    let up_evals: Vec<F> = trace_mles
+    let up_evals: Vec<E> = trace_mles
         .iter()
         .map(|mle| {
             mle.clone()
-                .evaluate_with_config(&eval_point, &field_cfg)
+                .evaluate(&field_cfg, &eval_point)
                 .expect("up_eval evaluation failed")
         })
         .collect();
@@ -55,17 +62,17 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let shifts: Vec<ShiftSpec> = (0..num_cols).map(|i| ShiftSpec::new(i, 1)).collect();
 
     // Compute down_evals = v_j^{down}(r') (shift by one position).
-    let down_evals: Vec<F> = shifts
+    let down_evals: Vec<E> = shifts
         .iter()
         .map(|spec| {
             let mle = &trace_mles[spec.source_col()];
             let c = spec.shift_amount();
             let mut shifted = mle.evaluations[c..].to_vec();
-            shifted.extend(vec![zero_inner; c]);
+            shifted.extend(vec![zero.clone(); c]);
             let shifted_mle =
-                DenseMultilinearExtension::from_evaluations_vec(num_vars, shifted, zero_inner);
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, shifted, zero.clone());
             shifted_mle
-                .evaluate_with_config(&eval_point, &field_cfg)
+                .evaluate(&field_cfg, &eval_point)
                 .expect("down_eval evaluation failed")
         })
         .collect();
@@ -124,11 +131,11 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     .expect("prover failed");
     let (proof, prover_state) = prover_outputs.pop().expect("single family");
 
-    let open_evals: Vec<F> = trace_mles
+    let open_evals: Vec<E> = trace_mles
         .iter()
         .map(|mle| {
             mle.clone()
-                .evaluate_with_config(&prover_state.eval_point, &field_cfg)
+                .evaluate(&field_cfg, &prover_state.eval_point)
                 .expect("open_eval evaluation failed")
         })
         .collect();

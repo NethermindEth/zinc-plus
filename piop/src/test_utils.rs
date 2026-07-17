@@ -7,24 +7,27 @@ use crate::{
         project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
 };
-use crypto_bigint::{Odd, modular::FixedMontyParams};
-use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
+use crypto_primitives::{
+    BaseFieldConfig, ProjectElementWithConfig,
+    crypto_bigint_int::Int,
+    crypto_bigint_monty::{MontyField, MontyFieldElement},
+    crypto_bigint_uint::Uint,
+};
+use zinc_poly::univariate::{dense::DensePolynomial, dynamic::DynamicPolynomial};
 use zinc_test_uair::GenerateRandomTrace;
 use zinc_transcript::traits::Transcript;
 use zinc_uair::{Uair, UairTrace, constraint_counter::count_constraints};
 
 pub const LIMBS: usize = 4;
 
-pub fn test_config() -> FixedMontyParams<LIMBS> {
-    let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
-        "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
-    );
-    let modulus = Odd::new(modulus).expect("modulus should be odd");
-    FixedMontyParams::new(modulus)
+pub fn test_config() -> MontyField<LIMBS> {
+    let modulus =
+        Uint::from_be_hex("0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33");
+    MontyField::new(&modulus).expect("modulus should be a valid odd prime")
 }
 
 type F = MontyField<4>;
+type E = MontyFieldElement<4>;
 
 /// Run ideal check prover using MLE-first approach (for linear constraints).
 /// Uses column-indexed trace.
@@ -34,15 +37,14 @@ pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     prime_idx: Option<usize>,
     transcript: &mut impl Transcript,
 ) -> (
-    IdealCheckProof<F>,
-    Vec<F>,
-    ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-    ColumnMajorTrace<F>,
+    IdealCheckProof<E>,
+    Vec<E>,
+    ProjectedScalars<U::Scalar, DynamicPolynomial<E>>,
+    ColumnMajorTrace<E>,
 )
 where
     U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
         + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>,
-    F: FromWithConfig<Int<5>>,
 {
     // These helpers intentionally accept mixed-type signatures. The projection
     // layer handles binary_poly, arbitrary_poly, and int columns uniformly, and
@@ -55,16 +57,16 @@ where
         .unwrap_or(num_constraints.q);
     let family_idx = prime_idx.map_or(0, |i| i + 1);
 
-    let scalars = project_scalars::<F, U>(|scalar| {
+    let scalars = project_scalars::<F, U>(&field_cfg, |scalar| {
         scalar
             .iter()
-            .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+            .map(|coeff| field_cfg.project(coeff))
             .collect()
     });
 
-    let trace: ColumnMajorTrace<F> = project_trace_coeffs_column_major(trace, &field_cfg);
+    let trace: ColumnMajorTrace<E> = project_trace_coeffs_column_major(trace, &field_cfg);
 
-    let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, &field_cfg);
+    let evaluation_point: Vec<E> = transcript.get_field_challenges(num_vars, &field_cfg);
 
     let proof = IdealCheckProtocol::<U>::prove_mle_first::<_, DEGREE_PLUS_ONE>(
         transcript,
@@ -88,15 +90,14 @@ pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     prime_idx: Option<usize>,
     transcript: &mut impl Transcript,
 ) -> (
-    IdealCheckProof<F>,
-    Vec<F>,
-    ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-    RowMajorTrace<F>,
+    IdealCheckProof<E>,
+    Vec<E>,
+    ProjectedScalars<U::Scalar, DynamicPolynomial<E>>,
+    RowMajorTrace<E>,
 )
 where
     U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
         + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>,
-    F: FromWithConfig<Int<5>>,
 {
     // These helpers intentionally accept mixed-type signatures. The projection
     // layer handles binary_poly, arbitrary_poly, and int columns uniformly, and
@@ -109,16 +110,16 @@ where
         .unwrap_or(num_constraints.q);
     let family_idx = prime_idx.map_or(0, |i| i + 1);
 
-    let scalars = project_scalars::<F, U>(|scalar| {
+    let scalars = project_scalars::<F, U>(&field_cfg, |scalar| {
         scalar
             .iter()
-            .map(|coeff| F::from_with_cfg(coeff, &field_cfg))
+            .map(|coeff| field_cfg.project(coeff))
             .collect()
     });
 
-    let trace: RowMajorTrace<F> = project_trace_coeffs_row_major(trace, &field_cfg);
+    let trace: RowMajorTrace<E> = project_trace_coeffs_row_major(trace, &field_cfg);
 
-    let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, &field_cfg);
+    let evaluation_point: Vec<E> = transcript.get_field_challenges(num_vars, &field_cfg);
 
     let proof = IdealCheckProtocol::<U>::prove_combined::<_, DEGREE_PLUS_ONE>(
         transcript,

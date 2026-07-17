@@ -1,37 +1,38 @@
 #![allow(non_local_definitions)]
 #![allow(clippy::eq_op)]
 
-use std::{hint::black_box, ops::Mul};
+use std::hint::black_box;
 
 use criterion::{
     AxisScale, BatchSize, BenchmarkGroup, BenchmarkId, Criterion, PlotConfiguration,
     criterion_group, criterion_main, measurement::WallTime,
 };
 use crypto_primitives::{
-    ConstIntSemiring, Field, FromPrimitiveWithConfig, crypto_bigint_monty::MontyField,
+    BaseFieldConfig, ConstIntSemiring, ProjectPrimitiveIntegersWithConfig,
+    crypto_bigint_monty::MontyField,
 };
 use num_traits::Zero;
 use rand::prelude::*;
 use zinc_piop::random_field_sumcheck::{RFSumcheck, RFSumcheckProof};
 use zinc_poly::{
-    mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r_inner,
+    mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r,
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_transcript::{
     Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
-use zinc_utils::{from_ref::FromRef, inner_transparent_field::InnerTransparentField};
+use zinc_utils::from_ref::FromRef;
 
 #[allow(clippy::arithmetic_side_effects)]
-pub fn bench_simple_product<F, const LIMBS: usize>(
+pub fn bench_simple_product<C, const LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) where
-    F: FromPrimitiveWithConfig + InnerTransparentField + FromRef<F> + 'static,
-    F::Integer: FromRef<F::Integer> + ConstTranscribable + ConstIntSemiring,
-    MillerRabin: PrimalityTest<F::Integer>,
-    for<'a> &'a F: Mul<&'a F, Output = F>,
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
+    C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable + ConstIntSemiring + FromRef<C::Integer>,
+    MillerRabin: PrimalityTest<C::Integer>,
 {
     let mut rng = rand::rng();
     let a: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
@@ -65,19 +66,30 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
 
     let transcript = Blake3Transcript::new();
 
-    let prove = |(a, b, c, mut transcript): (_, _, _, Blake3Transcript)| -> RFSumcheckProof<F, BinaryPoly<32>> {
-        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Integer, MillerRabin>();
+    let prove = |(a, b, c, mut transcript): (
+        _,
+        _,
+        _,
+        Blake3Transcript,
+    )|
+     -> RFSumcheckProof<C::Element, BinaryPoly<32>> {
+        let field_cfg = transcript.get_random_field_cfg::<C, C::Integer, MillerRabin>();
 
-        let eq_r = build_eq_x_r_inner(&vec![F::from_with_cfg(2u32, &field_cfg); nvars], &field_cfg)
+        let eq_r = build_eq_x_r(&field_cfg, &vec![field_cfg.project(&2u32); nvars])
             .expect("Failed to build eq_r");
 
-        (RFSumcheck::<F, _>::prove_as_subprotocol(
+        (RFSumcheck::<C, _>::prove_as_subprotocol(
             &mut transcript,
             vec![a, b, c],
             vec![eq_r],
             nvars,
             3,
-            |_x, vals| (&vals[0] * &vals[1] - &vals[2]) * &vals[3],
+            |_x, vals| {
+                field_cfg.mul(
+                    &field_cfg.sub(&field_cfg.mul(&vals[0], &vals[1]), &vals[2]),
+                    &vals[3],
+                )
+            },
             &field_cfg,
         ))
         .0
@@ -106,11 +118,10 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
-                    let field_cfg =
-                        transcript.get_random_field_cfg::<F, <F as Field>::Integer, MillerRabin>();
+                    let field_cfg = transcript.get_random_field_cfg::<C, C::Integer, MillerRabin>();
 
                     let _ = black_box(
-                        RFSumcheck::<F, _>::verify_as_subprotocol(
+                        RFSumcheck::<C, _>::verify_as_subprotocol(
                             &mut transcript,
                             nvars,
                             3,

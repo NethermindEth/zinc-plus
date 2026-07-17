@@ -2,23 +2,18 @@
 use rayon::prelude::*;
 
 use crate::projections::{ColumnMajorTrace, ProjectedScalars, RowMajorTrace};
-use crypto_primitives::{PrimeField, Semiring};
-use num_traits::Zero;
+use crypto_primitives::{BaseFieldConfig, Semiring, SemiringConfig, SetElement};
 use zinc_poly::{
     EvaluationError,
-    mle::{
-        DenseMultilinearExtension, MultilinearExtensionWithConfig, dense::CollectDenseMleWithZero,
-    },
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
+    univariate::dynamic::{DynamicPolynomial, HasDynamicPolynomialConfig},
     utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
 };
 use zinc_uair::{
     ColumnLayout, ConstraintBuilder, ShiftSpec, TraceRow, Uair, UairSignature,
     ideal::ImpossibleIdeal,
 };
-use zinc_utils::{
-    add, cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
-};
+use zinc_utils::{add, cfg_into_iter, cfg_iter, from_ref::FromRef};
 
 /// Evaluate combined polynomial MLEs at `evaluation_point` for a selected
 /// subset of constraints ($Q[X]$ or $F_{q_i}[X]$).
@@ -38,20 +33,20 @@ use zinc_utils::{
 ///
 /// `trace_matrix` is row-indexed: `trace_matrix[row][col]`.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn evaluate_for_constraints<F, U, const DEGREE_PLUS_ONE: usize>(
-    trace_matrix: &RowMajorTrace<F>,
-    projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+pub fn evaluate_for_constraints<C, U, const DEGREE_PLUS_ONE: usize>(
+    trace_matrix: &RowMajorTrace<C::Element>,
+    projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomial<C::Element>>,
     family_idx: usize,
     num_constraints: usize,
-    field_cfg: &F::Config,
+    field_cfg: &C,
     constraint_indices: &[usize],
-    evaluation_point: &[F],
-) -> Result<Vec<DynamicPolynomialF<F>>, PolyArithErrors>
+    evaluation_point: &[C::Element],
+) -> Result<Vec<DynamicPolynomial<C::Element>>, PolyArithErrors>
 where
-    F: InnerTransparentField,
+    C: BaseFieldConfig,
     U: Uair,
 {
-    let field_zero = F::zero_with_cfg(field_cfg);
+    let poly_cfg = field_cfg.dyn_poly_cfg();
     let uair_sig = U::signature();
     let down_layout = uair_sig.down_cols().as_column_layout();
 
@@ -67,7 +62,7 @@ where
     // the combined polynomial value of constraint `constraint_idx` at
     // trace row `row_idx`.
     let bit_op_down_offset = bit_op_down_offset(&uair_sig);
-    let mut all_rows: Vec<Vec<DynamicPolynomialF<F>>> = cfg_into_iter!(0..num_rows - 1)
+    let mut all_rows: Vec<Vec<DynamicPolynomial<_>>> = cfg_into_iter!(0..num_rows - 1)
         .map(|row_idx| {
             let up = &trace_matrix[row_idx];
 
@@ -77,7 +72,7 @@ where
             // virtuals into the binary_poly slice keeps `down` consistent
             // with `down_layout`; appending at the tail would misalign
             // constraints on mixed-type shift UAIRs.
-            let mut down: Vec<DynamicPolynomialF<F>> =
+            let mut down: Vec<DynamicPolynomial<C::Element>> =
                 Vec::with_capacity(uair_sig.shifts().len() + uair_sig.bit_op_specs().len());
 
             let shifts = uair_sig.shifts();
@@ -87,14 +82,15 @@ where
 
             for spec in uair_sig.bit_op_specs() {
                 let source = &trace_matrix[row_idx][spec.source_col()];
-                down.push(spec.op().transform::<F, DEGREE_PLUS_ONE>(source, field_cfg));
+                down.push(spec.op().transform::<C, DEGREE_PLUS_ONE>(source, field_cfg));
             }
 
             for spec in &shifts[bit_op_down_offset..] {
                 push_shifted_down_entry(&mut down, trace_matrix, row_idx, num_rows, spec);
             }
 
-            evaluate_constraints_for_row::<F, U>(
+            evaluate_constraints_for_row::<C, U>(
+                field_cfg,
                 up,
                 &down,
                 family_idx,
@@ -107,7 +103,7 @@ where
 
     // Zero-pad to 2^num_vars evaluations for the MLE.
     // TODO(Ilia): reimplement using Albert's idea with selector polynomials.
-    all_rows.push(vec![DynamicPolynomialF::zero(); num_constraints]);
+    all_rows.push(vec![DynamicPolynomial::ZERO; num_constraints]);
 
     // Determine the maximum polynomial degree across the selected
     // constraints and all rows.  This controls how many coefficient MLEs
@@ -117,12 +113,12 @@ where
         .flat_map(|row| {
             constraint_indices
                 .iter()
-                .map(|&ci| row[ci].degree().unwrap_or(0))
+                .map(|&ci| poly_cfg.degree(&row[ci]).unwrap_or(0))
         })
         .max()
         .unwrap_or(0);
 
-    let zero_inner = field_zero.inner();
+    let field_zero = field_cfg.zero();
 
     // For each selected constraint, build its coefficient MLEs.
     //
@@ -131,7 +127,7 @@ where
     //
     // For a fixed coefficient index `coeff`, the MLE is the multilinear
     // extension of the table  b -> c_coeff(b)  over the Boolean hypercube.
-    let coeff_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
+    let coeff_mles: Vec<Vec<DenseMultilinearExtension<C::Element>>> =
         cfg_into_iter!(0..constraint_indices.len())
             .map(|sel_idx| {
                 let ci = constraint_indices[sel_idx];
@@ -143,10 +139,10 @@ where
                                 row[ci]
                                     .coeffs
                                     .get(coeff)
-                                    .map(|c| c.inner().clone())
-                                    .unwrap_or_else(|| zero_inner.clone())
+                                    .cloned()
+                                    .unwrap_or_else(|| field_zero.clone())
                             })
-                            .collect_dense_mle_with_zero(zero_inner)
+                            .collect_dense_mle_with_zero(&field_zero)
                     })
                     .collect()
             })
@@ -158,17 +154,17 @@ where
     // is a single inner product.  Reassembling the per-coefficient results
     // gives the univariate  sum_b eq(r, b) * c(b, X)  for each selected
     // constraint.
-    let eq_table = build_eq_x_r_vec(evaluation_point, field_cfg)?;
+    let eq_table = build_eq_x_r_vec(field_cfg, evaluation_point)?;
 
-    let values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(coeff_mles)
+    let values: Vec<DynamicPolynomial<C::Element>> = cfg_into_iter!(coeff_mles)
         .map(|mles| {
-            let coeffs: Vec<F> = mles
+            let coeffs: Vec<C::Element> = mles
                 .into_iter()
                 .map(|mle| {
-                    zinc_poly::utils::mle_eval_with_eq_table(&mle.evaluations, &eq_table, field_cfg)
+                    zinc_poly::utils::mle_eval_with_eq_table(field_cfg, &mle.evaluations, &eq_table)
                 })
                 .collect();
-            DynamicPolynomialF::new_trimmed(coeffs)
+            poly_cfg.new_trimmed(coeffs)
         })
         .collect();
 
@@ -178,19 +174,21 @@ where
 /// Evaluate all UAIR constraints of the given family for a single row and
 /// return trimmed results.
 #[allow(clippy::arithmetic_side_effects)]
-fn evaluate_constraints_for_row<F, U>(
-    up: &[DynamicPolynomialF<F>],
-    down: &[DynamicPolynomialF<F>],
+fn evaluate_constraints_for_row<C, U>(
+    field_cfg: &C,
+    up: &[DynamicPolynomial<C::Element>],
+    down: &[DynamicPolynomial<C::Element>],
     family_idx: usize,
     num_constraints: usize,
-    projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+    projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomial<C::Element>>,
     down_layout: &ColumnLayout,
-) -> Vec<DynamicPolynomialF<F>>
+) -> Vec<DynamicPolynomial<C::Element>>
 where
-    F: PrimeField,
+    C: SemiringConfig,
     U: Uair,
 {
     let mut constraint_builder = CombinedPolyRowBuilder::new(family_idx, num_constraints);
+    let poly_cfg = field_cfg.dyn_poly_cfg();
 
     let project = |x: &U::Scalar| {
         projected_scalars
@@ -200,16 +198,19 @@ where
 
     U::constrain_general(
         &mut constraint_builder,
+        &poly_cfg,
         TraceRow::from_slice_with_layout(up, U::signature().total_cols().as_column_layout()),
         TraceRow::from_slice_with_layout(down, down_layout),
         &project,
-        |x, y| Some(project(y) * x),
+        |x, y| Some(poly_cfg.mul(x, &project(y))),
         ImpossibleIdeal::from_ref,
         ImpossibleIdeal::from_ref,
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
-    combined_evaluations.iter_mut().for_each(|eval| eval.trim());
+    combined_evaluations
+        .iter_mut()
+        .for_each(|eval| poly_cfg.trim(eval));
     combined_evaluations
 }
 
@@ -237,20 +238,20 @@ where
 /// Does `(num_columns + num_shifted_columns) * max_num_coeffs` evaluations of
 /// MLEs.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn evaluate_combined_polynomials<F, U, const DEGREE_PLUS_ONE: usize>(
-    trace_matrix: &ColumnMajorTrace<F>,
-    projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+pub fn evaluate_combined_polynomials<C, U, const DEGREE_PLUS_ONE: usize>(
+    trace_matrix: &ColumnMajorTrace<C::Element>,
+    projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomial<C::Element>>,
     family_idx: usize,
     num_constraints: usize,
-    evaluation_point: &[F],
-    field_cfg: &F::Config,
-) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+    evaluation_point: &[C::Element],
+    field_cfg: &C,
+) -> Result<Vec<DynamicPolynomial<C::Element>>, EvaluationError>
 where
-    F: InnerTransparentField,
+    C: BaseFieldConfig,
     U: Uair,
 {
-    let field_zero = F::zero_with_cfg(field_cfg);
-    let zero_inner = field_zero.inner().clone();
+    let poly_cfg = field_cfg.dyn_poly_cfg();
+    let field_zero = field_cfg.zero();
     let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
     let num_vars = evaluation_point.len();
 
@@ -267,11 +268,11 @@ where
 
     // Helper: evaluate one column's coefficient-d MLE at `evaluation_point`,
     // reading row `i + shift` (zero-padded beyond trace length).
-    let eval_coeff_mle = |col: &DenseMultilinearExtension<DynamicPolynomialF<F>>,
+    let eval_coeff_mle = |col: &DenseMultilinearExtension<DynamicPolynomial<C::Element>>,
                           d: usize,
                           shift: usize|
-     -> Result<F, EvaluationError> {
-        let coeff_evals: Vec<F::Inner> = (0..num_rows)
+     -> Result<C::Element, EvaluationError> {
+        let coeff_evals: Vec<C::Element> = (0..num_rows)
             .map(|i| {
                 // Two conditions needed:
                 // 1. i < num_rows - 1: zero out the last row for all columns (both up and down)
@@ -281,10 +282,10 @@ where
                     col.evaluations[i + shift]
                         .coeffs
                         .get(d)
-                        .map(|c| c.inner().clone())
-                        .unwrap_or_else(|| zero_inner.clone())
+                        .cloned()
+                        .unwrap_or_else(|| field_zero.clone())
                 } else {
-                    zero_inner.clone()
+                    field_zero.clone()
                 }
             })
             .collect();
@@ -292,28 +293,28 @@ where
             evaluations: coeff_evals,
             num_vars,
         };
-        coeff_mle.evaluate_with_config(evaluation_point, field_cfg)
+        coeff_mle.evaluate(field_cfg, evaluation_point)
     };
 
     // Evaluate up (all columns, shift=0).
-    let up_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_matrix)
+    let up_evals: Vec<DynamicPolynomial<C::Element>> = cfg_iter!(trace_matrix)
         .map(|col| {
-            let coeffs: Vec<F> = (0..max_num_coeffs)
+            let coeffs: Vec<C::Element> = (0..max_num_coeffs)
                 .map(|d| eval_coeff_mle(col, d, 0))
                 .collect::<Result<_, _>>()?;
-            Ok(DynamicPolynomialF::new_trimmed(coeffs))
+            Ok(poly_cfg.new_trimmed(coeffs))
         })
         .collect::<Result<Vec<_>, EvaluationError>>()?;
 
     // Evaluate down (only shifted columns, per-spec shift amount).
     let sorted_shifts = uair_sig.shifts();
-    let shift_down_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(sorted_shifts)
+    let shift_down_evals: Vec<DynamicPolynomial<C::Element>> = cfg_iter!(sorted_shifts)
         .map(|spec| {
             let col = &trace_matrix[spec.source_col()];
-            let coeffs: Vec<F> = (0..max_num_coeffs)
+            let coeffs: Vec<C::Element> = (0..max_num_coeffs)
                 .map(|d| eval_coeff_mle(col, d, spec.shift_amount()))
                 .collect::<Result<_, _>>()?;
-            Ok(DynamicPolynomialF::new_trimmed(coeffs))
+            Ok(poly_cfg.new_trimmed(coeffs))
         })
         .collect::<Result<Vec<_>, EvaluationError>>()?;
 
@@ -321,17 +322,17 @@ where
     // bit-ops act coefficient-wise, so MLE-eval-of-op at the same point is
     // op-of-MLE-eval on the source coefficient vector.
     let bit_op_down_offset = bit_op_down_offset(&uair_sig);
-    let bit_op_down_evals: Vec<DynamicPolynomialF<F>> = uair_sig
+    let bit_op_down_evals: Vec<DynamicPolynomial<C::Element>> = uair_sig
         .bit_op_specs()
         .iter()
         .map(|spec| {
             spec.op()
-                .transform::<F, DEGREE_PLUS_ONE>(&up_evals[spec.source_col()], field_cfg)
+                .transform::<C, DEGREE_PLUS_ONE>(&up_evals[spec.source_col()], field_cfg)
         })
         .collect();
 
     // Splice into the canonical down ordering; see UairSignature docs.
-    let mut down_evals: Vec<DynamicPolynomialF<F>> =
+    let mut down_evals: Vec<DynamicPolynomial<C::Element>> =
         Vec::with_capacity(shift_down_evals.len() + bit_op_down_evals.len());
     down_evals.extend_from_slice(&shift_down_evals[..bit_op_down_offset]);
     down_evals.extend(bit_op_down_evals);
@@ -348,16 +349,19 @@ where
 
     U::constrain_general(
         &mut constraint_builder,
+        &poly_cfg,
         TraceRow::from_slice_with_layout(&up_evals, uair_sig.total_cols().as_column_layout()),
         TraceRow::from_slice_with_layout(&down_evals, down_layout),
         &project,
-        |x, y| Some(project(y) * x),
+        |x, y| Some(poly_cfg.mul(x, &project(y))),
         ImpossibleIdeal::from_ref,
         ImpossibleIdeal::from_ref,
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
-    combined_evaluations.iter_mut().for_each(|eval| eval.trim());
+    combined_evaluations
+        .iter_mut()
+        .for_each(|eval| poly_cfg.trim(eval));
 
     Ok(combined_evaluations)
 }
@@ -371,9 +375,9 @@ fn bit_op_down_offset<P: Semiring>(uair_sig: &UairSignature<P>) -> usize {
         .count()
 }
 
-fn push_shifted_down_entry<F: PrimeField>(
-    down: &mut Vec<DynamicPolynomialF<F>>,
-    trace_matrix: &RowMajorTrace<F>,
+fn push_shifted_down_entry<E: Clone>(
+    down: &mut Vec<DynamicPolynomial<E>>,
+    trace_matrix: &RowMajorTrace<E>,
     row_idx: usize,
     num_rows: usize,
     spec: &ShiftSpec,
@@ -382,7 +386,7 @@ fn push_shifted_down_entry<F: PrimeField>(
     if shifted_row_idx < num_rows {
         down.push(trace_matrix[shifted_row_idx][spec.source_col()].clone());
     } else {
-        down.push(DynamicPolynomialF::zero());
+        down.push(DynamicPolynomial::ZERO);
     }
 }
 
@@ -391,13 +395,13 @@ fn push_shifted_down_entry<F: PrimeField>(
 /// - `family_idx == 0` -> $Q[X]$ constraints
 /// - `family_idx == i (i >= 1)` -> $F_{q_{i-1}}[X]$ constraints (i.e.
 ///   UAIR-level `prime_idx = i - 1`).
-pub struct CombinedPolyRowBuilder<F: PrimeField> {
+pub struct CombinedPolyRowBuilder<E> {
     family_idx: usize,
-    combined_evaluations: Vec<DynamicPolynomialF<F>>,
+    combined_evaluations: Vec<DynamicPolynomial<E>>,
 }
 
-impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
-    type Expr = DynamicPolynomialF<F>;
+impl<E: SetElement> ConstraintBuilder for CombinedPolyRowBuilder<E> {
+    type Expr = DynamicPolynomial<E>;
     type Ideal = ImpossibleIdeal;
     type FqIdeal = ImpossibleIdeal;
 
@@ -425,7 +429,7 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     }
 }
 
-impl<F: PrimeField> CombinedPolyRowBuilder<F> {
+impl<E> CombinedPolyRowBuilder<E> {
     pub fn new(family_idx: usize, num_constraints: usize) -> Self {
         Self {
             family_idx,

@@ -1,6 +1,6 @@
 pub mod rotation;
 
-use crypto_primitives::Semiring;
+use crypto_primitives::SetConfig;
 use std::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
 use zinc_utils::from_ref::FromRef;
@@ -8,13 +8,11 @@ use zinc_utils::from_ref::FromRef;
 /// A trait for types describing ideals.
 pub trait Ideal: FromRef<Self> + Clone + Debug + Display + Send + Sync {}
 
-/// A trait for ideals that implement
-/// membership check for an algebraic structure
-/// `T`.
-pub trait IdealCheck<T> {
-    /// Returns true if an element of the type
-    /// belongs to this ideal.
-    fn contains(&self, value: &T) -> Result<bool, IdealCheckError>;
+/// A trait for ideals that implement membership check for the algebraic
+/// structure configured by `C`.
+pub trait IdealCheck<C: SetConfig> {
+    /// Returns true if the element belongs to this ideal.
+    fn contains(&self, cfg: &C, value: &C::Element) -> Result<bool, IdealCheckError>;
 }
 
 /// A dummy ideal. Convenient when ideal checks
@@ -30,9 +28,9 @@ impl Display for ImpossibleIdeal {
     }
 }
 
-impl<R: Semiring> IdealCheck<R> for ImpossibleIdeal {
+impl<C: SetConfig> IdealCheck<C> for ImpossibleIdeal {
     #[inline(always)]
-    fn contains(&self, _value: &R) -> Result<bool, IdealCheckError> {
+    fn contains(&self, _cfg: &C, _value: &C::Element) -> Result<bool, IdealCheckError> {
         Ok(false)
     }
 }

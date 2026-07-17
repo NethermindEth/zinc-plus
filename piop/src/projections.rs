@@ -1,33 +1,34 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{FieldConfig, ProjectElementWithConfig, Semiring, SemiringConfig, Wrapper};
 use std::{collections::HashMap, iter};
 use zinc_poly::{
     EvaluationError,
     mle::DenseMultilinearExtension,
-    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+    univariate::dynamic::{DynamicPolynomial, HasDynamicPolynomialConfig},
 };
 use zinc_uair::{BitOpSpec, Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
-    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
+    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut,
+    inner_product::{InnerProduct, NativeInnerProduct},
     powers,
 };
 
 /// Row-indexed trace matrix: `trace[row][col]`.
 /// Each row contains all column values for that row.
 /// Used by `evaluate_for_constraints`.
-pub type RowMajorTrace<F> = Vec<Vec<DynamicPolynomialF<F>>>;
+pub type RowMajorTrace<F> = Vec<Vec<DynamicPolynomial<F>>>;
 
 /// Column-indexed trace matrix: `trace[col][row]`.
 /// Each column is a `DenseMultilinearExtension` over the hypercube.
 /// Used by `evaluate_combined_polynomials` (MLE-first approach).
-pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>;
+pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomial<F>>>;
 
 /// Holds the projected trace in either row-major or column-major layout,
 /// depending on which ideal check approach (MLE-first or combined) is used.
 #[derive(Clone, Debug)]
-pub enum ProjectedTrace<F: PrimeField> {
+pub enum ProjectedTrace<F> {
     RowMajor(RowMajorTrace<F>),
     ColumnMajor(ColumnMajorTrace<F>),
 }
@@ -54,21 +55,17 @@ impl<From: Semiring, To: Clone> ProjectedScalars<From, To> {
 ///
 /// Use this for the combined polynomial approach.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn project_trace_coeffs_row_major<F, PolyCoeff, Int, const DB: usize, const DA: usize>(
+pub fn project_trace_coeffs_row_major<C, PolyCoeff, Int, const DB: usize, const DA: usize>(
     trace: &UairTrace<PolyCoeff, Int, DB, DA>,
-    field_cfg: &F::Config,
-) -> RowMajorTrace<F>
+    field_cfg: &C,
+) -> RowMajorTrace<C::Element>
 where
-    F: PrimeField
-        + for<'a> FromWithConfig<&'a PolyCoeff>
-        + for<'a> FromWithConfig<&'a Int>
-        + Send
-        + Sync,
+    C: FieldConfig + ProjectElementWithConfig<PolyCoeff> + ProjectElementWithConfig<Int>,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
-    let zero = F::zero_with_cfg(field_cfg);
-    let one = F::one_with_cfg(field_cfg);
+    let zero = field_cfg.zero();
+    let one = field_cfg.one();
 
     let binary_len = trace.binary_poly.len();
     let arbitrary_len = trace.arbitrary_poly.len();
@@ -85,7 +82,7 @@ where
 
     // Preallocate the result matrix with the correct number of rows and columns.
     // (We have to work around the fact that cloned Vec doesn't keep its capacity)
-    let mut result: RowMajorTrace<F> = iter::repeat_with(|| Vec::with_capacity(num_cols))
+    let mut result: RowMajorTrace<C::Element> = iter::repeat_with(|| Vec::with_capacity(num_cols))
         .take(num_rows)
         .collect();
 
@@ -122,7 +119,7 @@ where
                     slot.write(
                         arbitrary_poly
                             .iter()
-                            .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+                            .map(|coeff| field_cfg.project(coeff))
                             .collect(),
                     );
                 });
@@ -132,8 +129,8 @@ where
                 .zip(cfg_iter!(trace.int))
                 .for_each(|(slot, col)| {
                     let int_val = &col.evaluations[row_idx];
-                    slot.write(DynamicPolynomialF {
-                        coeffs: vec![F::from_with_cfg(int_val, field_cfg)],
+                    slot.write(DynamicPolynomial {
+                        coeffs: vec![field_cfg.project(int_val)],
                     });
                 });
 
@@ -145,25 +142,21 @@ where
 
 /// Project a multi-typed trace onto `F[X]`, returning a column-indexed matrix.
 /// Result: `trace[col]` is a
-/// `DenseMultilinearExtension<DynamicPolynomialF<F>>`.
+/// `DenseMultilinearExtension<DynamicPolynomial<F>>`.
 ///
 /// Use this for the MLE-first approach.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DB: usize, const DA: usize>(
+pub fn project_trace_coeffs_column_major<C, PolyCoeff, Int, const DB: usize, const DA: usize>(
     trace: &UairTrace<PolyCoeff, Int, DB, DA>,
-    field_cfg: &F::Config,
-) -> ColumnMajorTrace<F>
+    field_cfg: &C,
+) -> ColumnMajorTrace<C::Element>
 where
-    F: PrimeField
-        + for<'a> FromWithConfig<&'a PolyCoeff>
-        + for<'a> FromWithConfig<&'a Int>
-        + Send
-        + Sync,
+    C: FieldConfig + ProjectElementWithConfig<PolyCoeff> + ProjectElementWithConfig<Int>,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
-    let zero = F::zero_with_cfg(field_cfg);
-    let one = F::one_with_cfg(field_cfg);
+    let zero = field_cfg.zero();
+    let one = field_cfg.one();
 
     let num_vars = [
         trace.binary_poly.first().map(|c| c.num_vars),
@@ -182,7 +175,7 @@ where
     cfg_extend!(
         result,
         cfg_iter!(trace.binary_poly).map(|column| {
-            let evaluations: Vec<DynamicPolynomialF<F>> = column
+            let evaluations: Vec<DynamicPolynomial<C::Element>> = column
                 .iter()
                 .map(|binary_poly| {
                     binary_poly
@@ -208,12 +201,12 @@ where
     cfg_extend!(
         result,
         cfg_iter!(trace.arbitrary_poly).map(|column| {
-            let evaluations: Vec<DynamicPolynomialF<F>> = column
+            let evaluations: Vec<DynamicPolynomial<C::Element>> = column
                 .iter()
                 .map(|arbitrary_poly| {
                     arbitrary_poly
                         .iter()
-                        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+                        .map(|coeff| field_cfg.project(coeff))
                         .collect()
                 })
                 .collect();
@@ -228,10 +221,10 @@ where
     cfg_extend!(
         result,
         cfg_iter!(trace.int).map(|column| {
-            let evaluations: Vec<DynamicPolynomialF<F>> = column
+            let evaluations: Vec<DynamicPolynomial<C::Element>> = column
                 .iter()
-                .map(|int| DynamicPolynomialF {
-                    coeffs: vec![F::from_with_cfg(int, field_cfg)],
+                .map(|int| DynamicPolynomial {
+                    coeffs: vec![field_cfg.project(int)],
                 })
                 .collect();
             DenseMultilinearExtension {
@@ -249,7 +242,9 @@ where
 /// `result[row][col] = trace[col].evaluations[row].clone()`. Used by the
 /// MLE-first prover when it needs to fall back to the row-major
 /// `evaluate_for_constraints` path for non-linear constraints.
-pub fn column_major_to_row_major<F: PrimeField>(trace: &ColumnMajorTrace<F>) -> RowMajorTrace<F> {
+pub fn column_major_to_row_major<F: Clone + Send + Sync>(
+    trace: &ColumnMajorTrace<F>,
+) -> RowMajorTrace<F> {
     let num_rows = trace.first().map(|c| c.evaluations.len()).unwrap_or(0);
 
     cfg_into_iter!(0..num_rows)
@@ -263,15 +258,19 @@ pub fn column_major_to_row_major<F: PrimeField>(trace: &ColumnMajorTrace<F>) -> 
 }
 
 /// Evaluate a projected trace along `F[X] -> F` and return column-indexed
-/// MLEs (`Vec<DenseMultilinearExtension<F::Inner>>`) for sumcheck
+/// MLEs (`Vec<DenseMultilinearExtension<F>>`) for sumcheck
 /// compatibility. Dispatches on the trace layout internally.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
-    trace: &ProjectedTrace<F>,
-    projecting_element: &F,
-) -> Vec<DenseMultilinearExtension<F::Inner>> {
-    let zero = F::zero_with_cfg(projecting_element.cfg());
-    let one = F::one_with_cfg(projecting_element.cfg());
+pub fn evaluate_trace_to_column_mles<C>(
+    field_cfg: &C,
+    trace: &ProjectedTrace<C::Element>,
+    projecting_element: &C::Element,
+) -> Vec<DenseMultilinearExtension<C::Element>>
+where
+    C: FieldConfig,
+{
+    let zero = field_cfg.zero();
+    let poly_cfg = field_cfg.dyn_poly_cfg();
 
     let max_coeffs_len = {
         // Iterators have different types, so this is easier
@@ -279,7 +278,7 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
             ($v:expr) => {
                 $v.iter()
                     .flat_map(|row| row.iter())
-                    .map(|poly| poly.degree().map_or(0, |d| d + 1))
+                    .map(|poly| poly_cfg.degree(poly).map_or(0, |d| d + 1))
                     .max()
                     .unwrap_or(0)
                     .max(1)
@@ -291,17 +290,17 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
         }
     };
 
-    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
+    let projection_powers: Vec<C::Element> = powers(field_cfg, projecting_element, max_coeffs_len);
 
-    let evaluate_poly = |poly: &DynamicPolynomialF<F>| -> F::Inner {
-        let deg = poly.degree().map_or(0, |d| d + 1);
-        DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+    let evaluate_poly = |poly: &DynamicPolynomial<C::Element>| -> C::Element {
+        let deg = field_cfg.dyn_poly_cfg().degree(poly).map_or(0, |d| d + 1);
+        NativeInnerProduct::inner_product::<UNCHECKED>(
+            field_cfg,
             &poly.coeffs[..deg],
             &projection_powers[..deg],
             zero.clone(),
         )
         .expect("inner product cannot fail here")
-        .into_inner()
     };
 
     match trace {
@@ -312,24 +311,24 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
 
             cfg_into_iter!(0..num_cols)
                 .map(|col_idx| {
-                    let evaluations: Vec<F::Inner> = (0..num_rows)
+                    let evaluations: Vec<C::Element> = (0..num_rows)
                         .map(|row_idx| evaluate_poly(&t[row_idx][col_idx]))
                         .collect();
                     DenseMultilinearExtension::from_evaluations_vec(
                         num_vars,
                         evaluations,
-                        zero.inner().clone(),
+                        zero.clone(),
                     )
                 })
                 .collect()
         }
         ProjectedTrace::ColumnMajor(t) => cfg_iter!(t)
             .map(|col_mle| {
-                let evaluations: Vec<F::Inner> = cfg_iter!(col_mle).map(evaluate_poly).collect();
+                let evaluations: Vec<C::Element> = cfg_iter!(col_mle).map(evaluate_poly).collect();
                 DenseMultilinearExtension::from_evaluations_vec(
                     col_mle.num_vars,
                     evaluations,
-                    zero.inner().clone(),
+                    zero.clone(),
                 )
             })
             .collect(),
@@ -340,15 +339,17 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
 ///
 /// The bit operation is applied to each source cell's coefficients before
 /// evaluating the cell at `projecting_element`.
-pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
-    trace: &ProjectedTrace<F>,
+pub fn build_bit_op_virtual_mle<C, const D: usize>(
+    trace: &ProjectedTrace<C::Element>,
     spec: &BitOpSpec,
-    projecting_element: &F,
-    field_cfg: &F::Config,
-) -> DenseMultilinearExtension<F::Inner> {
-    let zero = F::zero_with_cfg(field_cfg);
-    let one = F::one_with_cfg(field_cfg);
-    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, D);
+    projecting_element: &C::Element,
+    field_cfg: &C,
+) -> DenseMultilinearExtension<C::Element>
+where
+    C: FieldConfig,
+{
+    let zero = field_cfg.zero();
+    let projection_powers: Vec<C::Element> = powers(field_cfg, projecting_element, D);
 
     let c = spec.op().count();
     assert!(
@@ -356,47 +357,45 @@ pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
         "BitOp count {c} out of range for cell width D = {D}",
     );
 
-    let evaluate_with_bit_op = |cell: &DynamicPolynomialF<F>| -> F::Inner {
-        let transformed = spec.op().transform::<F, D>(cell, field_cfg);
-        DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+    let evaluate_with_bit_op = |cell: &DynamicPolynomial<C::Element>| -> C::Element {
+        let transformed = spec.op().transform::<C, D>(cell, field_cfg);
+        NativeInnerProduct::inner_product::<UNCHECKED>(
+            field_cfg,
             &transformed.coeffs,
             &projection_powers,
             zero.clone(),
         )
         .expect("inner product cannot fail here")
-        .into_inner()
     };
 
     match trace {
         ProjectedTrace::RowMajor(t) => {
             let num_rows = t.len();
             let num_vars = num_rows.next_power_of_two().trailing_zeros() as usize;
-            let evaluations: Vec<F::Inner> = (0..num_rows)
+            let evaluations: Vec<C::Element> = (0..num_rows)
                 .map(|row_idx| evaluate_with_bit_op(&t[row_idx][spec.source_col()]))
                 .collect();
-            DenseMultilinearExtension::from_evaluations_vec(
-                num_vars,
-                evaluations,
-                zero.inner().clone(),
-            )
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, zero.clone())
         }
         ProjectedTrace::ColumnMajor(t) => {
             let col_mle = &t[spec.source_col()];
-            let evaluations: Vec<F::Inner> = col_mle.iter().map(evaluate_with_bit_op).collect();
+            let evaluations: Vec<C::Element> = col_mle.iter().map(evaluate_with_bit_op).collect();
             DenseMultilinearExtension::from_evaluations_vec(
                 col_mle.num_vars,
                 evaluations,
-                zero.inner().clone(),
+                zero.clone(),
             )
         }
     }
 }
 
 /// Project scalars of a UAIR onto $F[X]$.
-pub fn project_scalars<F: PrimeField, U: Uair>(
-    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
-) -> ProjectedScalars<U::Scalar, DynamicPolynomialF<F>> {
+pub fn project_scalars<C: SemiringConfig, U: Uair>(
+    field_cfg: &C,
+    project: impl Fn(&U::Scalar) -> DynamicPolynomial<C::Element>,
+) -> ProjectedScalars<U::Scalar, DynamicPolynomial<C::Element>> {
     let uair_scalars = collect_scalars::<U>();
+    let poly_cfg = field_cfg.dyn_poly_cfg();
 
     // TODO(Ilia): if there's a lot of scalars
     //             we should do this in parallel probably.
@@ -404,7 +403,7 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
         .into_iter()
         .map(|scalar| {
             let mut dynamic_poly = project(&scalar);
-            dynamic_poly.trim();
+            poly_cfg.trim(&mut dynamic_poly);
             (scalar, dynamic_poly)
         })
         .collect();
@@ -413,35 +412,37 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
 }
 
 /// Project scalars of a UAIR along F[X] -> F.
-#[allow(clippy::arithmetic_side_effects)]
-pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
-    scalars: ProjectedScalars<R, DynamicPolynomialF<F>>,
-    projecting_element: &F,
-) -> Result<ProjectedScalars<R, F>, (R, F, EvaluationError)> {
+#[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+pub fn project_scalars_to_field<R: Semiring, C: FieldConfig>(
+    field_cfg: &C,
+    scalars: ProjectedScalars<R, DynamicPolynomial<C::Element>>,
+    projecting_element: &C::Element,
+) -> Result<ProjectedScalars<R, C::Element>, (R, C::Element, EvaluationError)> {
     // TODO(Ilia): Parallelising this might be good for big UAIRs.
     //             We'd conditionally route between sequential and parallel
     //             projection depending on how many scalars the UAIR has.
-    let one = F::one_with_cfg(projecting_element.cfg());
-    let zero = F::zero_with_cfg(projecting_element.cfg());
+    let zero = field_cfg.zero();
+    let poly_cfg = field_cfg.dyn_poly_cfg();
 
     let max_coeffs_len = scalars
         .inner
         .values()
-        .map(|poly| poly.degree().map_or(0, |d| d + 1))
+        .map(|poly| poly_cfg.degree(poly).map_or(0, |d| d + 1))
         .max()
         .unwrap_or(0)
         .max(1);
 
-    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
+    let projection_powers: Vec<C::Element> = powers(field_cfg, projecting_element, max_coeffs_len);
 
     let inner = scalars
         .inner
         .into_iter()
         .map(|(scalar, value)| {
-            let deg = value.degree().map_or(0, |d| d + 1);
+            let deg = poly_cfg.degree(&value).map_or(0, |d| d + 1);
             (
                 scalar,
-                DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                NativeInnerProduct::inner_product::<UNCHECKED>(
+                    field_cfg,
                     &value.coeffs[..deg],
                     &projection_powers[..deg],
                     zero.clone(),
@@ -455,42 +456,43 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_copy,
+    clippy::redundant_clone
+)]
 mod tests {
     use super::*;
     use crate::test_utils::{LIMBS, test_config};
-    use crypto_primitives::{
-        Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_monty::MontyField,
-    };
+    use crypto_primitives::crypto_bigint_monty::{MontyField, MontyFieldElement};
     use zinc_uair::BitOp;
+    use zinc_utils::inner_product::NativeInnerProduct;
 
     type F = MontyField<LIMBS>;
+    type E = MontyFieldElement<LIMBS>;
 
-    fn f(value: u32, cfg: &<F as HasPrimeFieldConfig>::Config) -> F {
-        F::from_with_cfg(value, cfg)
+    fn f(value: u32, cfg: &F) -> E {
+        cfg.project(&value)
     }
 
-    fn poly(coeffs: Vec<F>) -> DynamicPolynomialF<F> {
-        DynamicPolynomialF { coeffs }
+    fn poly(coeffs: Vec<E>) -> DynamicPolynomial<E> {
+        DynamicPolynomial { coeffs }
     }
 
-    fn expected_inner(
-        coeffs: &[F],
-        projecting_element: &F,
-        cfg: &<F as HasPrimeFieldConfig>::Config,
-    ) -> <F as Field>::Inner {
-        let zero = F::zero_with_cfg(cfg);
-        let one = F::one_with_cfg(cfg);
-        let powers = powers(projecting_element.clone(), one, coeffs.len());
-        DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(coeffs, &powers, zero)
+    fn expected_eval(coeffs: &[E], projecting_element: &E, cfg: &F) -> E {
+        let powers = powers(cfg, projecting_element, coeffs.len());
+        NativeInnerProduct::inner_product::<UNCHECKED>(cfg, coeffs, &powers, cfg.zero())
             .expect("inner product cannot fail here")
-            .into_inner()
     }
 
     #[test]
     fn builds_bit_op_virtual_mle_from_row_major_trace() {
         let cfg = test_config();
         let alpha = f(2, &cfg);
-        let zero = F::zero_with_cfg(&cfg);
+        let zero = cfg.zero();
         let row0 = [f(1, &cfg), f(2, &cfg), f(3, &cfg), f(4, &cfg)];
         let row1 = [f(5, &cfg), f(6, &cfg), f(7, &cfg), f(8, &cfg)];
         let trace =
@@ -507,12 +509,12 @@ mod tests {
         assert_eq!(
             mle.evaluations,
             vec![
-                expected_inner(
+                expected_eval(
                     &[row0[2].clone(), row0[3].clone(), zero.clone(), zero.clone()],
                     &alpha,
                     &cfg
                 ),
-                expected_inner(
+                expected_eval(
                     &[row1[2].clone(), row1[3].clone(), zero.clone(), zero],
                     &alpha,
                     &cfg
@@ -543,7 +545,7 @@ mod tests {
         assert_eq!(
             mle.evaluations,
             vec![
-                expected_inner(
+                expected_eval(
                     &[
                         row0[1].clone(),
                         row0[2].clone(),
@@ -553,7 +555,7 @@ mod tests {
                     &alpha,
                     &cfg,
                 ),
-                expected_inner(
+                expected_eval(
                     &[
                         row1[1].clone(),
                         row1[2].clone(),

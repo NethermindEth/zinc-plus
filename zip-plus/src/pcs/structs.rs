@@ -2,15 +2,13 @@ use crate::{
     code::LinearCode,
     merkle::{MerkleTree, MtHash},
 };
-use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
+use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, Semiring};
 use num_traits::CheckedAdd;
-use std::{fmt::Debug, marker::PhantomData, ops::Neg};
+use std::{fmt::Debug, marker::PhantomData};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
-use zinc_utils::{
-    from_ref::FromRef, inner_product::InnerProduct, mul_by_scalar::MulByScalar, named::Named,
-};
+use zinc_utils::{from_ref::FromRef, inner_product::InnerProduct, named::Named};
 
 pub trait ZipTypes: Clone + Debug + Send + Sync {
     /// For IPRS codes, 2^{-security_parameter} = rate^{num_openings / 3}
@@ -20,7 +18,7 @@ pub trait ZipTypes: Clone + Debug + Send + Sync {
     type Eval: ConstCoeffBitWidth + Default + Named + Clone + Debug + Send + Sync;
 
     /// Semiring of codeword elements, at least as wide as the evaluation ring
-    type Cw: FixedSemiring
+    type Cw: Semiring
         + ConstCoeffBitWidth
         + ConstTranscribable
         + FromRef<Self::Eval>
@@ -42,22 +40,14 @@ pub trait ZipTypes: Clone + Debug + Send + Sync {
     type Pt: ConstIntRing;
 
     /// Coefficient ring of linear combination polynomial [Self::Comb]
-    type CombR: ConstIntRing
-        + Neg<Output = Self::CombR>
-        + ConstTranscribable
-        + FromRef<Self::CombR>
-        + for<'a> MulByScalar<&'a Self::Chal>;
+    type CombR: ConstIntRing + ConstTranscribable + FromRef<Self::CombR>;
     /// Ring of elements in the linear combination of codewords, at least as
     /// wide as the evaluation, codeword, and challenge rings.
-    type Comb: FixedSemiring
-        + Polynomial<Self::CombR>
-        + FromRef<Self::Eval>
-        + FromRef<Self::Cw>
-        + Named;
+    type Comb: Semiring + Polynomial<Self::CombR> + FromRef<Self::Eval> + FromRef<Self::Cw> + Named;
 
-    type EvalDotChal: InnerProduct<Self::Eval, Self::Chal, Self::CombR> + Debug;
-    type CombDotChal: InnerProduct<Self::Comb, Self::Chal, Self::CombR> + Debug;
-    type ArrCombRDotChal: InnerProduct<[Self::CombR], Self::Chal, Self::CombR> + Debug;
+    type EvalDotChal: InnerProduct<(), Self::Eval, Self::Chal, Self::CombR> + Debug;
+    type CombDotChal: InnerProduct<(), Self::Comb, Self::Chal, Self::CombR> + Debug;
+    type ArrCombRDotChal: InnerProduct<(), [Self::CombR], Self::Chal, Self::CombR> + Debug;
 }
 
 /// Zip is a Polynomial Commitment Scheme (PCS) that supports committing to

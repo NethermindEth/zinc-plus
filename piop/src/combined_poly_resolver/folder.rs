@@ -1,4 +1,4 @@
-use crypto_primitives::PrimeField;
+use crypto_primitives::SemiringConfig;
 use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
 use zinc_utils::add;
 
@@ -21,7 +21,7 @@ use zinc_utils::add;
 /// It's `Expr` associated type is the field `F`, so once
 /// an `assert_*` method is called it adds it to the RLC
 /// with the next power of the challenge `\alpha`.
-pub struct ConstraintFolder<'a, F: PrimeField> {
+pub struct ConstraintFolder<'a, C: SemiringConfig> {
     /// Family index selecting which family of constraints to fold.
     ///
     /// - `0` -> $Q[X]$ constraints (from `assert_in_ideal` / assert_zero`).
@@ -30,35 +30,41 @@ pub struct ConstraintFolder<'a, F: PrimeField> {
     /// All unrelated constraints are skipped.
     family_idx: usize,
     /// A reference to precomputed powers of the challenge.
-    challenge_powers: &'a [F],
+    challenge_powers: &'a [C::Element],
     /// Index of the current constraint,
     /// and therefore the current power of the challenge.
     current_constraint: usize,
     /// The RLC computed so far.
-    pub folded_constraints: F,
+    pub folded_constraints: C::Element,
+    /// The field config providing operations on the folded elements.
+    cfg: &'a C,
 }
 
-impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
+impl<'a, C: SemiringConfig> ConstraintFolder<'a, C> {
     /// Build a folder for a given `family_idx` (`0` = Q[X], `i >= 1` =
     /// declared prime `i - 1`).
-    pub fn new(family_idx: usize, challenge_powers: &'a [F], zero: &F) -> Self {
+    pub fn new(family_idx: usize, challenge_powers: &'a [C::Element], cfg: &'a C) -> Self {
         Self {
             family_idx,
             challenge_powers,
             current_constraint: 0,
-            folded_constraints: zero.clone(),
+            folded_constraints: cfg.zero(),
+            cfg,
         }
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn fold_constraint(&mut self, expr: F) {
-        self.folded_constraints += expr * &self.challenge_powers[self.current_constraint];
+    fn fold_constraint(&mut self, expr: C::Element) {
+        let term = self
+            .cfg
+            .mul(&expr, &self.challenge_powers[self.current_constraint]);
+        self.cfg.add_assign(&mut self.folded_constraints, &term);
         self.current_constraint += 1;
     }
 }
 
-impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
-    type Expr = F;
+impl<'a, C: SemiringConfig> ConstraintBuilder for ConstraintFolder<'a, C> {
+    type Expr = C::Element;
 
     type Ideal = ImpossibleIdeal;
     type FqIdeal = ImpossibleIdeal;

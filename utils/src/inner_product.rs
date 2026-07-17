@@ -1,13 +1,17 @@
 use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
-use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean};
+use crypto_primitives::{ProjectElementWithConfig, SemiringConfig, Wrapper, boolean::Boolean};
 use num_traits::CheckedAdd;
 use thiserror::Error;
 
 /// A trait for inner product algorithms implementations.
-pub trait InnerProduct<Lhs: ?Sized, Rhs, Output> {
+///
+/// `Ctx` is the context needed to perform the operations: `()` for
+/// self-sufficient types, or a field config for dynamic field elements.
+pub trait InnerProduct<Ctx, Lhs: ?Sized, Rhs, Output> {
     /// The main entry point for the inner product.
     /// `CHECK` determines whether the implementation should check for overflow.
     fn inner_product<const CHECK: bool>(
+        ctx: &Ctx,
         lhs: &Lhs,
         rhs: &[Rhs],
         zero: Output,
@@ -29,13 +33,15 @@ pub enum InnerProductError {
 #[derive(Clone, Debug)]
 pub struct MBSInnerProduct;
 
-impl<Lhs, Rhs, Out> InnerProduct<[Lhs], Rhs, Out> for MBSInnerProduct
+impl<Ctx, Lhs, Rhs, Out> InnerProduct<Ctx, [Lhs], Rhs, Out> for MBSInnerProduct
 where
-    Out: FromRef<Lhs> + for<'a> MulByScalar<&'a Rhs> + CheckedAdd,
+    Ctx: MulByScalar<Out, Rhs, Out>,
+    Out: FromRef<Lhs> + CheckedAdd,
 {
     /// The mul-by-scalar inner product.
     #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
     fn inner_product<const CHECK: bool>(
+        ctx: &Ctx,
         lhs: &[Lhs],
         rhs: &[Rhs],
         zero: Out,
@@ -49,8 +55,8 @@ where
 
         lhs.iter().zip(rhs).try_fold(zero, |acc, (l, r)| {
             let widened = Out::from_ref(l);
-            let product = widened
-                .mul_by_scalar::<CHECK>(r)
+            let product = ctx
+                .mul_by_scalar::<CHECK>(widened, r)
                 .ok_or(InnerProductError::Overflow)?;
             if CHECK {
                 acc.checked_add(&product).ok_or(InnerProductError::Overflow)
@@ -61,27 +67,71 @@ where
     }
 }
 
-impl MBSInnerProduct {
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn inner_product_field<Lhs, F>(
-        lhs: &[Lhs],
-        rhs: &[F],
-        zero: F,
-    ) -> Result<F, InnerProductError>
-    where
-        F: PrimeField + for<'a> FromWithConfig<&'a Lhs>,
-    {
+#[derive(Clone, Debug)]
+pub struct NativeInnerProduct;
+
+impl<C> InnerProduct<C, [C::Element], C::Element, C::Element> for NativeInnerProduct
+where
+    C: SemiringConfig,
+{
+    fn inner_product<const CHECK: bool>(
+        cfg: &C,
+        lhs: &[C::Element],
+        rhs: &[C::Element],
+        zero: C::Element,
+    ) -> Result<C::Element, InnerProductError> {
         if lhs.len() != rhs.len() {
             return Err(InnerProductError::LengthMismatch {
                 lhs: lhs.len(),
                 rhs: rhs.len(),
             });
         }
-        let cfg = zero.cfg().clone();
+        lhs.iter().zip(rhs).try_fold(zero, |mut acc, (l, r)| {
+            let product = if CHECK {
+                cfg.checked_mul(l, r).ok_or(InnerProductError::Overflow)?
+            } else {
+                cfg.mul(l, r)
+            };
+            if CHECK {
+                acc = cfg
+                    .checked_add(&acc, &product)
+                    .ok_or(InnerProductError::Overflow)?;
+            } else {
+                cfg.add_assign(&mut acc, &product);
+            }
+            Ok(acc)
+        })
+    }
+}
 
-        Ok(lhs.iter().zip(rhs).fold(zero, |acc, (a, r)| {
-            let product: F = F::from_with_cfg(a, &cfg) * r;
-            acc + product
+/// An implementation of inner product over a dynamic field: projects the RHS
+/// entries into the field and folds with the field operations.
+///
+/// Field operations cannot overflow, so `CHECK` is ignored.
+#[derive(Clone, Debug)]
+pub struct FieldInnerProduct;
+
+impl<C, Rhs> InnerProduct<C, [C::Element], Rhs, C::Element> for FieldInnerProduct
+where
+    C: SemiringConfig + ProjectElementWithConfig<Rhs>,
+{
+    fn inner_product<const CHECK: bool>(
+        cfg: &C,
+        lhs: &[C::Element],
+        rhs: &[Rhs],
+        zero: C::Element,
+    ) -> Result<C::Element, InnerProductError> {
+        if lhs.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        Ok(lhs.iter().zip(rhs).fold(zero, |mut acc, (l, r)| {
+            let product = cfg.mul(l, &cfg.project(r));
+            cfg.add_assign(&mut acc, &product);
+            acc
         }))
     }
 }
@@ -92,13 +142,15 @@ impl MBSInnerProduct {
 #[derive(Clone, Debug)]
 pub struct ScalarProduct;
 
-impl<Lhs, Rhs, Out> InnerProduct<Lhs, Rhs, Out> for ScalarProduct
+impl<Ctx, Lhs, Rhs, Out> InnerProduct<Ctx, Lhs, Rhs, Out> for ScalarProduct
 where
-    Out: for<'a> MulByScalar<&'a Rhs> + FromRef<Lhs>,
+    Ctx: MulByScalar<Out, Rhs, Out>,
+    Out: FromRef<Lhs>,
 {
     /// A scalar inner product. Assumes `Lhs` is a scalar type
     /// and always asserts that `point` has only one component.
     fn inner_product<const CHECK: bool>(
+        ctx: &Ctx,
         lhs: &Lhs,
         point: &[Rhs],
         _zero: Out,
@@ -109,8 +161,8 @@ where
                 rhs: point.as_ref().len(),
             })
         } else {
-            Ok(Out::from_ref(lhs)
-                .mul_by_scalar::<CHECK>(&point[0])
+            Ok(ctx
+                .mul_by_scalar::<CHECK>(Out::from_ref(lhs), &point[0])
                 .ok_or(InnerProductError::Overflow)?)
         }
     }
@@ -121,12 +173,13 @@ where
 /// correspond to `true` elements of the boolean slice.
 pub struct BooleanInnerProductAdd;
 
-impl<Rhs: Clone, Out: FromRef<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Out>
+impl<Ctx, Rhs: Clone, Out: FromRef<Rhs> + CheckedAdd> InnerProduct<Ctx, [Boolean], Rhs, Out>
     for BooleanInnerProductAdd
 {
     /// Boolean inner product.
     #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
     fn inner_product<const CHECK: bool>(
+        _ctx: &Ctx,
         lhs: &[Boolean],
         rhs: &[Rhs],
         zero: Out,
@@ -165,7 +218,7 @@ mod test {
         let lhs = [1, 2, 3];
         let rhs = [4, 5, 6];
         assert_eq!(
-            MBSInnerProduct::inner_product::<CHECKED>(&lhs, &rhs, 0),
+            MBSInnerProduct::inner_product::<CHECKED>(&(), &lhs, &rhs, 0),
             Ok(4 + 2 * 5 + 3 * 6)
         );
     }
@@ -176,7 +229,7 @@ mod test {
         let rhs = 23i128;
 
         assert_eq!(
-            ScalarProduct::inner_product::<CHECKED>(&lhs, &[rhs], 0).unwrap(),
+            ScalarProduct::inner_product::<CHECKED>(&(), &lhs, &[rhs], 0).unwrap(),
             i128::from(lhs) * rhs
         )
     }
@@ -192,8 +245,8 @@ mod test {
         let rhs = [1i128, 2, 3, 4];
 
         assert_eq!(
-            BooleanInnerProductAdd::inner_product::<CHECKED>(&lhs, &rhs, 0),
-            MBSInnerProduct::inner_product::<CHECKED>(&rhs, &lhs, 0i128)
+            BooleanInnerProductAdd::inner_product::<CHECKED>(&(), &lhs, &rhs, 0),
+            MBSInnerProduct::inner_product::<CHECKED>(&(), &rhs, &lhs, 0i128)
         );
     }
 
@@ -215,8 +268,18 @@ mod test {
         ];
 
         assert_eq!(
-            BooleanInnerProductAdd::inner_product::<CHECKED>(&lhs, &rhs, ConstMontyField::ZERO),
-            BooleanInnerProductAdd::inner_product::<UNCHECKED>(&lhs, &rhs, ConstMontyField::ZERO)
+            BooleanInnerProductAdd::inner_product::<CHECKED>(
+                &(),
+                &lhs,
+                &rhs,
+                ConstMontyField::ZERO
+            ),
+            BooleanInnerProductAdd::inner_product::<UNCHECKED>(
+                &(),
+                &lhs,
+                &rhs,
+                ConstMontyField::ZERO
+            )
         );
     }
 }

@@ -1,5 +1,5 @@
 use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
-use crypto_primitives::PrimeField;
+use crypto_primitives::BaseFieldConfig;
 use zinc_poly::{
     ConstCoeffBitWidth, Polynomial, mle::DenseMultilinearExtension, utils::build_eq_x_r,
 };
@@ -86,28 +86,28 @@ pub(super) fn validate_input<Zt: ZipTypes, Lc: LinearCode<Zt>, Pt>(
 /// For a polynomial arranged in matrix form, this splits the evaluation point
 /// into two vectors, `q_0` multiplying on the left and `q_1` multiplying on the
 /// right
-#[allow(clippy::unwrap_used)]
-pub(super) fn point_to_tensor<F>(
+#[allow(clippy::unwrap_used, clippy::type_complexity)]
+pub(super) fn point_to_tensor<C>(
+    cfg: &C,
+    point: &[C::Element],
     num_rows: usize,
-    point: &[F],
-    cfg: &F::Config,
-) -> Result<(Vec<F>, Vec<F>), ZipError>
+) -> Result<(Vec<C::Element>, Vec<C::Element>), ZipError>
 where
-    F: PrimeField,
+    C: BaseFieldConfig,
 {
     assert!(num_rows.is_power_of_two());
     let (hi, lo) = point.split_at(sub!(point.len(), num_rows.ilog2() as usize));
     // TODO: get rid of these unwraps.
     let q_0 = if !lo.is_empty() {
-        build_eq_x_r(lo, cfg).unwrap()
+        build_eq_x_r(cfg, lo).unwrap()
     } else {
-        DenseMultilinearExtension::zero_vars(F::one_with_cfg(cfg))
+        DenseMultilinearExtension::zero_vars(cfg.one())
     };
 
     let q_1 = if !hi.is_empty() {
-        build_eq_x_r(hi, cfg).unwrap()
+        build_eq_x_r(cfg, hi).unwrap()
     } else {
-        DenseMultilinearExtension::zero_vars(F::one_with_cfg(cfg))
+        DenseMultilinearExtension::zero_vars(cfg.one())
     };
 
     Ok((q_0.evaluations, q_1.evaluations))

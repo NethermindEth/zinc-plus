@@ -1,6 +1,6 @@
-use crypto_primitives::{Field, PrimeField, Semiring};
+use crypto_primitives::SemiringConfig;
 use thiserror::Error;
-use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul, sub};
+use zinc_utils::{add, mul, sub};
 
 use crate::mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero};
 
@@ -17,16 +17,12 @@ pub enum ArithErrors {
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r<F>(
-    r: &[F],
-    cfg: &F::Config,
-) -> Result<DenseMultilinearExtension<F>, ArithErrors>
-where
-    F: PrimeField,
-{
-    let evals = build_eq_x_r_vec(r, cfg)?;
-    let mle =
-        DenseMultilinearExtension::from_evaluations_vec(r.len(), evals, F::zero_with_cfg(cfg));
+pub fn build_eq_x_r<C: SemiringConfig>(
+    cfg: &C,
+    r: &[C::Element],
+) -> Result<DenseMultilinearExtension<C::Element>, ArithErrors> {
+    let evals = build_eq_x_r_vec(cfg, r)?;
+    let mle = DenseMultilinearExtension::from_evaluations_vec(r.len(), evals, cfg.zero());
 
     Ok(mle)
 }
@@ -38,10 +34,10 @@ where
 ///      $eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))$
 /// over r, which is
 ///      $eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))$
-pub fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
-where
-    F: PrimeField,
-{
+pub fn build_eq_x_r_vec<C: SemiringConfig>(
+    cfg: &C,
+    r: &[C::Element],
+) -> Result<Vec<C::Element>, ArithErrors> {
     // we build eq(x,r) from its evaluations
     // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
     // for example, with num_vars = 4, x is a binary vector of 4, then
@@ -57,61 +53,14 @@ where
         return Err(ArithErrors::InvalidParameters("r length is 0".to_owned()));
     }
 
-    let one = F::one_with_cfg(cfg);
+    let one = cfg.one();
     let mut eval = vec![one; 1 << r.len()];
     let mut s = 1;
     for ri in r {
         for j in (0..s).rev() {
             let prev = eval[j].clone();
-            let hi = prev.clone() * ri;
-            eval[j] = prev - &hi;
-            eval[add!(j, s)] = hi;
-        }
-        s = mul!(s, 2);
-    }
-
-    Ok(eval)
-}
-
-/// This function build the eq(x, r) polynomial for any given r.
-///
-/// Evaluate
-///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-/// over r, which is
-///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_inner<F>(
-    r: &[F],
-    cfg: &F::Config,
-) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
-where
-    F: InnerTransparentField,
-{
-    let evals = build_eq_x_r_inner_vec(r, cfg)?;
-    let mle = DenseMultilinearExtension {
-        num_vars: r.len(),
-        evaluations: evals,
-    };
-
-    Ok(mle)
-}
-
-/// See [`build_eq_x_r_vec`]
-fn build_eq_x_r_inner_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F::Inner>, ArithErrors>
-where
-    F: InnerTransparentField,
-{
-    if r.is_empty() {
-        return Err(ArithErrors::InvalidParameters("r length is 0".to_owned()));
-    }
-
-    let one = F::one_with_cfg(cfg).into_inner();
-    let mut eval = vec![one; 1 << r.len()];
-    let mut s = 1;
-    for ri in r {
-        for j in (0..s).rev() {
-            let prev = eval[j].clone();
-            let hi = (F::new_unchecked_with_cfg(prev.clone(), cfg) * ri).into_inner();
-            eval[j] = F::sub_inner(&prev, &hi, cfg);
+            let hi = cfg.mul(&prev, ri);
+            eval[j] = cfg.sub(&prev, &hi);
             eval[add!(j, s)] = hi;
         }
         s = mul!(s, 2);
@@ -129,20 +78,16 @@ where
 ///
 /// Uses the identity `next_c_mle(r, b) = eq(r, b - c)` for `b >= c` and
 /// `0` for `b < c`.
-pub fn build_next_c_r_mle<F>(
-    r: &[F],
+pub fn build_next_c_r_mle<C: SemiringConfig>(
+    cfg: &C,
+    r: &[C::Element],
     c: usize,
-    field_cfg: &F::Config,
-) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
-where
-    F: InnerTransparentField,
-{
+) -> Result<DenseMultilinearExtension<C::Element>, ArithErrors> {
     let num_vars = r.len();
     let n = 1 << num_vars;
     assert!(c < n, "shift c={c} must be < domain size {n}");
-    let zero_inner = F::zero_with_cfg(field_cfg).into_inner();
 
-    let eq_r = build_eq_x_r_inner(r, field_cfg)?;
+    let eq_r = build_eq_x_r(cfg, r)?;
     if c == 0 {
         return Ok(eq_r);
     }
@@ -150,7 +95,7 @@ where
     // next_c_mle(r, 0) = 0 for b < c
     // next_c_mle(r, b - c) = eq(r, b - c) for b >= c
     let mut evaluations = Vec::with_capacity(n);
-    evaluations.resize(c, zero_inner);
+    evaluations.resize(c, cfg.zero());
     evaluations.extend_from_slice(&eq_r.evaluations[..sub!(n, c)]);
 
     Ok(DenseMultilinearExtension {
@@ -160,18 +105,27 @@ where
 }
 
 /// Evaluate eq polynomial.
-#[allow(clippy::arithmetic_side_effects)]
-pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> {
+pub fn eq_eval<C: SemiringConfig>(
+    cfg: &C,
+    x: &[C::Element],
+    y: &[C::Element],
+) -> Result<C::Element, ArithErrors> {
     if x.len() != y.len() {
         return Err(ArithErrors::InvalidParameters(
             "x and y have different length".to_string(),
         ));
     }
 
+    let one = cfg.one();
     let mut res = one.clone();
     for (xi, yi) in x.iter().zip(y.iter()) {
-        let xi_yi = xi.clone() * yi;
-        res *= xi_yi.clone() + xi_yi - xi - yi + one.clone();
+        // xi * yi + (1 - xi) * (1 - yi) = 2 * xi * yi - xi - yi + 1
+        let xi_yi = cfg.mul(xi, yi);
+        let mut term = cfg.add(&xi_yi, &xi_yi);
+        cfg.sub_assign(&mut term, xi);
+        cfg.sub_assign(&mut term, yi);
+        cfg.add_assign(&mut term, &one);
+        cfg.mul_assign(&mut res, &term);
     }
 
     Ok(res)
@@ -179,30 +133,27 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
 
 /// Evaluate an MLE at a point using a precomputed eq table.
 ///
-/// Given `evaluations[b]` (in `F::Inner` form) and `eq_table[b] = eq(b, r)`
-/// (precomputed via [`build_eq_x_r_vec`]), returns `\sum_{b} eq_table[b] *
-/// evaluations[b]`.
+/// Given `evaluations[b]` and `eq_table[b] = eq(b, r)` (precomputed via
+/// [`build_eq_x_r_vec`]), returns `\sum_{b} eq_table[b] * evaluations[b]`.
 ///
-/// This is equivalent to `DenseMultilinearExtension::evaluate_with_config`
+/// This is equivalent to `DenseMultilinearExtension::evaluate`
 /// but avoids cloning the evaluation vector (the fix-variables algorithm is
 /// destructive). When multiple MLEs share the same evaluation point, build the
 /// eq table once and call this function for each MLE.
-#[allow(clippy::arithmetic_side_effects)]
-pub fn mle_eval_with_eq_table<F: InnerTransparentField>(
-    evaluations: &[F::Inner],
-    eq_table: &[F],
-    cfg: &F::Config,
-) -> F {
-    let mut acc = F::zero_with_cfg(cfg);
+pub fn mle_eval_with_eq_table<C: SemiringConfig>(
+    cfg: &C,
+    evaluations: &[C::Element],
+    eq_table: &[C::Element],
+) -> C::Element {
+    let mut acc = cfg.zero();
     assert_eq!(
         evaluations.len(),
         eq_table.len(),
         "evaluations and eq_table must have the same length"
     );
     for (eval, eq_val) in evaluations.iter().zip(eq_table.iter()) {
-        let mut term = eq_val.clone();
-        term.mul_assign_by_inner(eval);
-        acc += &term;
+        let term = cfg.mul(eq_val, eval);
+        cfg.add_assign(&mut acc, &term);
     }
     acc
 }
@@ -210,11 +161,11 @@ pub fn mle_eval_with_eq_table<F: InnerTransparentField>(
 /// Returns a multilinear polynomial in 2n variables that evaluates to 1
 /// if and only if the second n-bit vector is equal to the first vector plus one
 #[allow(clippy::arithmetic_side_effects)]
-pub fn next_mle_inner<F: Field>(
+pub fn next_mle<E: Clone>(
     num_vars: u32,
-    zero: F,
-    one: F,
-) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors> {
+    zero: E,
+    one: E,
+) -> Result<DenseMultilinearExtension<E>, ArithErrors> {
     if !num_vars.is_multiple_of(2) {
         return Err(ArithErrors::InvalidParameters(
             "num_vars must be even".to_string(),
@@ -222,8 +173,8 @@ pub fn next_mle_inner<F: Field>(
     }
 
     let mut mle = (0..1 << num_vars)
-        .map(|_| zero.inner().clone())
-        .collect_dense_mle_with_zero(zero.inner());
+        .map(|_| zero.clone())
+        .collect_dense_mle_with_zero(&zero);
 
     let half_vars = num_vars / 2;
 
@@ -232,7 +183,7 @@ pub fn next_mle_inner<F: Field>(
 
         let i_concat_next = (next << half_vars) | i;
 
-        mle[i_concat_next] = one.inner().clone();
+        mle[i_concat_next] = one.clone();
     }
 
     Ok(mle)
@@ -259,26 +210,36 @@ pub fn next_mle_inner<F: Field>(
 /// # Panics
 /// Panics if `u.len() != v.len()`.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
+pub fn next_mle_eval<C: SemiringConfig>(cfg: &C, u: &[C::Element], v: &[C::Element]) -> C::Element {
     let n = u.len();
     assert_eq!(n, v.len(), "u and v must have the same length");
     if n == 0 {
-        return zero;
+        return cfg.zero();
     }
+
+    let one = cfg.one();
 
     // suffix_eq[j] = prod_{i=j}^{n-1} eq(u_i, v_i)
     let mut suffix_eq = vec![one.clone(); n + 1];
     for i in (0..n).rev() {
-        suffix_eq[i] = suffix_eq[i + 1].clone()
-            * (u[i].clone() * &v[i] + (one.clone() - &u[i]) * (one.clone() - &v[i]));
+        // eq(u_i, v_i) = u_i * v_i + (1 - u_i) * (1 - v_i)
+        let uv = cfg.mul(&u[i], &v[i]);
+        let eq_i = cfg.add(&uv, &cfg.mul(&cfg.sub(&one, &u[i]), &cfg.sub(&one, &v[i])));
+        suffix_eq[i] = cfg.mul(&suffix_eq[i + 1], &eq_i);
     }
 
     // prefix_carry accumulates prod_{i<j} u_i * (1 - v_i)
     let mut prefix_carry = one.clone();
-    let mut result = zero;
+    let mut result = cfg.zero();
     for j in 0..n {
-        result += prefix_carry.clone() * (one.clone() - &u[j]) * &v[j] * &suffix_eq[j + 1];
-        prefix_carry *= u[j].clone() * (one.clone() - &v[j]);
+        // prefix_carry * (1 - u_j) * v_j * suffix_eq[j + 1]
+        let mut term = cfg.mul(&prefix_carry, &cfg.sub(&one, &u[j]));
+        cfg.mul_assign(&mut term, &v[j]);
+        cfg.mul_assign(&mut term, &suffix_eq[j + 1]);
+        cfg.add_assign(&mut result, &term);
+
+        let carry = cfg.mul(&u[j], &cfg.sub(&one, &v[j]));
+        cfg.mul_assign(&mut prefix_carry, &carry);
     }
     result
 }
@@ -291,13 +252,9 @@ pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
 )]
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::{
-        HasPrimeFieldConfig, IntoWithConfig, crypto_bigint_const_monty::ConstMontyField,
-    };
+    use crypto_primitives::{FixedConfig, crypto_bigint_const_monty::ConstMontyField};
     use num_traits::{One, Zero};
     use proptest::{prelude::*, proptest};
-
-    use crate::mle::MultilinearExtensionWithConfig;
 
     use super::*;
 
@@ -307,12 +264,16 @@ mod tests {
 
     const NUM_VARS: u32 = 8;
 
+    fn cfg() -> FixedConfig<F> {
+        FixedConfig::default()
+    }
+
     #[test]
     fn build_eq_x_r_vec_matches_product_formula() {
         // For each b in {0,1}^n, eq(b, r) = prod_i (b_i * r_i + (1-b_i) * (1-r_i)).
         // The helper uses little-endian indexing: bit i of the index is x_i.
         let r: Vec<F> = (0..NUM_VARS).map(|i| F::from(i + 11)).collect();
-        let eq_vec = build_eq_x_r_vec(&r, &()).unwrap();
+        let eq_vec = build_eq_x_r_vec(&cfg(), &r).unwrap();
 
         let n = 1usize << NUM_VARS;
         assert_eq!(eq_vec.len(), n);
@@ -331,14 +292,14 @@ mod tests {
     #[test]
     fn build_eq_x_r_vec_basic() {
         let r: [F; _] = [F::from(3_u64)];
-        let evals = build_eq_x_r_vec(&r, &()).unwrap();
+        let evals = build_eq_x_r_vec(&cfg(), &r).unwrap();
         assert_eq!(evals, vec![F::one() - r[0], r[0]]);
     }
 
     #[test]
     fn build_eq_x_r_vec_two_vars() {
         let r: [F; _] = [F::from(2_u64), F::from(5_u64)];
-        let evals = build_eq_x_r_vec(&r, &()).unwrap();
+        let evals = build_eq_x_r_vec(&cfg(), &r).unwrap();
         let e00 = (F::one() - r[0]) * (F::one() - r[1]);
         let e01 = r[0] * (F::one() - r[1]);
         let e10 = (F::one() - r[0]) * r[1];
@@ -349,7 +310,7 @@ mod tests {
     #[test]
     fn build_eq_x_r_error_on_empty() {
         let r: [F; 0] = [];
-        let err = build_eq_x_r_vec(&r, &()).unwrap_err();
+        let err = build_eq_x_r_vec(&cfg(), &r).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("Invalid parameters"));
     }
@@ -357,16 +318,16 @@ mod tests {
     #[test]
     fn build_eq_x_r_mle_properties() {
         let r: [F; _] = [F::from(7_u64), F::from(11_u64), F::from(13_u64)];
-        let mle = build_eq_x_r(&r, &()).unwrap();
+        let mle = build_eq_x_r(&cfg(), &r).unwrap();
         assert_eq!(mle.num_vars, r.len());
         let evals = mle.evaluations;
-        let direct = build_eq_x_r_vec(&r, &()).unwrap();
+        let direct = build_eq_x_r_vec(&cfg(), &r).unwrap();
         assert_eq!(evals, direct);
     }
 
     #[test]
     fn next_mle_is_one_on_successors() {
-        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+        let next_mle = next_mle(NUM_VARS, F::zero(), F::one()).unwrap();
 
         for i in 0..(1 << ((NUM_VARS / 2) - 1)) {
             let mut point: Vec<F> = (0..(NUM_VARS / 2))
@@ -387,16 +348,13 @@ mod tests {
                 }
             }));
 
-            assert_eq!(
-                next_mle.clone().evaluate_with_config(&point, &()),
-                Ok(F::one())
-            );
+            assert_eq!(next_mle.clone().evaluate(&cfg(), &point), Ok(F::one()));
         }
     }
 
     #[test]
     fn next_mle_is_one_only_on_successors() {
-        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+        let next_mle = next_mle(NUM_VARS, F::zero(), F::one()).unwrap();
 
         // The number of successors is (1 << (num_vars / 2)) - 1
         // and we know the mle is one on them. So we need to check
@@ -407,17 +365,17 @@ mod tests {
         );
     }
 
-    fn any_f(cfg: <F as HasPrimeFieldConfig>::Config) -> impl Strategy<Value = F> + 'static {
-        any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
+    fn any_f() -> impl Strategy<Value = F> + 'static {
+        any::<u128>().prop_map(F::from)
     }
 
     fn point_n(n: usize) -> impl Strategy<Value = Vec<F>> {
-        prop::collection::vec(any_f(()), n)
+        prop::collection::vec(any_f(), n)
     }
 
     #[test]
     fn next_mle_eval_coincides_with_next_mle_evaluated_at_successors() {
-        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+        let next_mle = next_mle(NUM_VARS, F::zero(), F::one()).unwrap();
 
         for i in 0..(1 << ((NUM_VARS / 2) - 1)) {
             let mut point: Vec<F> = (0..(NUM_VARS / 2))
@@ -440,8 +398,8 @@ mod tests {
 
             let (u, v) = point.split_at(NUM_VARS as usize / 2);
             assert_eq!(
-                next_mle.clone().evaluate_with_config(&point, &()),
-                Ok(next_mle_eval(u, v, F::zero(), F::one()))
+                next_mle.clone().evaluate(&cfg(), &point),
+                Ok(next_mle_eval(&cfg(), u, v))
             );
         }
     }
@@ -450,12 +408,12 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // long running
     fn prop_next_mle_eval_coincides_with_next_mle_evaluate_at_point(r in point_n(NUM_VARS as usize)) {
-        let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
+        let next_mle = next_mle(NUM_VARS, F::zero(), F::one()).unwrap();
 
         let (u, v) = r.split_at(NUM_VARS as usize / 2);
         prop_assert_eq!(
-            next_mle.evaluate_with_config(&r, &()),
-            Ok(next_mle_eval(u, v, F::zero(), F::one()))
+            next_mle.evaluate(&cfg(), &r),
+            Ok(next_mle_eval(&cfg(), u, v))
         );
     }
     }
@@ -467,12 +425,12 @@ mod tests {
         let num_vars: usize = 4;
         let r: Vec<F> = (0..num_vars).map(|i| F::from((i + 3) as u32)).collect();
 
-        let next_1 = build_next_c_r_mle(&r, 1, &()).unwrap();
+        let next_1 = build_next_c_r_mle(&cfg(), &r, 1).unwrap();
 
         // Manually build shift-by-1: evaluations[0] = 0, evaluations[b] = eq(r, b-1)
-        let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+        let eq_r = build_eq_x_r(&cfg(), &r).unwrap();
         let n = 1 << num_vars;
-        let mut expected = vec![F::zero().into_inner(); 1];
+        let mut expected = vec![F::zero(); 1];
         expected.extend_from_slice(&eq_r.evaluations[..n - 1]);
 
         assert_eq!(next_1.evaluations, expected);
@@ -485,8 +443,8 @@ mod tests {
         let num_vars: usize = 4;
         let r: Vec<F> = (0..num_vars).map(|i| F::from((i + 7) as u32)).collect();
 
-        let next_0 = build_next_c_r_mle(&r, 0, &()).unwrap();
-        let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+        let next_0 = build_next_c_r_mle(&cfg(), &r, 0).unwrap();
+        let eq_r = build_eq_x_r(&cfg(), &r).unwrap();
 
         assert_eq!(next_0.evaluations, eq_r.evaluations);
     }
@@ -502,8 +460,8 @@ mod tests {
         let r: Vec<F> = (0..num_vars).map(|i| F::from((i + 5) as u32)).collect();
 
         for c in [2, 3, 5, 7] {
-            let next_c = build_next_c_r_mle(&r, c, &()).unwrap();
-            let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+            let next_c = build_next_c_r_mle(&cfg(), &r, c).unwrap();
+            let eq_r = build_eq_x_r(&cfg(), &r).unwrap();
 
             // First c entries should be zero
             for b in 0..c {
@@ -529,8 +487,8 @@ mod tests {
     fn prop_next_c_r_mle_evaluates_correctly(r in point_n(4), c in 1..15usize) {
         // build_next_c_r_mle(r, c) evaluated at random point should equal
         // the shift-c predicate: sum_b next_c(b) * eq(b, point)
-        let next_c = build_next_c_r_mle(&r, c, &()).unwrap();
-        let eq_r = build_eq_x_r_inner(&r, &()).unwrap();
+        let next_c = build_next_c_r_mle(&cfg(), &r, c).unwrap();
+        let eq_r = build_eq_x_r(&cfg(), &r).unwrap();
 
         // Verify the table structure holds
         let n = 1 << r.len();

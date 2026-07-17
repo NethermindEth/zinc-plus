@@ -1,8 +1,3 @@
-use std::ops::Add;
-
-use num_traits::CheckedAdd;
-use zinc_utils::add;
-
 /// The butterfly table for radix-8 FFT. Each entry is the index of the twiddle
 /// factor to be used for the corresponding input element.
 const BUTTERFLY_TABLE: [[usize; 7]; 8] = [
@@ -19,15 +14,16 @@ const BUTTERFLY_TABLE: [[usize; 7]; 8] = [
 /// Apply butterfly given by `twiddles` to a slice
 /// of subresults in `x`. `twiddles[j][i]` is the factor to multiply
 /// `x[j + 1]` by when the butterfly table requests the `i`-th twiddle.
-/// Use `mul_by_twiddle` as a means to multiply `Out` by `Twiddle`.
-#[allow(clippy::arithmetic_side_effects)]
-pub(crate) fn apply_radix_8_butterflies<R, Twiddle, const CHECK: bool>(
+/// Use `mul_by_twiddle` as a means to multiply `Out` by `Twiddle`, and
+/// `add_out` as a means to add `Out` values (could be checked or not).
+pub(crate) fn apply_radix_8_butterflies<R, Twiddle>(
     ys: [&mut R; 8],
     xs: &[R],
     twiddles: &[[Twiddle; 8]; 7],
     mul_by_twiddle: impl Fn(&R, &Twiddle) -> R,
+    add_out: impl Fn(R, &R) -> R,
 ) where
-    R: CheckedAdd + for<'a> Add<&'a R, Output = R> + Clone,
+    R: Clone,
 {
     ys.into_iter()
         .zip(BUTTERFLY_TABLE.iter())
@@ -36,7 +32,7 @@ pub(crate) fn apply_radix_8_butterflies<R, Twiddle, const CHECK: bool>(
                 xs[0].clone(),
                 |a, (j_minus_1, (x, &twiddle_idx))| {
                     let term = mul_by_twiddle(x, &twiddles[j_minus_1][twiddle_idx]);
-                    if CHECK { add!(a, &term) } else { a + &term }
+                    add_out(a, &term)
                 },
             )
         });

@@ -1,11 +1,10 @@
-use std::fmt::{Display, Formatter};
-use zinc_utils::{add, from_ref::FromRef};
-
 use crate::{
     ConstraintBuilder, TraceRow, Uair,
-    dummy_semiring::DummySemiring,
+    dummy_semiring::{DUMMY_SEMIRING_CONFIG, DummySemiring, DummySemiringConfig},
     ideal::{Ideal, IdealCheck, IdealCheckError},
 };
+use std::fmt::{Display, Formatter};
+use zinc_utils::{add, from_ref::FromRef};
 
 /// A `ConstraintBuilder` that collects ideals used in a `Uair`.
 ///
@@ -14,7 +13,7 @@ use crate::{
 /// [`ConstraintBuilder::assert_in_fq_ideal`]) are kept in separate vectors, so
 /// downstream consumers (the PIOP layer) can dispatch them independently. The
 /// $F_q[X]$ ideals are wrapped in [`IdealOrZero`] to reuse the unconditional
-/// [`IdealCheck<DummySemiring>`] proxy impl used during the collection;
+/// `IdealCheck` (over `DummySemiring`) proxy impl used during the collection;
 /// the `Zero` variant is never produced by the collection (there is no
 /// `assert_fq_zero`) but downstream consumers may construct it.
 pub struct IdealCollector<I: Ideal, IFq: Ideal> {
@@ -48,7 +47,16 @@ pub fn collect_ideals<U: Uair>(num_constraints: usize) -> IdealCollector<U::Idea
     let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
     let down_row =
         TraceRow::from_slice_with_layout(&down_dummy, sig.down_cols().as_column_layout());
-    U::constrain(&mut ideal_collector, up_row, down_row);
+    U::constrain_general(
+        &mut ideal_collector,
+        &DUMMY_SEMIRING_CONFIG,
+        up_row,
+        down_row,
+        |_| DummySemiring,
+        |_, _| Some(DummySemiring),
+        IdealOrZero::from_ref,
+        IdealOrZero::from_ref,
+    );
 
     ideal_collector
 }
@@ -110,7 +118,7 @@ impl<I: Ideal> Display for IdealOrZero<I> {
         write!(f, "IdealOrZero<")?;
         match self {
             Self::Zero => write!(f, "Zero")?,
-            Self::NonZero(ideal) => write!(f, "{}", ideal)?,
+            Self::NonZero(ideal) => write!(f, "{ideal}")?,
         }
         write!(f, ">")?;
         Ok(())
@@ -131,8 +139,12 @@ impl<I: Ideal> FromRef<I> for IdealOrZero<I> {
     }
 }
 
-impl<I: Ideal> IdealCheck<DummySemiring> for IdealOrZero<I> {
-    fn contains(&self, _value: &DummySemiring) -> Result<bool, IdealCheckError> {
+impl<I: Ideal> IdealCheck<DummySemiringConfig> for IdealOrZero<I> {
+    fn contains(
+        &self,
+        _cfg: &DummySemiringConfig,
+        _value: &DummySemiring,
+    ) -> Result<bool, IdealCheckError> {
         // Do nothing.
         Ok(true)
     }

@@ -73,29 +73,30 @@ use crate::{
         prover::ProverState as SumcheckProverState,
     },
 };
-use crypto_primitives::PrimeField;
+use crypto_primitives::{
+    BaseFieldConfig, ProjectPrimitiveIntegersWithConfig, SemiringConfig, SetConfig, Wrapper,
+};
 use itertools::Itertools;
-use num_traits::Zero;
 use std::{marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
+    mle::DenseMultilinearExtension,
     univariate::binary::BinaryPoly,
-    utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
+    utils::{ArithErrors, build_eq_x_r, eq_eval},
 };
 use zinc_transcript::{
     delegate_transcribable,
     traits::{ConstTranscribable, Transcript},
 };
-use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul, powers};
+use zinc_utils::{add, mul, powers};
 
 //
 // Structs
 //
 
 /// Booleanity sumcheck group constructor / verifier.
-pub struct BooleanityChecker<F: InnerTransparentField>(PhantomData<F>);
+pub struct BooleanityChecker<C: SemiringConfig>(PhantomData<C>);
 
 /// Proof produced by the booleanity prover.
 ///
@@ -106,14 +107,14 @@ pub struct BooleanityChecker<F: InnerTransparentField>(PhantomData<F>);
 /// after which the protocol layer squeezes the $\alpha'$ challenge
 /// used to bind the bit-decomposition into the multipoint-eval boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BooleanityProof<F: PrimeField> {
+pub struct BooleanityProof<F> {
     /// Flat list of `\widetilde{v_{j,i}}(r*)`, ordered `(j-major, i-minor)`.
     /// Length = `num_wit_bin_cols * D`.
     pub bit_slice_evals: Vec<F>,
 }
 
 delegate_transcribable!(BooleanityProof<F> { bit_slice_evals: Vec<F> }
-    where F: PrimeField, F::Integer: ConstTranscribable);
+    where F: ConstTranscribable);
 
 /// Ancillary data produced by [`BooleanityChecker::prepare_sumcheck_group`]
 /// and consumed by [`BooleanityChecker::finalize_prover`].
@@ -128,7 +129,7 @@ pub struct BoolProverAncillary {
 
 /// Ancillary data produced by [`BooleanityChecker::prepare_verifier`] and
 /// consumed by [`BooleanityChecker::finalize_verifier`].
-pub struct BoolVerifierAncillary<F: PrimeField> {
+pub struct BoolVerifierAncillary<F> {
     /// Powers of the single batching challenge over the flat
     /// `(j-major, i-minor)` index: `[1, alpha, ..., alpha^{N*D - 1}]`.
     pub alpha_powers: Vec<F>,
@@ -151,7 +152,7 @@ pub struct BoolVerifierAncillary<F: PrimeField> {
 /// extra multipoint-eval column (and up-eval $c'_j$) per witness
 /// binary-poly column — see the module-level docs.
 #[derive(Clone, Debug)]
-pub struct BoolVerifierSubclaim<F: PrimeField> {
+pub struct BoolVerifierSubclaim<F> {
     /// Bit-slice MLE evaluations at `r*`, in `(j-major, i-minor)` order.
     pub bit_slice_evals: Vec<F>,
 }
@@ -160,10 +161,11 @@ pub struct BoolVerifierSubclaim<F: PrimeField> {
 // Protocol
 //
 
-impl<F> BooleanityChecker<F>
+impl<C> BooleanityChecker<C>
 where
-    F: InnerTransparentField + Send + Sync + 'static,
-    F::Integer: ConstTranscribable + Clone + Send + Sync + Zero + Default,
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
+    C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
 {
     /// Build the booleanity sumcheck group, to be appended to the
     /// multi-degree sumcheck.
@@ -177,21 +179,21 @@ where
         transcript: &mut impl Transcript,
         trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
         num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(MultiDegreeSumcheckGroup<F>, BoolProverAncillary), BooleanityError<F>> {
+        field_cfg: &C,
+    ) -> Result<(MultiDegreeSumcheckGroup<C>, BoolProverAncillary), BooleanityError<C::Element>>
+    {
         let n = trace_bin_poly.len();
-        let one = F::one_with_cfg(field_cfg);
-        let zero = F::zero_with_cfg(field_cfg);
+        let one = field_cfg.one();
 
         // Order of challenge squeezing must match between prover and verifier.
 
         // 1. Zerocheck point r.
-        let r: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
+        let r: Vec<C::Element> = transcript.get_field_challenges(num_vars, field_cfg);
 
         // 2. Single batching challenge alpha over the flat (j-major, i-minor) index.
         //    Powers vector has length N*D.
-        let alpha: F = transcript.get_field_challenge(field_cfg);
-        let alpha_powers: Vec<F> = powers(alpha, one.clone(), n.saturating_mul(D));
+        let alpha: C::Element = transcript.get_field_challenge(field_cfg);
+        let alpha_powers: Vec<C::Element> = powers(field_cfg, &alpha, n.saturating_mul(D));
 
         // 3. comb_fn (degree 3 in the variables), used by `MultiDegreeSumcheck` in
         //    rounds 2..num_vars:
@@ -200,24 +202,23 @@ where
         //
         //    The fast path emits the round-1 message and the post-round-1
         //    folded MLEs directly, so this closure is *not* invoked in round 1.
-        let comb_fn: CombFn<F> = {
+        let comb_fn: CombFn<C::Element> = {
             let alpha_powers = alpha_powers.clone();
-            let one = one.clone();
-            let zero = zero;
-            Box::new(move |mle_values: &[F]| {
+            let field_cfg = field_cfg.clone();
+            Box::new(move |mle_values: &[C::Element]| {
                 let eq_r_val = &mle_values[0];
-                let sum = batched_booleanity_sum(&mle_values[1..], &alpha_powers, &zero, &one);
-                sum * eq_r_val
+                let sum = batched_booleanity_sum(&field_cfg, &mle_values[1..], &alpha_powers);
+                field_cfg.mul(&sum, eq_r_val)
             })
         };
 
         // 4. Precompute `E_other(b')` = eq(b', r[1..]) for the fast path.
         //    `build_eq_x_r_inner` rejects empty inputs, so handle num_vars == 1
         //    explicitly by emitting the empty-product table `[1]`.
-        let eq_other_table: Vec<F::Inner> = if num_vars <= 1 {
-            vec![one.into_inner()]
+        let eq_other_table: Vec<C::Element> = if num_vars <= 1 {
+            vec![one]
         } else {
-            build_eq_x_r_inner(&r[1..], field_cfg)?.evaluations
+            build_eq_x_r(field_cfg, &r[1..])?.evaluations
         };
 
         let r_first_coord = r
@@ -225,7 +226,7 @@ where
             .next()
             .expect("num_vars >= 1 guarantees a first coordinate");
 
-        let fast_path = BooleanityRound1FastPath::<F, D> {
+        let fast_path = BooleanityRound1FastPath::<C, D> {
             binary_cols: trace_bin_poly.to_vec(),
             alpha_powers,
             eq_other_table,
@@ -257,10 +258,10 @@ where
     /// transcript.
     pub fn finalize_prover(
         transcript: &mut impl Transcript,
-        sumcheck_prover_state: SumcheckProverState<F>,
+        sumcheck_prover_state: SumcheckProverState<C>,
         ancillary: BoolProverAncillary,
-        field_cfg: &F::Config,
-    ) -> Result<BooleanityProof<F>, BooleanityError<F>> {
+        field_cfg: &C,
+    ) -> Result<BooleanityProof<C::Element>, BooleanityError<C::Element>> {
         debug_assert!(
             sumcheck_prover_state
                 .mles
@@ -283,17 +284,15 @@ where
         debug_assert_eq!(mles.len(), add!(1, active_len));
 
         // Skip MLE 0 = eq_r (verifier recomputes it).
-        let bit_slice_evals: Vec<F> = mles
+        let bit_slice_evals: Vec<C::Element> = mles
             .drain(1..)
-            .map(|mle| {
-                mle.evaluate_with_config(slice::from_ref(&last_sumcheck_challenge), field_cfg)
-            })
+            .map(|mle| mle.evaluate(field_cfg, slice::from_ref(&last_sumcheck_challenge)))
             .collect::<Result<Vec<_>, _>>()?;
 
         debug_assert_eq!(bit_slice_evals.len(), active_len);
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
-        transcript.absorb_random_field_slice(&bit_slice_evals, &mut transcription_buf);
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_field_element_slice(&bit_slice_evals, &mut transcription_buf);
 
         Ok(BooleanityProof { bit_slice_evals })
     }
@@ -305,27 +304,29 @@ where
     /// ordering.
     pub fn prepare_verifier(
         transcript: &mut impl Transcript,
-        claimed_sum: &F,
+        claimed_sum: &C::Element,
         num_wit_bin_cols: usize,
         bit_width: usize,
         num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<BoolVerifierAncillary<F>, BooleanityError<F>> {
+        field_cfg: &C,
+    ) -> Result<BoolVerifierAncillary<C::Element>, BooleanityError<C::Element>> {
         if num_wit_bin_cols == 0 {
             return Err(BooleanityError::NoBinaryPolyColumns);
         }
-        if !F::is_zero(claimed_sum) {
+        if !field_cfg.is_zero(claimed_sum) {
             return Err(BooleanityError::NonZeroClaimedSum {
                 got: claimed_sum.clone(),
             });
         }
 
-        let one = F::one_with_cfg(field_cfg);
-
         // Re-squeeze in the same order as the prover.
-        let zerocheck_point: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
-        let alpha: F = transcript.get_field_challenge(field_cfg);
-        let alpha_powers: Vec<F> = powers(alpha, one, num_wit_bin_cols.saturating_mul(bit_width));
+        let zerocheck_point: Vec<C::Element> = transcript.get_field_challenges(num_vars, field_cfg);
+        let alpha: C::Element = transcript.get_field_challenge(field_cfg);
+        let alpha_powers: Vec<C::Element> = powers(
+            field_cfg,
+            &alpha,
+            num_wit_bin_cols.saturating_mul(bit_width),
+        );
 
         Ok(BoolVerifierAncillary {
             alpha_powers,
@@ -350,12 +351,12 @@ where
     /// module-level docs.
     pub fn finalize_verifier(
         transcript: &mut impl Transcript,
-        proof: BooleanityProof<F>,
-        shared_point: Vec<F>,
-        expected_eval: &F,
-        ancillary: BoolVerifierAncillary<F>,
-        field_cfg: &F::Config,
-    ) -> Result<BoolVerifierSubclaim<F>, BooleanityError<F>> {
+        proof: BooleanityProof<C::Element>,
+        shared_point: Vec<C::Element>,
+        expected_eval: &C::Element,
+        ancillary: BoolVerifierAncillary<C::Element>,
+        field_cfg: &C,
+    ) -> Result<BoolVerifierSubclaim<C::Element>, BooleanityError<C::Element>> {
         let expected_len = ancillary
             .num_wit_bin_cols
             .saturating_mul(ancillary.bit_width);
@@ -366,16 +367,13 @@ where
             });
         }
 
-        let one = F::one_with_cfg(field_cfg);
-        let zero = F::zero_with_cfg(field_cfg);
-
         // eq(r*, r) — selector value at the shared sumcheck point.
-        let eq_r_val = eq_eval(&shared_point, &ancillary.zerocheck_point, one.clone())?;
+        let eq_r_val = eq_eval(field_cfg, &shared_point, &ancillary.zerocheck_point)?;
 
         // Recompute the comb_fn body at r* using the received bit-slice evals.
         let sum =
-            batched_booleanity_sum(&proof.bit_slice_evals, &ancillary.alpha_powers, &zero, &one);
-        let expected_claim_value = sum * eq_r_val;
+            batched_booleanity_sum(field_cfg, &proof.bit_slice_evals, &ancillary.alpha_powers);
+        let expected_claim_value = field_cfg.mul(&sum, &eq_r_val);
 
         if expected_claim_value != *expected_eval {
             return Err(BooleanityError::ClaimValueDoesNotMatch {
@@ -384,8 +382,8 @@ where
             });
         }
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
-        transcript.absorb_random_field_slice(&proof.bit_slice_evals, &mut transcription_buf);
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_field_element_slice(&proof.bit_slice_evals, &mut transcription_buf);
 
         Ok(BoolVerifierSubclaim {
             bit_slice_evals: proof.bit_slice_evals,
@@ -419,30 +417,29 @@ where
 /// The round-1 fold consumes the verifier challenge $r_1$ and writes each
 /// post-fold bit-slice entry via a 4-way table lookup keyed by $(A, B) \in
 /// \{0,1\}^2$.
-struct BooleanityRound1FastPath<F: PrimeField, const D: usize> {
+struct BooleanityRound1FastPath<C: SetConfig, const D: usize> {
     /// Per-column binary trace (cloned to avoid lifetime issues).
     binary_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
     /// Powers of the batching challenge over the flat `(j-major, i-minor)`
     /// index: `[1, alpha, ..., alpha^{N*D - 1}]`.
-    alpha_powers: Vec<F>,
+    alpha_powers: Vec<C::Element>,
     /// Evaluations of $E_{\text{other}}(b') = \widetilde{eq_{r_{[1..]}}}(b')$
     /// on `{0,1}^{num_vars - 1}`. When `num_vars == 1` this is the single
     /// entry `[1]` (the empty product).
-    eq_other_table: Vec<F::Inner>,
+    eq_other_table: Vec<C::Element>,
     /// The first coordinate of the zerocheck point, $r_0$.
-    r_first_coord: F,
+    r_first_coord: C::Element,
     /// Number of variables of the sumcheck.
     num_vars: usize,
 }
 
-impl<F, const D: usize> Round1FastPath<F> for BooleanityRound1FastPath<F, D>
+impl<C, const D: usize> Round1FastPath<C> for BooleanityRound1FastPath<C, D>
 where
-    F: InnerTransparentField + Send + Sync + 'static,
-    F::Integer: Zero + Clone + Send + Sync,
+    C: SemiringConfig,
 {
-    fn round_1_message(&self, config: &F::Config) -> Round1Output<F> {
-        let zero = F::zero_with_cfg(config);
-        let one = F::one_with_cfg(config);
+    fn round_1_message(&self, config: &C) -> Round1Output<C::Element> {
+        let zero = config.zero();
+        let one = config.one();
         let half_n: usize = 1_usize << self.num_vars.saturating_sub(1);
 
         // T_1 = sum_{b'} S(b') * E_other(b').
@@ -456,29 +453,29 @@ where
                 for (i, (a_bit, b_bit)) in row_a.iter().zip(row_b.iter()).enumerate() {
                     if a_bit != b_bit {
                         let k = add!(i, mul!(j, D));
-                        s_b += &self.alpha_powers[k];
+                        config.add_assign(&mut s_b, &self.alpha_powers[k]);
                     }
                 }
             }
-            let eq_other = F::new_unchecked_with_cfg(self.eq_other_table[b_prime].clone(), config);
-            t1 += s_b * &eq_other;
+            let term = config.mul(&s_b, &self.eq_other_table[b_prime]);
+            config.add_assign(&mut t1, &term);
         }
 
         // Closed-form tail evaluations (with X(X-1) = 0 at X=1):
         //   p_1(1) = 0
         //   p_1(2) = e_0(2) * 2*1*T_1 = 2 * (3*r_0 - 1) * T_1
         //   p_1(3) = e_0(3) * 3*2*T_1 = 6 * (5*r_0 - 2) * T_1
-        let two = one.clone() + &one;
-        let three = two.clone() + &one;
-        let five = three.clone() + &two;
-        let six = three.clone() * &two;
+        let two = config.add(&one, &one);
+        let three = config.add(&two, &one);
+        let five = config.add(&three, &two);
+        let six = config.mul(&three, &two);
 
-        let three_r0_minus_one = three * &self.r_first_coord - &one;
-        let five_r0_minus_two = five * &self.r_first_coord - &two;
+        let three_r0_minus_one = config.sub(&config.mul(&three, &self.r_first_coord), &one);
+        let five_r0_minus_two = config.sub(&config.mul(&five, &self.r_first_coord), &two);
 
         let p1_at_1 = zero.clone();
-        let p1_at_2 = two * three_r0_minus_one * &t1;
-        let p1_at_3 = six * five_r0_minus_two * &t1;
+        let p1_at_2 = config.mul(&config.mul(&two, &three_r0_minus_one), &t1);
+        let p1_at_3 = config.mul(&config.mul(&six, &five_r0_minus_two), &t1);
 
         Round1Output {
             // Booleanity is a zerocheck; the asserted sum p_1(0)+p_1(1) is 0.
@@ -489,9 +486,9 @@ where
 
     fn fold_with_challenge(
         self: Box<Self>,
-        r_1: &F,
-        config: &F::Config,
-    ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        r_1: &C::Element,
+        config: &C,
+    ) -> Vec<DenseMultilinearExtension<C::Element>> {
         // Edge case: when the sumcheck has only one round, the standard prover never
         // performs the folding.
         //
@@ -500,12 +497,12 @@ where
         // directly without applying the fold.
         if self.num_vars <= 1 {
             let r = [self.r_first_coord.clone()];
-            let eq_r = build_eq_x_r_inner(&r, config)
-                .expect("num_vars == 1 implies a single-coordinate r");
-            let mut out: Vec<DenseMultilinearExtension<F::Inner>> =
+            let eq_r =
+                build_eq_x_r(config, &r).expect("num_vars == 1 implies a single-coordinate r");
+            let mut out: Vec<DenseMultilinearExtension<C::Element>> =
                 Vec::with_capacity(self.binary_cols.len().saturating_mul(D).saturating_add(1));
             out.push(eq_r);
-            out.extend(build_witness_bit_slice_mles::<F, D>(
+            out.extend(build_witness_bit_slice_mles::<C, D>(
                 &self.binary_cols,
                 config,
             ));
@@ -517,35 +514,35 @@ where
         let new_num_vars = self.num_vars.saturating_sub(1);
         let half_n: usize = 1_usize << new_num_vars;
 
-        let one = F::one_with_cfg(config);
+        let one = config.one();
 
         // 4-way table for bit-slice fold: index = (A as usize) << 1 | (B as usize).
         //   (0,0) -> 0
         //   (0,1) -> r_1
         //   (1,0) -> 1 - r_1
         //   (1,1) -> 1
-        let zero_inner = F::zero_with_cfg(config).into_inner();
-        let one_inner = one.inner().clone();
-        let r1_inner = r_1.inner().clone();
-        let one_minus_r1_inner = (one.clone() - r_1).into_inner();
-        let bit_fold_table: [F::Inner; 4] = [zero_inner, r1_inner, one_minus_r1_inner, one_inner];
+        let bit_fold_table: [C::Element; 4] = [
+            config.zero(),
+            r_1.clone(),
+            config.sub(&one, r_1),
+            one.clone(),
+        ];
 
         // eq_r fold: e_0(r_1) * E_other(b').
         // e_0(r_1) = (1 - r_1)(1 - r_0) + r_1 * r_0.
-        let one_minus_r0 = one.clone() - &self.r_first_coord;
-        let one_minus_r1 = one - r_1;
-        let e_0_r1: F = (one_minus_r1 * &one_minus_r0) + (r_1.clone() * &self.r_first_coord);
+        let one_minus_r0 = config.sub(&one, &self.r_first_coord);
+        let one_minus_r1 = config.sub(&one, r_1);
+        let e_0_r1: C::Element = config.add(
+            &config.mul(&one_minus_r1, &one_minus_r0),
+            &config.mul(r_1, &self.r_first_coord),
+        );
 
         let folded_eq_r_evals = (0..half_n)
-            .map(|b_prime| {
-                let e_other =
-                    F::new_unchecked_with_cfg(self.eq_other_table[b_prime].clone(), config);
-                (e_0_r1.clone() * &e_other).into_inner()
-            })
+            .map(|b_prime| config.mul(&e_0_r1, &self.eq_other_table[b_prime]))
             .collect_vec();
 
         // Length = N*D + 1
-        let mut out: Vec<DenseMultilinearExtension<F::Inner>> =
+        let mut out: Vec<DenseMultilinearExtension<C::Element>> =
             Vec::with_capacity(total_bit_slices.saturating_add(1));
         out.push(DenseMultilinearExtension {
             num_vars: new_num_vars,
@@ -555,7 +552,7 @@ where
         // Bit-slice fold via 4-way table lookup; emit MLEs in
         // (j-major, i-minor) order.
         for col in &self.binary_cols {
-            let mut col_evals: Vec<Vec<F::Inner>> =
+            let mut col_evals: Vec<Vec<C::Element>> =
                 (0..D).map(|_| Vec::with_capacity(half_n)).collect();
             for b_prime in 0..half_n {
                 let two_b = mul!(2, b_prime);
@@ -581,16 +578,16 @@ where
 
 /// Errors from the booleanity subprotocol.
 #[derive(Debug, Error)]
-pub enum BooleanityError<F: PrimeField> {
+pub enum BooleanityError<F: std::fmt::Debug> {
     #[error("no binary polynomial columns provided to booleanity checker")]
     NoBinaryPolyColumns,
     #[error("sumcheck error: {0}")]
     SumcheckError(#[from] SumCheckError<F>),
-    #[error("expected booleanity claimed sum is non-zero: got {got}")]
+    #[error("expected booleanity claimed sum is non-zero: got {got:?}")]
     NonZeroClaimedSum { got: F },
     #[error("wrong number of bit-slice evaluations: expected {expected}, got {got}")]
     WrongBitSliceEvalsNumber { expected: usize, got: usize },
-    #[error("booleanity claim value does not match: expected {expected}, got {got}")]
+    #[error("booleanity claim value does not match: expected {expected:?}, got {got:?}")]
     ClaimValueDoesNotMatch { expected: F, got: F },
     #[error("error evaluating MLE: {0}")]
     MleEvaluationError(#[from] EvaluationError),
@@ -614,18 +611,18 @@ pub enum BooleanityError<F: PrimeField> {
 ///
 /// This is the body of the booleanity sumcheck's combination function
 /// (without the leading `eq_r` factor).
-fn batched_booleanity_sum<F: PrimeField>(
-    bit_slice_values: &[F],
-    alpha_powers: &[F],
-    zero: &F,
-    one: &F,
-) -> F {
+fn batched_booleanity_sum<C: SemiringConfig>(
+    cfg: &C,
+    bit_slice_values: &[C::Element],
+    alpha_powers: &[C::Element],
+) -> C::Element {
     debug_assert_eq!(bit_slice_values.len(), alpha_powers.len());
 
-    let mut sum = zero.clone();
+    let one = cfg.one();
+    let mut sum = cfg.zero();
     for (v, alpha_k) in bit_slice_values.iter().zip(alpha_powers.iter()) {
-        let booleanity = (v.clone() - one) * v;
-        sum += booleanity * alpha_k;
+        let booleanity = cfg.mul(&cfg.sub(v, &one), v);
+        cfg.add_assign(&mut sum, &cfg.mul(&booleanity, alpha_k));
     }
     sum
 }
@@ -641,34 +638,29 @@ fn batched_booleanity_sum<F: PrimeField>(
 /// [`BooleanityRound1FastPath::fold_with_challenge`] (where the standard
 /// prover never performs the round-1 fold, so the fast path must emit
 /// the un-folded MLE bundle directly) and by booleanity unit tests.
-fn build_witness_bit_slice_mles<F, const D: usize>(
+fn build_witness_bit_slice_mles<C, const D: usize>(
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    field_cfg: &F::Config,
-) -> Vec<DenseMultilinearExtension<F::Inner>>
+    field_cfg: &C,
+) -> Vec<DenseMultilinearExtension<C::Element>>
 where
-    F: PrimeField,
-    F::Integer: Clone + Send + Sync,
+    C: SemiringConfig,
 {
-    let zero_inner = F::zero_with_cfg(field_cfg).into_inner();
-    let one_inner = F::one_with_cfg(field_cfg).into_inner();
+    let zero = field_cfg.zero();
+    let one = field_cfg.one();
 
     let mut out = Vec::with_capacity(trace_bin_poly.len().saturating_mul(D));
     for col in trace_bin_poly {
         let num_vars = col.num_vars;
         let n_rows = col.evaluations.len();
         for i in 0..D {
-            let mut evals: Vec<F::Inner> = Vec::with_capacity(n_rows);
+            let mut evals: Vec<C::Element> = Vec::with_capacity(n_rows);
             for entry in col.iter() {
                 let bit = entry
                     .iter()
                     .nth(i)
                     .expect("BinaryPoly<D> has D coefficients")
                     .into_inner();
-                evals.push(if bit {
-                    one_inner.clone()
-                } else {
-                    zero_inner.clone()
-                });
+                evals.push(if bit { one.clone() } else { zero.clone() });
             }
             out.push(DenseMultilinearExtension {
                 num_vars,
@@ -695,12 +687,15 @@ mod tests {
     use super::*;
     use crate::sumcheck::multi_degree::MultiDegreeSumcheck;
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
-    use num_traits::One;
+    use crypto_primitives::{FixedConfig, crypto_bigint_const_monty::ConstMontyField};
+    use num_traits::{One, Zero};
+    use zinc_poly::mle::MultilinearExtension;
     use zinc_transcript::Blake3Transcript;
+    use zinc_utils::powers;
 
     const_monty_params!(TestParams, U128, "00000000b933426489189cb5b47d567f");
     type F = ConstMontyField<TestParams, { U128::LIMBS }>;
+    type FC = FixedConfig<F>;
 
     const D: usize = 4;
 
@@ -751,14 +746,14 @@ mod tests {
         expect_err_is: impl FnOnce(&BooleanityError<F>) -> bool,
         expect_ok: bool,
     ) {
-        let cfg = &();
+        let cfg = &FC::default();
 
         // Prover side.
         let mut pt = make_transcript();
         let (group, anc) =
-            BooleanityChecker::<F>::prepare_sumcheck_group::<D>(&mut pt, cols, num_vars, cfg)
+            BooleanityChecker::<FC>::prepare_sumcheck_group::<D>(&mut pt, cols, num_vars, cfg)
                 .expect("prepare_sumcheck_group failed");
-        let mut sumcheck_outputs = MultiDegreeSumcheck::<F>::prove_as_subprotocol(
+        let mut sumcheck_outputs = MultiDegreeSumcheck::<FC>::prove_as_subprotocol(
             &mut pt,
             vec![(vec![group], cfg)],
             num_vars,
@@ -766,13 +761,13 @@ mod tests {
         );
         let (md_proof, states) = sumcheck_outputs.pop().expect("single family");
         let state = states.into_iter().next().unwrap();
-        let mut proof = BooleanityChecker::<F>::finalize_prover(&mut pt, state, anc, cfg)
+        let mut proof = BooleanityChecker::<FC>::finalize_prover(&mut pt, state, anc, cfg)
             .expect("finalize prover");
         tamper_proof(&mut proof);
 
         // Verifier side.
         let mut vt = make_transcript();
-        let anc_v = BooleanityChecker::<F>::prepare_verifier(
+        let anc_v = BooleanityChecker::<FC>::prepare_verifier(
             &mut vt,
             &md_proof.claimed_sums()[0],
             cols.len(),
@@ -781,7 +776,7 @@ mod tests {
             cfg,
         )
         .expect("prepare_verifier (claimed sum should be zero for honest input)");
-        let md_subclaims = MultiDegreeSumcheck::<F>::verify_as_subprotocol(
+        let md_subclaims = MultiDegreeSumcheck::<FC>::verify_as_subprotocol(
             &mut vt,
             num_vars,
             &[(&md_proof, cfg)],
@@ -791,7 +786,7 @@ mod tests {
         .pop()
         .expect("single family");
 
-        let res = BooleanityChecker::<F>::finalize_verifier(
+        let res = BooleanityChecker::<FC>::finalize_verifier(
             &mut vt,
             proof,
             md_subclaims.point().to_vec(),
@@ -848,7 +843,7 @@ mod tests {
         // sumcheck (MultiDegreeSumcheck requires at least one group) but we
         // do exercise the helper for the empty case.
         let cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> = vec![];
-        let mles = build_witness_bit_slice_mles::<F, D>(&cols, &());
+        let mles = build_witness_bit_slice_mles::<FC, D>(&cols, &FC::default());
         assert!(mles.is_empty());
     }
 
@@ -914,7 +909,7 @@ mod tests {
     // Round-1 fast path cross-validation.
     //
     // These tests pin down the fast path's bit-identical equivalence with
-    // the standard prover (`prove_round` + `fix_variables_with_config`) on
+    // the standard prover (`prove_round` + `fix_variables`) on
     // the same booleanity inputs. If either of these fails the fast path
     // has diverged from the standard path and the verifier will reject.
     //
@@ -973,7 +968,7 @@ mod tests {
             .map(|i| F::from((i as u32) * 13 + 41))
             .collect();
         let alpha = F::from(23u32);
-        let alpha_powers = powers(alpha, one.clone(), cols.len() * D);
+        let alpha_powers = powers(&FC::default(), &alpha, cols.len() * D);
 
         FastPathHarness {
             cols,
@@ -988,31 +983,32 @@ mod tests {
     fn standard_path_mles(
         cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
         r: &[F],
-        cfg: &(),
-    ) -> Vec<DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>> {
+        cfg: &FC,
+    ) -> Vec<DenseMultilinearExtension<F>> {
         let mut mles = Vec::with_capacity(1_usize.saturating_add(cols.len().saturating_mul(D)));
-        mles.push(build_eq_x_r_inner(r, cfg).expect("eq_r build"));
-        mles.extend(build_witness_bit_slice_mles::<F, D>(cols, cfg));
+        mles.push(build_eq_x_r(cfg, r).expect("eq_r build"));
+        mles.extend(build_witness_bit_slice_mles::<FC, D>(cols, cfg));
         mles
     }
 
-    fn make_comb_fn(alpha_powers: Vec<F>, zero: F, one: F) -> CombFn<F> {
+    fn make_comb_fn(alpha_powers: Vec<F>) -> CombFn<F> {
         Box::new(move |mle_values: &[F]| {
+            let cfg = FC::default();
             let eq_r_val = &mle_values[0];
-            let sum = batched_booleanity_sum(&mle_values[1..], &alpha_powers, &zero, &one);
+            let sum = batched_booleanity_sum(&cfg, &mle_values[1..], &alpha_powers);
             sum * eq_r_val
         })
     }
 
-    fn make_fast_path(h: &FastPathHarness, cfg: &()) -> BooleanityRound1FastPath<F, D> {
-        let eq_other_table: Vec<<F as crypto_primitives::Field>::Inner> = if h.num_vars <= 1 {
-            vec![h.one.clone().into_inner()]
+    fn make_fast_path(h: &FastPathHarness, cfg: &FC) -> BooleanityRound1FastPath<FC, D> {
+        let eq_other_table: Vec<F> = if h.num_vars <= 1 {
+            vec![h.one.clone()]
         } else {
-            build_eq_x_r_inner(&h.r[1..], cfg)
+            build_eq_x_r(cfg, &h.r[1..])
                 .expect("eq_other build")
                 .evaluations
         };
-        BooleanityRound1FastPath::<F, D> {
+        BooleanityRound1FastPath::<FC, D> {
             binary_cols: h.cols.clone(),
             alpha_powers: h.alpha_powers.clone(),
             eq_other_table,
@@ -1026,7 +1022,7 @@ mod tests {
     /// inputs.
     #[test]
     fn fast_path_round_1_matches_standard_prove_round() {
-        let cfg = &();
+        let cfg = &FC::default();
         let h = cross_validation_inputs();
         let fast_path = make_fast_path(&h, cfg);
 
@@ -1035,8 +1031,8 @@ mod tests {
         // Standard path: build full-size MLEs, then run a single prove_round
         // (with no verifier message — this is the first round).
         let mles = standard_path_mles(&h.cols, &h.r, cfg);
-        let comb_fn = make_comb_fn(h.alpha_powers.clone(), h.zero.clone(), h.one.clone());
-        let mut state = SumcheckProverState::<F>::new(mles, h.num_vars, 3);
+        let comb_fn = make_comb_fn(h.alpha_powers.clone());
+        let mut state = SumcheckProverState::<FC>::new(mles, h.num_vars, 3);
         let std_msg = state.prove_round(&None, &comb_fn, cfg);
 
         assert_eq!(
@@ -1055,11 +1051,11 @@ mod tests {
     }
 
     /// Post-round-1 MLE values from `fold_with_challenge(&r_1)` are
-    /// bit-identical to what `fix_variables_with_config(&[r_1], cfg)`
+    /// bit-identical to what `fix_variables(cfg, &[r_1])`
     /// would produce on the standard-path full-size MLEs.
     #[test]
     fn fast_path_fold_with_r1_matches_standard_fix_variables() {
-        let cfg = &();
+        let cfg = &FC::default();
         let h = cross_validation_inputs();
         let r_1 = F::from(97u32);
 
@@ -1070,7 +1066,7 @@ mod tests {
         // Standard path: build full-size MLEs, then fold the first variable.
         let mut std_mles = standard_path_mles(&h.cols, &h.r, cfg);
         for mle in &mut std_mles {
-            mle.fix_variables_with_config(std::slice::from_ref(&r_1), cfg);
+            mle.fix_variables(cfg, std::slice::from_ref(&r_1));
         }
 
         assert_eq!(

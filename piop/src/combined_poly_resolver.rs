@@ -18,24 +18,27 @@ use crate::{
         prover::ProverState as SumcheckProverState,
     },
 };
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
+use crypto_primitives::{
+    BaseFieldConfig, ProjectPrimitiveIntegersWithConfig, SetConfig, SetElement,
+};
 use itertools::Itertools;
-use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
-    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
-    utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
+    mle::DenseMultilinearExtension,
+    univariate::dynamic::{DynamicPolynomial, HasDynamicPolynomialConfig},
+    utils::{ArithErrors, build_eq_x_r, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
-    UNCHECKED, add, cfg_iter, from_ref::FromRef, inner_product::InnerProduct,
-    inner_transparent_field::InnerTransparentField, powers,
+    UNCHECKED, add, cfg_iter,
+    from_ref::FromRef,
+    inner_product::{InnerProduct, NativeInnerProduct},
+    powers,
 };
 
 /// Combined polynomial resolver.
@@ -56,9 +59,14 @@ use zinc_utils::{
 /// sumcheck work in its native (cheap) field, which a merged comb_fn would have
 /// to give up or dispatch internally. Worth revisiting only if proof size /
 /// verifier simplicity outweighs prover cost.
-pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
+pub struct CombinedPolyResolver<C: SetConfig>(PhantomData<C>);
 
-impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
+impl<C> CombinedPolyResolver<C>
+where
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
+    C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
+{
     /// Build the CPR sumcheck group for use in the multi-degree sumcheck.
     ///
     /// Pre-sumcheck half of the CPR prover. Samples the folding challenge `α`,
@@ -97,20 +105,21 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn prepare_sumcheck_group<U>(
-        trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
-        bit_op_down_mles: Vec<DenseMultilinearExtension<F::Inner>>,
-        evaluation_point: &[F],
-        projected_scalars: &ProjectedScalars<U::Scalar, F>,
+        trace_matrix: Vec<DenseMultilinearExtension<C::Element>>,
+        bit_op_down_mles: Vec<DenseMultilinearExtension<C::Element>>,
+        evaluation_point: &[C::Element],
+        projected_scalars: &ProjectedScalars<U::Scalar, C::Element>,
         family_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
-        folding_challenge: &F,
-        field_cfg: &F::Config,
-    ) -> Result<(MultiDegreeSumcheckGroup<F>, CprProverAncillary), CombinedPolyResolverError<F>>
+        folding_challenge: &C::Element,
+        field_cfg: &C,
+    ) -> Result<
+        (MultiDegreeSumcheckGroup<C>, CprProverAncillary),
+        CombinedPolyResolverError<C::Element>,
+    >
     where
-        F::Integer: ConstTranscribable + Send + Sync + Zero + Default,
-        F: 'static,
         U::Scalar: 'static,
         U: Uair,
     {
@@ -119,8 +128,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             "The protocol is not needed when the number of variables is 1 :)"
         );
 
-        let zero = F::zero_with_cfg(field_cfg);
-        let one = F::one_with_cfg(field_cfg);
+        let zero = field_cfg.zero();
+        let one = field_cfg.one();
 
         // Shifted trace: for each ShiftSpec, take the source column,
         // drop the first `shift_amount` rows, and zero-pad to the full
@@ -135,12 +144,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             "bit_op_down_mles count must match UairSignature::bit_op_specs().len()",
         );
 
-        let zero_inner = zero.clone().into_inner();
         let n = 1usize << num_vars;
-        let shift_mles: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(uair_sig.shifts())
+        let shift_mles: Vec<DenseMultilinearExtension<C::Element>> = cfg_iter!(uair_sig.shifts())
             .map(|spec| {
                 let mut evals = trace_matrix[spec.source_col()][spec.shift_amount()..].to_vec();
-                evals.resize(n, zero_inner.clone());
+                evals.resize(n, zero.clone());
                 DenseMultilinearExtension {
                     evaluations: evals,
                     num_vars,
@@ -161,7 +169,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let bit_op_down_offset = uair_sig.bit_op_down_offset();
         let num_shift_down = shift_mles.len();
         let num_bit_op_specs = bit_op_down_mles.len();
-        let mut down: Vec<DenseMultilinearExtension<F::Inner>> =
+        let mut down: Vec<DenseMultilinearExtension<C::Element>> =
             Vec::with_capacity(num_shift_down + num_bit_op_specs);
         let mut shift_iter = shift_mles.into_iter();
         for _ in 0..bit_op_down_offset {
@@ -170,15 +178,15 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         down.extend(bit_op_down_mles);
         down.extend(shift_iter);
 
-        let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
+        let eq_r = build_eq_x_r(field_cfg, evaluation_point)?;
         // To get the constraints on the last row ignored
         // we multiply each constraint polynomial
         // by the selector (1 - eq(1,...,1, x))
         let last_row_selector = DenseMultilinearExtension {
             num_vars,
             evaluations: {
-                let mut evals = vec![zero.inner().clone(); 1 << num_vars];
-                evals[(1 << num_vars) - 1] = one.inner().clone();
+                let mut evals = vec![zero; 1 << num_vars];
+                evals[(1 << num_vars) - 1] = one.clone();
                 evals
             },
         };
@@ -187,12 +195,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // protocol layer samples one shared integer in $[0, q^*)$ once
         // and lifts it into each family's field, so the Q[X] CPR and
         // per-prime CPRs reuse the same underlying integer.
-        let folding_challenge_powers: Vec<F> =
-            powers(folding_challenge.clone(), one.clone(), num_constraints);
+        let folding_challenge_powers: Vec<C::Element> =
+            powers(field_cfg, folding_challenge, num_constraints);
 
         let num_cols = trace_matrix.len();
         let num_down_cols = down.len();
-        let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
+        let mles: Vec<DenseMultilinearExtension<C::Element>> = {
             let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols);
 
             mles.push(last_row_selector);
@@ -205,7 +213,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         };
 
         let projected_scalars = projected_scalars.clone();
-        let comb_fn: CombFn<F> = Box::new(move |mle_values: &[F]| {
+        let comb_cfg = field_cfg.clone();
+        let comb_fn: CombFn<C::Element> = Box::new(move |mle_values: &[C::Element]| {
             let uair_sig = U::signature();
             let up_layout = uair_sig.total_cols().as_column_layout();
             let down_layout = uair_sig.down_cols().as_column_layout();
@@ -213,7 +222,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let selector = &mle_values[0];
             let eq_r = &mle_values[1];
 
-            let mut folder = ConstraintFolder::new(family_idx, &folding_challenge_powers, &zero);
+            let mut folder =
+                ConstraintFolder::new(family_idx, &folding_challenge_powers, &comb_cfg);
 
             let project = |scalar: &U::Scalar| {
                 projected_scalars
@@ -223,15 +233,19 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
             U::constrain_general(
                 &mut folder,
+                &comb_cfg,
                 TraceRow::from_slice_with_layout(&mle_values[2..num_cols + 2], up_layout),
                 TraceRow::from_slice_with_layout(&mle_values[num_cols + 2..], down_layout),
                 project,
-                |x, y| Some(project(y) * x),
+                |x, y| Some(comb_cfg.mul(x, &project(y))),
                 ImpossibleIdeal::from_ref,
                 ImpossibleIdeal::from_ref,
             );
 
-            folder.folded_constraints * (one.clone() - selector) * eq_r
+            comb_cfg.mul(
+                &comb_cfg.mul(&folder.folded_constraints, &comb_cfg.sub(&one, selector)),
+                eq_r,
+            )
         });
 
         Ok((
@@ -253,16 +267,18 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `ancillary`: Produced by [`prepare_sumcheck_group`]; carries column
     ///   counts and `num_vars` needed to split the flat eval vector.
     /// - `field_cfg`: Field configuration.
-    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
     pub fn finalize_prover<U>(
         transcript: &mut impl Transcript,
-        sumcheck_prover_state: SumcheckProverState<F>,
+        sumcheck_prover_state: SumcheckProverState<C>,
         ancillary: CprProverAncillary,
-        field_cfg: &F::Config,
-    ) -> Result<(CprProof<F>, CprProverState<F>), CombinedPolyResolverError<F>>
+        field_cfg: &C,
+    ) -> Result<
+        (CprProof<C::Element>, CprProverState<C::Element>),
+        CombinedPolyResolverError<C::Element>,
+    >
     where
         U: Uair,
-        F::Integer: ConstTranscribable + Zero,
     {
         // Sumcheck prover stops evaluating MLEs
         // at the second-to-last challenge
@@ -282,11 +298,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .expect("sumcheck could not have had 0 rounds");
 
         let mut mles = sumcheck_prover_state.mles;
-        let evals: Vec<F> = mles
+        let evals: Vec<C::Element> = mles
             .drain(2..)
-            .map(|mle| {
-                mle.evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
-            })
+            .map(|mle| mle.evaluate(field_cfg, slice::from_ref(last_sumcheck_challenge)))
             .try_collect()?;
 
         let uair_sig = U::signature();
@@ -314,10 +328,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         down_evals.extend_from_slice(&evals[up_end..bit_op_start]);
         down_evals.extend_from_slice(&evals[bit_op_end..]);
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
-        transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
-        transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
-        transcript.absorb_random_field_slice(&bit_op_evals, &mut transcription_buf);
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_field_element_slice(&up_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(&down_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(&bit_op_evals, &mut transcription_buf);
         Ok((
             CprProof {
                 up_evals,
@@ -350,17 +364,16 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `field_cfg`: Field configuration.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_verifier<U>(
-        proof: &CprProof<F>,
-        claimed_sum: F,
-        ic_check_subclaim: &ideal_check::VerifierSubclaim<F>,
+        proof: &CprProof<C::Element>,
+        claimed_sum: C::Element,
+        ic_check_subclaim: &ideal_check::VerifierSubclaim<C::Element>,
         num_constraints: usize,
         num_vars: usize,
-        projecting_element: &F,
-        folding_challenge: &F,
-        field_cfg: &F::Config,
-    ) -> Result<CprVerifierAncillary<F>, CombinedPolyResolverError<F>>
+        projecting_element: &C::Element,
+        folding_challenge: &C::Element,
+        field_cfg: &C,
+    ) -> Result<CprVerifierAncillary<C::Element>, CombinedPolyResolverError<C::Element>>
     where
-        F::Integer: ConstTranscribable,
         U: Uair,
     {
         let uair_sig = U::signature();
@@ -370,25 +383,25 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             uair_sig.bit_op_specs().len(),
         )?;
 
-        let zero = F::zero_with_cfg(field_cfg);
-        let one = F::one_with_cfg(field_cfg);
+        let zero = field_cfg.zero();
+        let poly_cfg = field_cfg.dyn_poly_cfg();
 
         // Precompute powers of the projecting element for batch evaluation.
-        let projection_powers: Vec<F> = {
+        let projection_powers: Vec<C::Element> = {
             let max_coeffs_len = ic_check_subclaim
                 .values
                 .iter()
-                .map(|poly| poly.degree().map_or(0, |d| add!(d, 1)))
+                .map(|poly| poly_cfg.degree(poly).map_or(0, |d| add!(d, 1)))
                 .max()
                 .unwrap_or(0)
                 .max(1);
-            powers(projecting_element.clone(), one.clone(), max_coeffs_len)
+            powers(field_cfg, projecting_element, max_coeffs_len)
         };
 
         // The batching challenge $\alpha$ is supplied by the caller; see
         // [`prepare_sumcheck_group`] for the shared-challenge rationale.
-        let folding_challenge_powers: Vec<F> =
-            powers(folding_challenge.clone(), one, num_constraints);
+        let folding_challenge_powers: Vec<C::Element> =
+            powers(field_cfg, folding_challenge, num_constraints);
 
         // TODO(Alex): investigate if parallelising this is beneficial.
         // Compute v_0 + \alpha * v_1 + ... + \alpha ^ k * v_k.
@@ -397,16 +410,17 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .iter()
             .zip(&folding_challenge_powers)
             .map(|(claimed_value, random_coeff)| {
-                let deg = claimed_value.degree().map_or(0, |d| add!(d, 1));
-                DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+                let deg = poly_cfg.degree(claimed_value).map_or(0, |d| add!(d, 1));
+                let value = NativeInnerProduct::inner_product::<UNCHECKED>(
+                    field_cfg,
                     &claimed_value.coeffs[..deg],
                     &projection_powers[..deg],
                     zero.clone(),
                 )
-                .expect("inner product cannot fail here")
-                    * random_coeff
+                .expect("inner product cannot fail here");
+                field_cfg.mul(&value, random_coeff)
             })
-            .fold(zero.clone(), |acc, term| acc + term);
+            .fold(zero.clone(), |acc, term| field_cfg.add(&acc, &term));
 
         if claimed_sum != expected_sum {
             return Err(CombinedPolyResolverError::WrongSumcheckSum {
@@ -443,32 +457,30 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_verifier<U>(
         transcript: &mut impl Transcript,
-        proof: CprProof<F>,
-        shared_point: Vec<F>,
-        expected_evaluation: F,
-        ancillary: CprVerifierAncillary<F>,
-        projected_scalars: &ProjectedScalars<U::Scalar, F>,
+        proof: CprProof<C::Element>,
+        shared_point: Vec<C::Element>,
+        expected_evaluation: C::Element,
+        ancillary: CprVerifierAncillary<C::Element>,
+        projected_scalars: &ProjectedScalars<U::Scalar, C::Element>,
         family_idx: usize,
-        field_cfg: &F::Config,
-    ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
+        field_cfg: &C,
+    ) -> Result<VerifierSubclaim<C::Element>, CombinedPolyResolverError<C::Element>>
     where
-        F::Integer: ConstTranscribable,
         U: Uair,
     {
         let uair_sig = U::signature();
         let down_layout = uair_sig.down_cols().as_column_layout();
-        let zero = F::zero_with_cfg(field_cfg);
-        let one = F::one_with_cfg(field_cfg);
+        let one = field_cfg.one();
 
-        let eq_r_value = eq_eval(&shared_point, &ancillary.ic_evaluation_point, one.clone())?;
+        let eq_r_value = eq_eval(field_cfg, &shared_point, &ancillary.ic_evaluation_point)?;
         let selector_value = eq_eval(
+            field_cfg,
             &shared_point,
             &vec![one.clone(); ancillary.num_vars],
-            one.clone(),
         )?;
 
         let mut folder =
-            ConstraintFolder::new(family_idx, &ancillary.folding_challenge_powers, &zero);
+            ConstraintFolder::new(family_idx, &ancillary.folding_challenge_powers, field_cfg);
 
         let project = |scalar: &U::Scalar| {
             projected_scalars
@@ -489,18 +501,23 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         U::constrain_general(
             &mut folder,
+            field_cfg,
             TraceRow::from_slice_with_layout(
                 &proof.up_evals,
                 uair_sig.total_cols().as_column_layout(),
             ),
             TraceRow::from_slice_with_layout(&full_down_evals, down_layout),
             project,
-            |x, y| Some(project(y) * x),
+            |x, y| Some(field_cfg.mul(x, &project(y))),
             ImpossibleIdeal::from_ref,
             ImpossibleIdeal::from_ref,
         );
 
-        let expected_claim_value = eq_r_value * (one - selector_value) * folder.folded_constraints;
+        // eq * (1 - selector) * folded
+        let expected_claim_value = field_cfg.mul(
+            &field_cfg.mul(&eq_r_value, &field_cfg.sub(&one, &selector_value)),
+            &folder.folded_constraints,
+        );
 
         if expected_claim_value != expected_evaluation {
             return Err(CombinedPolyResolverError::ClaimValueDoesNotMatch {
@@ -509,10 +526,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             });
         }
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
-        transcript.absorb_random_field_slice(&proof.up_evals, &mut transcription_buf);
-        transcript.absorb_random_field_slice(&proof.down_evals, &mut transcription_buf);
-        transcript.absorb_random_field_slice(&proof.bit_op_evals, &mut transcription_buf);
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_field_element_slice(&proof.up_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(&proof.down_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(&proof.bit_op_evals, &mut transcription_buf);
 
         Ok(VerifierSubclaim {
             up_evals: proof.up_evals,
@@ -524,13 +541,13 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 }
 
 #[derive(Debug, Error)]
-pub enum CombinedPolyResolverError<F: PrimeField> {
+pub enum CombinedPolyResolverError<F: SetElement> {
     #[error("failed to build eq_r: {0}")]
     EqrError(ArithErrors),
     #[error("error evaluating MLE: {0}")]
     MleEvaluationError(EvaluationError),
-    #[error("error projecting polynomial {0} by point {1}: {2}")]
-    ProjectionError(DynamicPolynomialF<F>, F, EvaluationError),
+    #[error("error projecting polynomial {0:?} by point {1:?}: {2}")]
+    ProjectionError(DynamicPolynomial<F>, F, EvaluationError),
     #[error("wrong trace columns evaluations number: got {got}, expected {expected}")]
     WrongUpEvalsNumber { got: usize, expected: usize },
     #[error("wrong shifted trace columns evaluations number: got {got}, expected {expected}")]
@@ -539,31 +556,39 @@ pub enum CombinedPolyResolverError<F: PrimeField> {
     WrongBitOpEvalsNumber { got: usize, expected: usize },
     #[error("sumcheck verification failed: {0}")]
     SumcheckError(SumCheckError<F>),
-    #[error("wrong sumcheck claimed sum: received {got}, expected {expected}")]
+    #[error("wrong sumcheck claimed sum: received {got:?}, expected {expected:?}")]
     WrongSumcheckSum { got: F, expected: F },
-    #[error("resulting claim value does not match: received {got}, expected {expected}")]
+    #[error("resulting claim value does not match: received {got:?}, expected {expected:?}")]
     ClaimValueDoesNotMatch { got: F, expected: F },
 }
 
-impl<F: PrimeField> From<EvaluationError> for CombinedPolyResolverError<F> {
+impl<F: SetElement> From<EvaluationError> for CombinedPolyResolverError<F> {
     fn from(eval_error: EvaluationError) -> Self {
         Self::MleEvaluationError(eval_error)
     }
 }
 
-impl<F: PrimeField> From<ArithErrors> for CombinedPolyResolverError<F> {
+impl<F: SetElement> From<ArithErrors> for CombinedPolyResolverError<F> {
     fn from(arith_error: ArithErrors) -> Self {
         Self::EqrError(arith_error)
     }
 }
 
-impl<F: PrimeField> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
+impl<F: SetElement> From<SumCheckError<F>> for CombinedPolyResolverError<F> {
     fn from(sumcheck_error: SumCheckError<F>) -> Self {
         Self::SumcheckError(sumcheck_error)
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_copy,
+    clippy::redundant_clone
+)]
 mod tests {
     use super::*;
     use crate::{
@@ -573,10 +598,12 @@ mod tests {
         test_utils::{LIMBS, run_ideal_check_prover_combined, test_config},
     };
     use crypto_primitives::{
-        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+        crypto_bigint_int::Int,
+        crypto_bigint_monty::{MontyField, MontyFieldElement},
+        crypto_bigint_uint::Uint,
     };
     use rand::rng;
-    use zinc_poly::univariate::dense::DensePolynomial;
+    use zinc_poly::univariate::{dense::DensePolynomial, dynamic::DynamicPolynomialConfig};
     use zinc_test_uair::{
         GenerateRandomTrace, TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
@@ -604,10 +631,11 @@ mod tests {
     ) where
         U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
             + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
+        IdealOverF: Ideal + for<'a> IdealCheck<DynamicPolynomialConfig<'a, MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
         let mut rng = rng();
+        let field_cfg = test_config();
 
         let mut prover_transcript = Blake3Transcript::new();
         let mut verifier_transcript = prover_transcript.clone();
@@ -628,8 +656,8 @@ mod tests {
         // the test helper (`run_ideal_check_prover_combined`) squeezed `num_vars` field
         // challenges from the prover transcript before invoking `prove_combined`, so do
         // the same here for the verifier.
-        let ic_evaluation_point: Vec<MontyField<LIMBS>> =
-            verifier_transcript.get_field_challenges(num_vars, &test_config());
+        let ic_evaluation_point: Vec<MontyFieldElement<LIMBS>> =
+            verifier_transcript.get_field_challenges(num_vars, &field_cfg);
 
         let ic_check_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol(
             &mut verifier_transcript,
@@ -639,23 +667,25 @@ mod tests {
             &ic_evaluation_point,
             ideal_over_f_from_ref,
             |_| panic!("F_q[X] not supported here!"),
+            &field_cfg,
         )
         .expect("Verification failed");
 
         let max_degree = count_max_degree::<U>();
 
-        let projecting_element: MontyField<4> =
-            prover_transcript.get_field_challenge(&test_config());
+        let projecting_element: MontyFieldElement<4> =
+            prover_transcript.get_field_challenge(&field_cfg);
 
         let projected_scalars =
-            project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
+            project_scalars_to_field(&field_cfg, projected_scalars, &projecting_element).unwrap();
 
         // Prover: prepare -> MultiDegreeSumcheck → finalize.
         // $\alpha$ is sampled by the caller per the shared-challenge API.
-        let folding_challenge: MontyField<LIMBS> =
-            prover_transcript.get_field_challenge(&test_config());
+        let folding_challenge: MontyFieldElement<LIMBS> =
+            prover_transcript.get_field_challenge(&field_cfg);
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             evaluate_trace_to_column_mles(
+                &field_cfg,
                 &ProjectedTrace::RowMajor(projected_trace),
                 &projecting_element,
             ),
@@ -667,15 +697,15 @@ mod tests {
             num_vars,
             max_degree,
             &folding_challenge,
-            &test_config(),
+            &field_cfg,
         )
         .expect("CPR prepare failed");
 
         let mut sumcheck_outputs = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut prover_transcript,
-            vec![(vec![cpr_group], &test_config())],
+            vec![(vec![cpr_group], &field_cfg)],
             num_vars,
-            &test_config(),
+            &field_cfg,
         );
         let (md_proof, states) = sumcheck_outputs.pop().expect("single family");
 
@@ -683,14 +713,14 @@ mod tests {
             &mut prover_transcript,
             states.into_iter().next().unwrap(),
             cpr_ancillary,
-            &test_config(),
+            &field_cfg,
         )
         .expect("CPR finalize failed");
 
-        let projecting_element: MontyField<LIMBS> =
-            verifier_transcript.get_field_challenge(&test_config());
-        let folding_challenge: MontyField<LIMBS> =
-            verifier_transcript.get_field_challenge(&test_config());
+        let projecting_element: MontyFieldElement<LIMBS> =
+            verifier_transcript.get_field_challenge(&field_cfg);
+        let folding_challenge: MontyFieldElement<LIMBS> =
+            verifier_transcript.get_field_challenge(&field_cfg);
 
         // Verifier: prepare → MultiDegreeSumcheck → finalize
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
@@ -701,15 +731,15 @@ mod tests {
             num_vars,
             &projecting_element,
             &folding_challenge,
-            &test_config(),
+            &field_cfg,
         )
         .expect("CPR prepare_verifier failed");
 
         let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut verifier_transcript,
             num_vars,
-            &[(&md_proof, &test_config())],
-            &test_config(),
+            &[(&md_proof, &field_cfg)],
+            &field_cfg,
         )
         .expect("MultiDegreeSumcheck verify failed")
         .pop()
@@ -724,7 +754,7 @@ mod tests {
                 cpr_verifier_ancillary,
                 &projected_scalars,
                 /* family_idx = */ 0,
-                &test_config(),
+                &field_cfg,
             )
             .is_ok()
         );
@@ -742,7 +772,7 @@ mod tests {
             _,
             32,
         >(num_vars, None, |ideal_over_ring| {
-            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
+            ideal_over_ring.map(|i| DegreeOneIdeal::project(&field_cfg, i))
         });
         test_successful_verification_generic::<
             TestUairSimpleMultiplication<Int<5>, Uint<LIMBS>>,

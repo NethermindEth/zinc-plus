@@ -3,9 +3,8 @@ pub mod raa;
 pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
+use crypto_primitives::{BaseFieldConfig, ProjectPrimitiveIntegersWithConfig};
 use std::fmt::Debug;
-use zinc_utils::from_ref::FromRef;
 
 pub trait LinearCode<Zt: ZipTypes>: Debug + Clone + Eq + Sync + Send {
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to
@@ -61,12 +60,12 @@ pub trait LinearCode<Zt: ZipTypes>: Debug + Clone + Eq + Sync + Send {
     /// field elements.
     ///
     /// # Parameters
+    /// - `cfg`: Field configuration providing arithmetic and integer projection
     /// - `row`: Slice of field elements to encode
-    /// - `field`: Field configuration for the conversion
     ///
     /// # Returns
     /// A vector of field elements representing the encoded row
-    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
+    fn encode_f<C>(&self, cfg: &C, row: &[C::Element]) -> Vec<C::Element>
     where
-        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>;
+        C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig;
 }

@@ -1,21 +1,24 @@
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams};
 use crypto_primitives::{
-    crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    FixedConfig, Wrapper, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int,
+    crypto_bigint_uint::Uint,
 };
-use std::ops::MulAssign;
 
 use crate::{
-    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
-    projectable_to_field::ProjectableToField,
+    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<&Self>
-    for ConstMontyField<Mod, LIMBS>
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize>
+    MulByScalar<ConstMontyField<Mod, LIMBS>, ConstMontyField<Mod, LIMBS>> for ()
 {
     #[allow(clippy::arithmetic_side_effects)] // False alert
-    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &Self) -> Option<Self> {
+    fn mul_by_scalar<const CHECK: bool>(
+        &self,
+        lhs: ConstMontyField<Mod, LIMBS>,
+        rhs: &ConstMontyField<Mod, LIMBS>,
+    ) -> Option<ConstMontyField<Mod, LIMBS>> {
         // Field operations cannot overflow
-        Some(self * rhs)
+        Some(lhs * rhs)
     }
 }
 
@@ -49,38 +52,16 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Self>
     }
 }
 
+// TODO(alex): Can probably be generalized with From/FromRef
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
-    ProjectableToField<ConstMontyField<Mod, LIMBS>> for Int<LIMBS2>
+    ProjectableToField<FixedConfig<ConstMontyField<Mod, LIMBS>>> for Int<LIMBS2>
 {
     fn prepare_projection(
+        _cfg: &FixedConfig<ConstMontyField<Mod, LIMBS>>,
         _sampled_value: &ConstMontyField<Mod, LIMBS>,
-    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + Send + Sync + 'static {
+    ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> {
         // No need to read anything
         |value: &Int<LIMBS2>| value.into()
-    }
-}
-
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> InnerTransparentField
-    for ConstMontyField<Mod, LIMBS>
-{
-    fn add_inner(lhs: &Self::Inner, rhs: &Self::Inner, _config: &Self::Config) -> Self::Inner {
-        Uint::new(
-            lhs.inner()
-                .add_mod(rhs.inner(), Mod::PARAMS.modulus().as_nz_ref()),
-        )
-    }
-
-    fn sub_inner(lhs: &Self::Inner, rhs: &Self::Inner, _config: &Self::Config) -> Self::Inner {
-        Uint::new(
-            lhs.inner()
-                .sub_mod(rhs.inner(), Mod::PARAMS.modulus().as_nz_ref()),
-        )
-    }
-
-    fn mul_assign_by_inner(&mut self, rhs: &Self::Inner) {
-        let rhs: Self = Self::new_unchecked(*rhs);
-
-        self.mul_assign(rhs);
     }
 }
 
@@ -112,7 +93,8 @@ mod tests {
         // Create a sample field element and an Int value
         let sampled = F::from(5_u64);
 
-        let projection_fn = Int::<{ U128::LIMBS }>::prepare_projection(&sampled);
+        let cfg = FixedConfig::default();
+        let projection_fn = Int::<{ U128::LIMBS }>::prepare_projection(&cfg, &sampled);
 
         let int_value = Int::<{ U128::LIMBS }>::from(10_i64);
         let result = projection_fn(&int_value);
@@ -184,19 +166,6 @@ mod tests {
             let a: F = F::from(x);
             let b: F = F::from(&x);
             prop_assert_eq!(a, b);
-        }
-
-        #[test]
-        #[cfg_attr(miri, ignore)] // long running
-        fn prop_inner_ops_match_normal_ops((x, y) in any::<(u128, u128)>()) {
-            let a: F = x.into();
-            let b: F = y.into();
-            prop_assert_eq!(F::add_inner(a.inner(), b.inner(), &()), (a + b).into_inner());
-            prop_assert_eq!(F::sub_inner(a.inner(), b.inner(), &()), (a - b).into_inner());
-
-            let mut res = a;
-            res.mul_assign_by_inner(b.inner());
-            prop_assert_eq!(res, a * b);
         }
     }
 }

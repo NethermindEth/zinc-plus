@@ -5,14 +5,17 @@ use crate::{
 
 use core::slice;
 use crypto_primitives::{
-    FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring, boolean::Boolean,
+    FieldConfig, ProjectElementWithConfig, Ring, RingConfig, Semiring, SemiringConfig, SetConfig,
+    boolean::Boolean,
 };
 use itertools::Itertools;
-use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Zero};
+use num_traits::{
+    CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Pow, Zero,
+};
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     array,
-    fmt::Display,
+    fmt::{Debug, Display},
     hash::Hash,
     iter::{Product, Sum},
     marker::PhantomData,
@@ -29,38 +32,184 @@ use zinc_utils::{
     rem,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DensePolynomial<R, const DEGREE_PLUS_ONE: usize> {
-    /// Coefficients of the polynomial, lowest degree first
-    pub coeffs: [R; DEGREE_PLUS_ONE],
+/// Configuration of the polynomial semiring $S[X]$ over the (semi)ring
+/// configured by `S`, with [`DynamicPolynomial`] as its element.
+///
+/// Implements exactly the layer its coefficients provide: [`SemiringConfig`]
+/// over a semiring, additionally [`RingConfig`] over a ring. The polynomial
+/// ring is never a field, hence no [`FieldConfig`]; Euclidean division (which
+/// needs coefficient inversion), evaluation and other polynomial-specific
+/// operations are provided as inherent methods.
+///
+/// Checked operations delegate to the coefficient config's checked
+/// operations, so overflow behavior follows the coefficients (e.g. `Int`
+/// coefficients can overflow, field coefficients cannot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DensePolynomialConfig<'a, S: SemiringConfig, const DEGREE_PLUS_ONE: usize> {
+    pub cfg: &'a S,
 }
 
-impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
+/// Extension trait providing [`DensePolynomialConfig`] from a coefficient
+/// config, so that the same config can be used to perform operations on
+/// dynamic polynomials: `cfg.poly_cfg().mul(&p, &q)`.
+pub trait HasDensePolynomialConfig: SemiringConfig + Sized {
+    #[inline(always)]
+    fn dense_poly_cfg<const DEGREE_PLUS_ONE: usize>(
+        &self,
+    ) -> DensePolynomialConfig<'_, Self, DEGREE_PLUS_ONE> {
+        DensePolynomialConfig { cfg: self }
+    }
+}
+
+impl<S: SemiringConfig> HasDensePolynomialConfig for S {}
+
+impl<'a, S: SemiringConfig, const DEGREE_PLUS_ONE: usize> SetConfig
+    for DensePolynomialConfig<'a, S, DEGREE_PLUS_ONE>
+{
+    type Element = DensePolynomial<S::Element, DEGREE_PLUS_ONE>;
+}
+
+impl<'a, S: SemiringConfig, const DEGREE_PLUS_ONE: usize> SemiringConfig
+    for DensePolynomialConfig<'a, S, DEGREE_PLUS_ONE>
+{
+    fn is_zero(&self, value: &Self::Element) -> bool {
+        value.coeffs.iter().all(|c| self.cfg.is_zero(c))
+    }
+
+    fn zero(&self) -> Self::Element {
+        DensePolynomial {
+            coeffs: array::from_fn(|_| self.cfg.zero()),
+        }
+    }
+
+    fn one(&self) -> Self::Element {
+        let mut coeffs = array::from_fn(|_| self.cfg.zero());
+        coeffs[0] = self.cfg.one();
+        DensePolynomial { coeffs }
+    }
+
+    fn add(&self, x: &Self::Element, y: &Self::Element) -> Self::Element {
+        let mut res = x.clone();
+        for i in 0..DEGREE_PLUS_ONE {
+            self.cfg.add_assign(&mut res.coeffs[i], &y.coeffs[i]);
+        }
+        res
+    }
+
+    fn sub(&self, x: &Self::Element, y: &Self::Element) -> Self::Element {
+        let mut res = x.clone();
+        for i in 0..DEGREE_PLUS_ONE {
+            self.cfg.sub_assign(&mut res.coeffs[i], &y.coeffs[i]);
+        }
+        res
+    }
+
+    fn mul(&self, _x: &Self::Element, _y: &Self::Element) -> Self::Element {
+        unimplemented!("Polynomial multiplication is not implemented")
+    }
+
+    fn pow_u32(&self, x: &Self::Element, y: u32) -> Self::Element {
+        match y {
+            0 => self.one(),
+            1 => x.clone(),
+            _ => unimplemented!("Polynomial multiplication is not implemented"),
+        }
+    }
+
+    fn checked_add(&self, x: &Self::Element, y: &Self::Element) -> Option<Self::Element> {
+        let mut res = self.zero();
+        for i in 0..DEGREE_PLUS_ONE {
+            res.coeffs[i] = self.cfg.checked_add(&x.coeffs[i], &y.coeffs[i])?;
+        }
+        Some(res)
+    }
+
+    fn checked_sub(&self, x: &Self::Element, y: &Self::Element) -> Option<Self::Element> {
+        let mut res = self.zero();
+        for i in 0..DEGREE_PLUS_ONE {
+            res.coeffs[i] = self.cfg.checked_sub(&x.coeffs[i], &y.coeffs[i])?;
+        }
+        Some(res)
+    }
+
+    fn checked_mul(&self, _x: &Self::Element, _y: &Self::Element) -> Option<Self::Element> {
+        unimplemented!("Polynomial multiplication is not implemented")
+    }
+
+    fn checked_pow_u32(&self, x: &Self::Element, y: u32) -> Option<Self::Element> {
+        Some(match y {
+            0 => self.one(),
+            1 => x.clone(),
+            _ => unimplemented!("Polynomial multiplication is not implemented"),
+        })
+    }
+
+    fn sum<I: Iterator<Item = Self::Element>>(&self, iter: I) -> Self::Element {
+        iter.fold(self.zero(), |acc, x| {
+            self.checked_add(&acc, &x).expect("overflow in sum")
+        })
+    }
+
+    fn sum_refs<'b, I: Iterator<Item = &'b Self::Element> + 'b>(&self, iter: I) -> Self::Element {
+        iter.fold(self.zero(), |acc, x| {
+            self.checked_add(&acc, x).expect("overflow in sum")
+        })
+    }
+
+    fn product<I: Iterator<Item = Self::Element>>(&self, iter: I) -> Self::Element {
+        iter.fold(self.one(), |acc, x| {
+            self.checked_mul(&acc, &x).expect("overflow in product")
+        })
+    }
+
+    fn product_refs<'b, I: Iterator<Item = &'b Self::Element>>(&self, iter: I) -> Self::Element {
+        iter.fold(self.one(), |acc, x| {
+            self.checked_mul(&acc, x).expect("overflow in product")
+        })
+    }
+}
+
+impl<'a, S: SemiringConfig, const DEGREE_PLUS_ONE: usize>
+    DensePolynomialConfig<'a, S, DEGREE_PLUS_ONE>
+{
     /// Create a new polynomial with the given coefficients.
     /// If the input has fewer than N+1 coefficients, the remaining slots will
     /// be filled with zeros. If the input has more than N+1 coefficients,
     /// it will panic.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn new(coeffs: impl AsRef<[R]>) -> Self {
-        let coeffs = coeffs.as_ref();
-        assert!(
-            coeffs.len() <= DEGREE_PLUS_ONE,
-            "Too many coefficients provided: expected at most {}, got {}",
-            DEGREE_PLUS_ONE,
-            coeffs.len()
-        );
+    pub fn new_padded(
+        &self,
+        coeffs: impl AsRef<[S::Element]>,
+    ) -> DensePolynomial<S::Element, DEGREE_PLUS_ONE> {
+        DensePolynomial::new_with_zero(coeffs, self.cfg.zero())
+    }
+}
 
-        if coeffs.is_empty() {
-            return Self::zero();
-        }
-
-        let mut coeffs = coeffs.to_vec();
-        coeffs.resize(DEGREE_PLUS_ONE, R::zero());
-        let coeffs = coeffs.try_into().expect("unreachable");
-
-        DensePolynomial { coeffs }
+impl<'a, S: RingConfig, const DEGREE_PLUS_ONE: usize> RingConfig
+    for DensePolynomialConfig<'a, S, DEGREE_PLUS_ONE>
+{
+    fn neg(&self, x: &Self::Element) -> Self::Element {
+        let mut res = x.clone();
+        res.coeffs.iter_mut().for_each(|c| *c = self.cfg.neg(c));
+        res
     }
 
+    fn checked_neg(&self, x: &Self::Element) -> Option<Self::Element> {
+        let mut res = self.zero();
+        for i in 0..DEGREE_PLUS_ONE {
+            res.coeffs[i] = self.cfg.checked_neg(&x.coeffs[i])?;
+        }
+        Some(res)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DensePolynomial<R, const DEGREE_PLUS_ONE: usize> {
+    /// Coefficients of the polynomial, lowest degree first
+    pub coeffs: [R; DEGREE_PLUS_ONE],
+}
+
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
     /// Right-rotate the coefficient vector by `c` positions.
     ///
     /// The output coefficient at position `i` is the input coefficient at
@@ -99,7 +248,12 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE
     }
 }
 
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
+impl<R: Debug + Clone, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    pub fn new(coeffs: [R; DEGREE_PLUS_ONE]) -> Self {
+        DensePolynomial { coeffs }
+    }
+
     /// Create a new polynomial with the given coefficients.
     /// If the input has fewer than N+1 coefficients, the remaining slots will
     /// be filled with zeros. If the input has more than N+1 coefficients,
@@ -122,16 +276,6 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_O
     }
 }
 
-impl<R: Copy, const DEGREE_PLUS_ONE: usize> Copy for DensePolynomial<R, DEGREE_PLUS_ONE> {}
-
-impl<R: Default, const DEGREE_PLUS_ONE: usize> Default for DensePolynomial<R, DEGREE_PLUS_ONE> {
-    fn default() -> Self {
-        DensePolynomial {
-            coeffs: array::from_fn::<_, DEGREE_PLUS_ONE, _>(|_| R::default()),
-        }
-    }
-}
-
 impl<R: Display, const DEGREE_PLUS_ONE: usize> Display for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[")?;
@@ -146,6 +290,14 @@ impl<R: Display, const DEGREE_PLUS_ONE: usize> Display for DensePolynomial<R, DE
         }
         write!(f, "]")?;
         Ok(())
+    }
+}
+
+impl<R: Default, const DEGREE_PLUS_ONE: usize> Default for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    fn default() -> Self {
+        DensePolynomial {
+            coeffs: array::from_fn::<_, DEGREE_PLUS_ONE, _>(|_| R::default()),
+        }
     }
 }
 
@@ -171,19 +323,6 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> Zero
     }
 }
 
-impl<F: PrimeField, const DEGREE_PLUS_ONE: usize> DensePolynomial<F, DEGREE_PLUS_ONE> {
-    pub fn zero_with_cfg(cfg: &F::Config) -> Self {
-        let zero = F::zero_with_cfg(cfg);
-        Self {
-            coeffs: array::from_fn(|_| zero.clone()),
-        }
-    }
-
-    pub fn one_with_cfg(cfg: &F::Config) -> Self {
-        Self::new_with_zero([F::one_with_cfg(cfg)], F::zero_with_cfg(cfg))
-    }
-}
-
 impl<R: Semiring + Zero + One, const DEGREE_PLUS_ONE: usize> One
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
@@ -194,9 +333,7 @@ impl<R: Semiring + Zero + One, const DEGREE_PLUS_ONE: usize> One
     }
 }
 
-impl<R: Ring + Neg<Output = R>, const DEGREE_PLUS_ONE: usize> Neg
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
+impl<R: Ring, const DEGREE_PLUS_ONE: usize> Neg for DensePolynomial<R, DEGREE_PLUS_ONE> {
     type Output = Self;
 
     #[allow(clippy::arithmetic_side_effects)] // By design
@@ -268,6 +405,14 @@ impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> Mul<&'a Self>
     type Output = Self;
 
     fn mul(self, _rhs: &'a Self) -> Self::Output {
+        unimplemented!("Polynomial multiplication is not implemented")
+    }
+}
+
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Pow<u32> for DensePolynomial<R, DEGREE_PLUS_ONE> {
+    type Output = Self;
+
+    fn pow(self, _rhs: u32) -> Self::Output {
         unimplemented!("Polynomial multiplication is not implemented")
     }
 }
@@ -378,7 +523,7 @@ impl<R: Semiring, const DEGREE_PLUS_ONE: usize> CheckedMul for DensePolynomial<R
     }
 }
 
-impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Sum for DensePolynomial<R, DEGREE_PLUS_ONE> {
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Sum for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::zero(), |acc, x| {
             acc.checked_add(&x).expect("overflow in sum")
@@ -386,7 +531,7 @@ impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Sum for DensePolynomial<R, 
     }
 }
 
-impl<'a, R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Sum<&'a Self>
+impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> Sum<&'a Self>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
@@ -396,9 +541,7 @@ impl<'a, R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Sum<&'a Self>
     }
 }
 
-impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Product
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
+impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Product for DensePolynomial<R, DEGREE_PLUS_ONE> {
     fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::one(), |acc, x| {
             acc.checked_mul(&x).expect("overflow in product")
@@ -406,7 +549,7 @@ impl<R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Product
     }
 }
 
-impl<'a, R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
+impl<'a, R: Semiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
@@ -414,13 +557,6 @@ impl<'a, R: FixedSemiring, const DEGREE_PLUS_ONE: usize> Product<&'a Self>
             acc.checked_mul(x).expect("overflow in product")
         })
     }
-}
-
-impl<R: Semiring, const DEGREE_PLUS_ONE: usize> Semiring for DensePolynomial<R, DEGREE_PLUS_ONE> {}
-
-impl<R: Ring + FixedSemiring, const DEGREE_PLUS_ONE: usize> Ring
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
-{
 }
 
 impl<R, const DEGREE_PLUS_ONE: usize> Distribution<DensePolynomial<R, DEGREE_PLUS_ONE>>
@@ -593,25 +729,27 @@ impl<const DEGREE_PLUS_ONE: usize> FromRef<i64> for DensePolynomial<i128, DEGREE
     }
 }
 
-impl<'a, R, S, Out, const DEGREE_PLUS_ONE: usize>
-    MulByScalar<&'a S, DensePolynomial<Out, DEGREE_PLUS_ONE>>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
+impl<R, S, Out, const DEGREE_PLUS_ONE: usize>
+    MulByScalar<DensePolynomial<R, DEGREE_PLUS_ONE>, S, DensePolynomial<Out, DEGREE_PLUS_ONE>>
+    for ()
 where
-    R: FixedSemiring + MulByScalar<&'a S, Out>,
-    Out: FixedSemiring + Copy,
+    (): MulByScalar<R, S, Out>,
+    R: Semiring,
+    Out: Semiring + Copy,
 {
     fn mul_by_scalar<const CHECK: bool>(
         &self,
-        rhs: &'a S,
+        lhs: DensePolynomial<R, DEGREE_PLUS_ONE>,
+        rhs: &S,
     ) -> Option<DensePolynomial<Out, DEGREE_PLUS_ONE>> {
         let mut coeffs = [Out::default(); DEGREE_PLUS_ONE];
 
         coeffs
             .iter_mut()
-            .zip(self.coeffs.iter())
+            .zip(lhs.coeffs.iter())
             .filter(|(_, coeff)| !coeff.is_zero())
             .try_for_each(|(out, x)| {
-                *out = x.mul_by_scalar::<CHECK>(rhs)?;
+                *out = self.mul_by_scalar::<CHECK>(x.clone(), rhs)?;
                 Some(())
             })?;
 
@@ -619,31 +757,29 @@ where
     }
 }
 
-impl<R, F, const DEGREE_PLUS_ONE: usize> ProjectableToField<F>
-    for DensePolynomial<R, DEGREE_PLUS_ONE>
+/// Projection by evaluation: the coefficients are projected into the field
+/// and the polynomial is evaluated at the sampled point.
+impl<E, C, const DEGREE_PLUS_ONE: usize> ProjectableToField<C>
+    for DensePolynomial<E, DEGREE_PLUS_ONE>
 where
-    R: Semiring,
-    F: PrimeField + for<'a> FromWithConfig<&'a R> + for<'a> MulByScalar<&'a F> + 'static,
+    C: FieldConfig + ProjectElementWithConfig<E> + Clone + Send + Sync + 'static,
 {
-    #![allow(clippy::arithmetic_side_effects)] // False alert, field operations are safe
     fn prepare_projection(
-        sampled_value: &F,
-    ) -> impl Fn(&DensePolynomial<R, DEGREE_PLUS_ONE>) -> F + Send + Sync + 'static {
+        cfg: &C,
+        sampled_value: &C::Element,
+    ) -> impl Fn(&DensePolynomial<E, DEGREE_PLUS_ONE>) -> C::Element {
+        let cfg = cfg.clone();
         let sampled_value = sampled_value.clone();
-        let field_cfg = sampled_value.cfg().clone();
 
-        move |poly: &DensePolynomial<R, DEGREE_PLUS_ONE>| {
-            let coeffs: [F; DEGREE_PLUS_ONE] = poly
-                .coeffs
-                .iter()
-                .map(|v| v.into_with_cfg(&field_cfg))
-                .collect_array()
-                .expect("unreachable");
-
-            let poly2 = DensePolynomial { coeffs };
-            poly2
-                .evaluate_at_point(&sampled_value)
-                .expect("Failed to evaluate polynomial at point")
+        move |poly: &DensePolynomial<E, DEGREE_PLUS_ONE>| {
+            // Horner's method, projecting coefficients on the fly.
+            let mut result = cfg.zero();
+            for coeff in poly.coeffs.iter().rev() {
+                cfg.mul_assign(&mut result, &sampled_value);
+                let projected = cfg.project(coeff);
+                cfg.add_assign(&mut result, &projected);
+            }
+            result
         }
     }
 }
@@ -703,26 +839,28 @@ impl<R, const DEGREE_PLUS_ONE: usize> DerefMut for DensePolynomial<R, DEGREE_PLU
 
 #[derive(Clone, Debug)]
 pub struct DensePolyInnerProduct<
+    Ctx,
     R,
     Rhs,
     Out,
-    I: InnerProduct<[R], Rhs, Out>,
+    I: InnerProduct<Ctx, [R], Rhs, Out>,
     const DEGREE_PLUS_ONE: usize,
->(PhantomData<(I, R, Rhs, Out)>);
+>(PhantomData<(I, Ctx, R, Rhs, Out)>);
 
-impl<R, Rhs, Out, I, const DEGREE_PLUS_ONE: usize>
-    InnerProduct<DensePolynomial<R, DEGREE_PLUS_ONE>, Rhs, Out>
-    for DensePolyInnerProduct<R, Rhs, Out, I, DEGREE_PLUS_ONE>
+impl<Ctx, R, Rhs, Out, I, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<Ctx, DensePolynomial<R, DEGREE_PLUS_ONE>, Rhs, Out>
+    for DensePolyInnerProduct<Ctx, R, Rhs, Out, I, DEGREE_PLUS_ONE>
 where
-    I: InnerProduct<[R], Rhs, Out>,
+    I: InnerProduct<Ctx, [R], Rhs, Out>,
 {
     #[inline(always)]
     fn inner_product<const CHECK: bool>(
+        ctx: &Ctx,
         lhs: &DensePolynomial<R, DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        I::inner_product::<CHECK>(&lhs.coeffs, rhs, zero)
+        I::inner_product::<CHECK>(ctx, &lhs.coeffs, rhs, zero)
     }
 }
 

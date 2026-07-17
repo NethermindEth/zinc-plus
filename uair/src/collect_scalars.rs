@@ -1,7 +1,9 @@
 use std::{cell::RefCell, collections::HashSet};
 
 use crate::{
-    TraceRow, Uair, do_nothing_builder::DoNothingBuilder, dummy_semiring::DummySemiring,
+    TraceRow, Uair,
+    do_nothing_builder::DoNothingBuilder,
+    dummy_semiring::{DUMMY_SEMIRING_CONFIG, DummySemiring},
     ideal::ImpossibleIdeal,
 };
 
@@ -19,6 +21,7 @@ pub fn collect_scalars<U: Uair>() -> HashSet<U::Scalar> {
 
     U::constrain_general(
         &mut DoNothingBuilder,
+        &DUMMY_SEMIRING_CONFIG,
         up_row,
         down_row,
         |x| {

@@ -1,16 +1,10 @@
 pub mod dense;
 
-use crypto_primitives::PrimeField;
+use crypto_primitives::SemiringConfig;
 pub use dense::DenseMultilinearExtension;
 
 use rand::prelude::*;
-use std::{
-    fmt::Debug,
-    ops::{Add, AddAssign, SubAssign},
-};
-use zinc_utils::mul_by_scalar::MulByScalar;
-
-use crate::EvaluationError;
+use std::fmt::Debug;
 
 /// This trait describes an interface for the multilinear extension
 /// of an array.
@@ -19,47 +13,14 @@ use crate::EvaluationError;
 ///
 /// Index represents a point, which is a vector in {0,1}^`num_vars` in little
 /// endian form. For example, `0b1011` represents `P(1,1,0,1)`
-pub trait MultilinearExtension<T>:
-    Sized
-    + Clone
-    + Debug
-    + PartialEq
-    + Eq
-    + Add
-    + for<'a> AddAssign<&'a Self>
-    + for<'a> AddAssign<(T, &'a Self)>
-    + for<'a> SubAssign<&'a Self>
-{
+pub trait MultilinearExtension<C: SemiringConfig>: Sized + Clone + Debug + PartialEq + Eq {
     /// Reduce the number of variables of `self` by fixing the
     /// `partial_point.len()` variables at `partial_point`.
-    fn fix_variables<S>(&mut self, partial_point: &[S], zero: T)
-    where
-        T: for<'a> MulByScalar<&'a S>;
+    fn fix_variables(&mut self, cfg: &C, partial_point: &[C::Element]);
 
     /// Creates a new object with the number of variables of `self` reduced by
     /// fixing the `partial_point.len()` variables at `partial_point`.
-    fn fixed_variables<S>(&self, partial_point: &[S], zero: T) -> Self
-    where
-        T: for<'a> MulByScalar<&'a S>;
-}
-
-/// This trait allows to evaluate
-/// multilinear extension types that store
-/// `F::Inner` Montgomery representations
-/// instead of field elements `F` which are typically
-/// an `F::Inner` and the field config.
-pub trait MultilinearExtensionWithConfig<F: PrimeField> {
-    /// Reduce the number of variables of `self` by fixing the
-    /// `partial_point.len()` variables at `partial_point`.
-    fn fix_variables_with_config(&mut self, partial_point: &[F], config: &F::Config);
-
-    /// Creates a new object with the number of variables of `self` reduced by
-    /// fixing the `partial_point.len()` variables at `partial_point`.
-    fn fixed_variables_with_config(&self, partial_point: &[F], config: &F::Config) -> Self;
-
-    /// Evaluate the MLE in full. Asserts that the `point.len()`
-    /// is equal the `self.num_vars`.
-    fn evaluate_with_config(self, point: &[F], config: &F::Config) -> Result<F, EvaluationError>;
+    fn fixed_variables(&self, cfg: &C, partial_point: &[C::Element]) -> Self;
 }
 
 pub trait MultilinearExtensionRand<T> {

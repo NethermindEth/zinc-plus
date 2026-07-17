@@ -6,23 +6,22 @@ use std::hint::black_box;
 use criterion::{
     AxisScale, BenchmarkId, Criterion, PlotConfiguration, criterion_group, criterion_main,
 };
-use crypto_bigint::{Odd, modular::FixedMontyParams};
-use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_monty::F256};
+use crypto_primitives::{
+    BaseFieldConfig, ProjectElementWithConfig, SemiringConfig, crypto_bigint_monty::MontyField,
+    crypto_bigint_uint::Uint,
+};
 use itertools::Itertools;
-use num_traits::ConstZero;
 use rand::prelude::*;
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+use zinc_poly::mle::DenseMultilinearExtension;
 
 const LIMBS: usize = 4;
 
-type F = F256;
+type F = MontyField<LIMBS>;
 
-fn bench_config() -> FixedMontyParams<LIMBS> {
-    let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
-        "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
-    );
-    let modulus = Odd::new(modulus).expect("modulus should be odd");
-    FixedMontyParams::new(modulus)
+fn bench_config() -> F {
+    let modulus =
+        Uint::from_be_hex("0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33");
+    F::new(&modulus).expect("modulus should be a valid odd prime")
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -30,50 +29,24 @@ fn bench_dense_mle_evaluation(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
 ) {
     let mut rng = rand::rng();
+    let cfg = bench_config();
     for i in 0..20 {
         let v = DenseMultilinearExtension::from_evaluations_vec(
             i,
-            (0..(1 << i))
-                .map(|i| F::from_with_cfg(i, &bench_config()))
-                .collect_vec(),
-            F::zero_with_cfg(&bench_config()),
+            (0..(1u64 << i)).map(|x| cfg.project(&x)).collect_vec(),
+            cfg.zero(),
         );
 
         let point = (0..i)
-            .map(|_| F::from_with_cfg(rng.random::<u128>(), &bench_config()))
+            .map(|_| cfg.project(&rng.random::<u128>()))
             .collect_vec();
 
-        let zero = F::zero_with_cfg(&bench_config());
-
-        group.bench_with_input(
-            BenchmarkId::new("Evaluate", format!("nvars={}", i)),
-            &v,
-            |b, v| {
-                b.iter(|| {
-                    let _ = black_box(v.evaluate(&point, zero.clone()));
-                });
-            },
-        );
-
-        let v = DenseMultilinearExtension::from_evaluations_vec(
-            i,
-            (0..(1 << i))
-                .map(|i| F::from_with_cfg(i, &bench_config()).into_inner())
-                .collect_vec(),
-            crypto_primitives::semiring::crypto_bigint_uint::Uint::ZERO,
-        );
-
-        let point = (0..i)
-            .map(|_| F::from_with_cfg(rng.random::<u128>(), &bench_config()))
-            .collect_vec();
-
-        let config = &bench_config();
         group.bench_with_input(
             BenchmarkId::new("Evaluate With Config", format!("nvars={}", i)),
             &v,
             |b, v| {
                 b.iter(|| {
-                    let _ = black_box(v.clone().evaluate_with_config(&point, config));
+                    let _ = black_box(v.clone().evaluate(&cfg, &point));
                 });
             },
         );

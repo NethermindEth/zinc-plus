@@ -47,20 +47,21 @@ use crate::{
         },
     },
 };
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use num_traits::Zero;
+use crypto_primitives::{
+    BaseFieldConfig, ProjectPrimitiveIntegersWithConfig, SemiringConfig, SetConfig,
+};
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
-    utils::{ArithErrors, build_eq_x_r_inner, build_next_c_r_mle},
+    utils::{ArithErrors, build_eq_x_r, build_next_c_r_mle},
 };
 use zinc_transcript::{
     delegate_transcribable,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::ShiftSpec;
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::cfg_into_iter;
 
 //
 // Data structures
@@ -74,14 +75,14 @@ use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 /// at $r_0$ are provided externally via `lifted_evals` (in $F_q[X]$),
 /// from which the verifier derives the scalar `open_evals` via $\psi_a$.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<F: PrimeField> {
+pub struct Proof<F> {
     /// The inner multi-degree sumcheck proof. Single-family shape: one
     /// degree-2 group.
     pub sumcheck_proof: MultiDegreeSumcheckProof<F>,
 }
 
 delegate_transcribable!(Proof<F> { sumcheck_proof: MultiDegreeSumcheckProof<F> }
-    where F: PrimeField, F::Integer: ConstTranscribable);
+    where F: ConstTranscribable);
 
 /// Per-family inputs to the lockstep multi-point evaluation protocol,
 /// those that aren't shared between families.
@@ -91,31 +92,31 @@ delegate_transcribable!(Proof<F> { sumcheck_proof: MultiDegreeSumcheckProof<F> }
 /// config they operate over and (b) the per-family field-projected
 /// `trace_mles`, bit-op virtual MLEs, `eval_point`, `up_evals`, and
 /// `down_evals`.
-pub struct MultipointEvalFamilyInputs<'a, F: PrimeField> {
+pub struct MultipointEvalFamilyInputs<'a, C: SetConfig> {
     /// Field configuration for this family.
-    pub field_cfg: &'a F::Config,
+    pub field_cfg: &'a C,
     /// Trace MLEs for this family (projected into this family's field).
-    pub trace_mles: &'a [DenseMultilinearExtension<F::Inner>],
+    pub trace_mles: &'a [DenseMultilinearExtension<C::Element>],
     /// Bit-op virtual MLEs for this family (projected into this family's
     /// field).
-    pub bit_op_mles: &'a [DenseMultilinearExtension<F::Inner>],
+    pub bit_op_mles: &'a [DenseMultilinearExtension<C::Element>],
     /// Evaluation point $r^\star$ for this family.
-    pub eval_point: &'a [F],
+    pub eval_point: &'a [C::Element],
     /// `up_eval_j = v_j(r*)` for every column $j$, in this family's
     /// field.
-    pub up_evals: &'a [F],
+    pub up_evals: &'a [C::Element],
     /// `bit_op_eval_l = bit_op_l(r*)` for every bit-op virtual column
     /// $l$, in this family's field.
-    pub bit_op_evals: &'a [F],
+    pub bit_op_evals: &'a [C::Element],
     /// `down_eval_k = v_{src_k}^{<<c_k}(r*)` for every shift $k$, in
     /// this family's field.
-    pub down_evals: &'a [F],
+    pub down_evals: &'a [C::Element],
 }
 
 /// Prover state after the multi-point evaluation protocol for one constraint
 /// family.
 #[derive(Clone, Debug)]
-pub struct ProverState<F: PrimeField> {
+pub struct ProverState<F> {
     /// The combined evaluation point `r_0` produced by the sumcheck
     /// (lifted into this family's field — the underlying integer is shared
     /// across all families).
@@ -131,7 +132,7 @@ pub struct ProverState<F: PrimeField> {
 /// finalize the check via [`MultipointEval::verify_subclaim`] once the
 /// caller has assembled the `open_evals`.
 #[derive(Clone, Debug)]
-pub struct Subclaim<F: PrimeField> {
+pub struct Subclaim<F> {
     /// Shared sumcheck output point $r_0$ (in this family's field).
     pub r0: Vec<F>,
     /// Expected evaluation of the combined polynomial at $r_0$ handed back
@@ -159,12 +160,13 @@ pub struct Subclaim<F: PrimeField> {
 // Protocol
 //
 
-pub struct MultipointEval<F>(PhantomData<F>);
+pub struct MultipointEval<C>(PhantomData<C>);
 
-impl<F> MultipointEval<F>
+impl<C> MultipointEval<C>
 where
-    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
-    F::Integer: ConstTranscribable + Zero + Default + Send + Sync,
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
+    C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
 {
     /// Multi-point evaluation protocol prover (lockstep over families).
     ///
@@ -178,7 +180,7 @@ where
     /// All protocol-level challenges $(\alpha_k, \gamma_j,
     /// \gamma^\mathrm{bit}_l)$ are sampled once as integers in $[0, q^*)$
     /// via `q_star_cfg` and lifted into each family's field via
-    /// [`F::from_with_cfg`]. The inner sumcheck is driven by
+    /// `cfg.project`. The inner sumcheck is driven by
     /// [`MultiDegreeSumcheck`] (one degree-2 group per family), so each
     /// round's challenge is likewise shared across families and lifted
     /// per-family.
@@ -211,10 +213,11 @@ where
     )]
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
-        families: Vec<MultipointEvalFamilyInputs<'_, F>>,
+        families: Vec<MultipointEvalFamilyInputs<'_, C>>,
         shifts: &[ShiftSpec],
-        q_star_cfg: &F::Config,
-    ) -> Result<Vec<(Proof<F>, ProverState<F>)>, MultipointEvalError<F>> {
+        q_star_cfg: &C,
+    ) -> Result<Vec<(Proof<C::Element>, ProverState<C::Element>)>, MultipointEvalError<C::Element>>
+    {
         assert!(!families.is_empty(), "need at least one family");
 
         let num_families = families.len();
@@ -259,52 +262,42 @@ where
         // Step 1: Sample shared batching coefficients $\alpha_k$ and
         // $\gamma_j$, then bit-op $\gamma^\mathrm{bit}_l$, as integers in
         // $[0, q^*)$, then lift into each family's field.
-        let shared_alpha_ints: Vec<F::Integer> = (0..num_down_cols)
-            .map(|_| {
-                transcript
-                    .get_field_challenge::<F>(q_star_cfg)
-                    .lift_to_integer()
-            })
-            .collect();
-        let shared_gamma_ints: Vec<F::Integer> = (0..num_cols)
-            .map(|_| {
-                transcript
-                    .get_field_challenge::<F>(q_star_cfg)
-                    .lift_to_integer()
-            })
-            .collect();
-        let shared_bit_op_gamma_ints: Vec<F::Integer> = (0..num_bit_op_cols)
-            .map(|_| {
-                transcript
-                    .get_field_challenge::<F>(q_star_cfg)
-                    .lift_to_integer()
-            })
+        let sample_int = |transcript: &mut _| {
+            let chal: C::Element = Transcript::get_field_challenge(transcript, q_star_cfg);
+            q_star_cfg.lift(&chal)
+        };
+        let shared_alpha_ints: Vec<C::Integer> =
+            (0..num_down_cols).map(|_| sample_int(transcript)).collect();
+        let shared_gamma_ints: Vec<C::Integer> =
+            (0..num_cols).map(|_| sample_int(transcript)).collect();
+        let shared_bit_op_gamma_ints: Vec<C::Integer> = (0..num_bit_op_cols)
+            .map(|_| sample_int(transcript))
             .collect();
 
-        let per_family_alphas: Vec<Vec<F>> = families
+        let per_family_alphas: Vec<Vec<C::Element>> = families
             .iter()
             .map(|b| {
                 shared_alpha_ints
                     .iter()
-                    .map(|v| F::from_with_cfg(v.clone(), b.field_cfg))
+                    .map(|v| b.field_cfg.project(v))
                     .collect()
             })
             .collect();
-        let per_family_gammas: Vec<Vec<F>> = families
+        let per_family_gammas: Vec<Vec<C::Element>> = families
             .iter()
             .map(|b| {
                 shared_gamma_ints
                     .iter()
-                    .map(|v| F::from_with_cfg(v.clone(), b.field_cfg))
+                    .map(|v| b.field_cfg.project(v))
                     .collect()
             })
             .collect();
-        let per_family_bit_op_gammas: Vec<Vec<F>> = families
+        let per_family_bit_op_gammas: Vec<Vec<C::Element>> = families
             .iter()
             .map(|b| {
                 shared_bit_op_gamma_ints
                     .iter()
-                    .map(|v| F::from_with_cfg(v.clone(), b.field_cfg))
+                    .map(|v| b.field_cfg.project(v))
                     .collect()
             })
             .collect();
@@ -314,28 +307,27 @@ where
         // Each family contributes one degree-2 group with MLE layout
         // `[eq_r, next_mles[..], precombined, down_cols[..]]` and
         // comb_fn `eq * precombined + \sum_k \alpha_k * next_k * down_k`.
-        let mut family_groups: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)> =
+        let mut family_groups: Vec<(Vec<MultiDegreeSumcheckGroup<C>>, &C)> =
             Vec::with_capacity(num_families);
 
         // Sanity-check claimed sums in debug builds.
-        let mut debug_expected_sums: Vec<F> = Vec::with_capacity(num_families);
+        let mut debug_expected_sums: Vec<C::Element> = Vec::with_capacity(num_families);
 
         for (b_idx, family) in families.iter().enumerate() {
             let cfg = family.field_cfg;
             let alphas_b = per_family_alphas[b_idx].clone();
             let gammas_b = &per_family_gammas[b_idx];
             let bit_op_gammas_b = &per_family_bit_op_gammas[b_idx];
-            let zero = F::zero_with_cfg(cfg);
-            let zero_inner = zero.inner();
+            let zero = cfg.zero();
 
             // Build the two selector MLEs:
             //   eq_r(b)   = eq(b, r')
             //   next_c_r_mle(b) = next_c_mle(r', b)
-            let eq_r = build_eq_x_r_inner(family.eval_point, cfg)?;
+            let eq_r = build_eq_x_r(cfg, family.eval_point)?;
             let (next_mles, down_cols): (Vec<_>, Vec<_>) = shifts
                 .iter()
                 .map(|spec| {
-                    let next = build_next_c_r_mle(family.eval_point, spec.shift_amount(), cfg)?;
+                    let next = build_next_c_r_mle(cfg, family.eval_point, spec.shift_amount())?;
                     let col = family.trace_mles[spec.source_col()].clone();
                     Ok((next, col))
                 })
@@ -347,35 +339,19 @@ where
             let precombined = {
                 let evaluations: Vec<_> = cfg_into_iter!(0..1usize << num_vars)
                     .map(|i| {
-                        let committed_acc =
-                            gammas_b
-                                .iter()
-                                .enumerate()
-                                .fold(zero.clone(), |acc, (j, gamma)| {
-                                    let eval_f = F::new_unchecked_with_cfg(
-                                        family.trace_mles[j].evaluations[i].clone(),
-                                        cfg,
-                                    );
-                                    acc + eval_f * gamma
-                                });
-                        bit_op_gammas_b
-                            .iter()
-                            .enumerate()
-                            .fold(committed_acc, |acc, (j, gamma)| {
-                                let eval_f = F::new_unchecked_with_cfg(
-                                    family.bit_op_mles[j].evaluations[i].clone(),
-                                    cfg,
-                                );
-                                acc + eval_f * gamma
-                            })
-                            .into_inner()
+                        let mut acc = zero.clone();
+                        for (j, gamma) in gammas_b.iter().enumerate() {
+                            let term = cfg.mul(&family.trace_mles[j].evaluations[i], gamma);
+                            cfg.add_assign(&mut acc, &term);
+                        }
+                        for (j, bit_op_gamma) in bit_op_gammas_b.iter().enumerate() {
+                            let term = cfg.mul(&family.bit_op_mles[j].evaluations[i], bit_op_gamma);
+                            cfg.add_assign(&mut acc, &term);
+                        }
+                        acc
                     })
                     .collect();
-                DenseMultilinearExtension::from_evaluations_vec(
-                    num_vars,
-                    evaluations,
-                    zero_inner.clone(),
-                )
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, zero.clone())
             };
 
             // Pack MLEs: [eq_r, next_mles[..], precombined, down_cols[..]]
@@ -385,18 +361,19 @@ where
             mles.push(precombined);
             mles.extend(down_cols);
 
-            let comb_fn: CombFn<F> = {
+            let comb_fn: CombFn<C::Element> = {
                 let alphas_b = alphas_b.clone();
                 let num_down_cols_local = num_down_cols;
-                Box::new(move |mle_values: &[F]| {
+                let comb_cfg = cfg.clone();
+                Box::new(move |mle_values: &[C::Element]| {
                     let eq_val = &mle_values[0];
                     let precombined_val = &mle_values[num_down_cols_local + 1];
                     alphas_b.iter().enumerate().fold(
-                        eq_val.clone() * precombined_val,
+                        comb_cfg.mul(eq_val, precombined_val),
                         |acc, (k, alpha)| {
                             let next = &mle_values[1 + k];
                             let down_col = &mle_values[num_down_cols_local + 2 + k];
-                            acc + alpha.clone() * next * down_col
+                            comb_cfg.add(&acc, &comb_cfg.mul(&comb_cfg.mul(alpha, next), down_col))
                         },
                     )
                 })
@@ -407,13 +384,13 @@ where
 
             if cfg!(debug_assertions) {
                 debug_expected_sums.push(compute_expected_sum(
+                    cfg,
                     family.up_evals,
                     family.down_evals,
                     family.bit_op_evals,
                     gammas_b,
                     &alphas_b,
                     bit_op_gammas_b,
-                    zero,
                 ));
             }
         }
@@ -471,12 +448,12 @@ where
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
-        proofs: Vec<Proof<F>>,
-        families: Vec<MultipointEvalFamilyInputs<'_, F>>,
+        proofs: Vec<Proof<C::Element>>,
+        families: Vec<MultipointEvalFamilyInputs<'_, C>>,
         shifts: &[ShiftSpec],
         num_vars: usize,
-        q_star_cfg: &F::Config,
-    ) -> Result<Vec<Subclaim<F>>, MultipointEvalError<F>> {
+        q_star_cfg: &C,
+    ) -> Result<Vec<Subclaim<C::Element>>, MultipointEvalError<C::Element>> {
         assert!(!families.is_empty(), "need at least one family");
         assert_eq!(
             proofs.len(),
@@ -515,52 +492,42 @@ where
         // Step 1: Sample shared $\alpha_k$, $\gamma_j$, and bit-op
         // $\gamma^\mathrm{bit}_l$ in $[0, q^*)$ (must match prover
         // transcript order: alphas, gammas, bit-op gammas).
-        let shared_alpha_ints: Vec<F::Integer> = (0..num_down_cols)
-            .map(|_| {
-                transcript
-                    .get_field_challenge::<F>(q_star_cfg)
-                    .lift_to_integer()
-            })
-            .collect();
-        let shared_gamma_ints: Vec<F::Integer> = (0..num_cols)
-            .map(|_| {
-                transcript
-                    .get_field_challenge::<F>(q_star_cfg)
-                    .lift_to_integer()
-            })
-            .collect();
-        let shared_bit_op_gamma_ints: Vec<F::Integer> = (0..num_bit_op_cols)
-            .map(|_| {
-                transcript
-                    .get_field_challenge::<F>(q_star_cfg)
-                    .lift_to_integer()
-            })
+        let sample_int = |transcript: &mut _| {
+            let chal: C::Element = Transcript::get_field_challenge(transcript, q_star_cfg);
+            q_star_cfg.lift(&chal)
+        };
+        let shared_alpha_ints: Vec<C::Integer> =
+            (0..num_down_cols).map(|_| sample_int(transcript)).collect();
+        let shared_gamma_ints: Vec<C::Integer> =
+            (0..num_cols).map(|_| sample_int(transcript)).collect();
+        let shared_bit_op_gamma_ints: Vec<C::Integer> = (0..num_bit_op_cols)
+            .map(|_| sample_int(transcript))
             .collect();
 
-        let per_family_alphas: Vec<Vec<F>> = families
+        let per_family_alphas: Vec<Vec<C::Element>> = families
             .iter()
             .map(|b| {
                 shared_alpha_ints
                     .iter()
-                    .map(|v| F::from_with_cfg(v.clone(), b.field_cfg))
+                    .map(|v| b.field_cfg.project(v))
                     .collect()
             })
             .collect();
-        let per_family_gammas: Vec<Vec<F>> = families
+        let per_family_gammas: Vec<Vec<C::Element>> = families
             .iter()
             .map(|b| {
                 shared_gamma_ints
                     .iter()
-                    .map(|v| F::from_with_cfg(v.clone(), b.field_cfg))
+                    .map(|v| b.field_cfg.project(v))
                     .collect()
             })
             .collect();
-        let per_family_bit_op_gammas: Vec<Vec<F>> = families
+        let per_family_bit_op_gammas: Vec<Vec<C::Element>> = families
             .iter()
             .map(|b| {
                 shared_bit_op_gamma_ints
                     .iter()
-                    .map(|v| F::from_with_cfg(v.clone(), b.field_cfg))
+                    .map(|v| b.field_cfg.project(v))
                     .collect()
             })
             .collect();
@@ -568,15 +535,14 @@ where
         // Step 2: Per-family claimed-sum check (must equal the integer-
         // shared expected sum derived from each family's up/down/bit-op evals).
         for (b_idx, (proof, family)) in proofs.iter().zip(families.iter()).enumerate() {
-            let zero = F::zero_with_cfg(family.field_cfg);
             let expected = compute_expected_sum(
+                family.field_cfg,
                 family.up_evals,
                 family.down_evals,
                 family.bit_op_evals,
                 &per_family_gammas[b_idx],
                 &per_family_alphas[b_idx],
                 &per_family_bit_op_gammas[b_idx],
-                zero,
             );
             let claimed = &proof.sumcheck_proof.claimed_sums()[0];
             if claimed != &expected {
@@ -588,17 +554,18 @@ where
         }
 
         // Step 3: Run the lockstep multi-degree sumcheck verifier.
-        let proof_refs: Vec<(&MultiDegreeSumcheckProof<F>, &F::Config)> = proofs
+        let proof_refs: Vec<(&MultiDegreeSumcheckProof<C::Element>, &C)> = proofs
             .iter()
             .zip(families.iter())
             .map(|(p, b)| (&p.sumcheck_proof, b.field_cfg))
             .collect();
-        let sub_claims: Vec<MultiDegreeSubClaims<F>> = MultiDegreeSumcheck::verify_as_subprotocol(
-            transcript,
-            num_vars,
-            &proof_refs,
-            q_star_cfg,
-        )?;
+        let sub_claims: Vec<MultiDegreeSubClaims<C::Element>> =
+            MultiDegreeSumcheck::verify_as_subprotocol(
+                transcript,
+                num_vars,
+                &proof_refs,
+                q_star_cfg,
+            )?;
 
         // Step 4: Per-family finalize: recompute selectors at $r_0$.
         families
@@ -607,15 +574,14 @@ where
             .enumerate()
             .map(|(b_idx, (family, sub))| {
                 let cfg = family.field_cfg;
-                let one = F::one_with_cfg(cfg);
-                let r0: Vec<F> = sub.point().to_vec();
+                let r0: Vec<C::Element> = sub.point().to_vec();
                 let expected_evaluation = sub.expected_evaluations()[0].clone();
 
-                let eq_at_r0 = zinc_poly::utils::eq_eval(&r0, family.eval_point, one)?;
-                let shifts_at_r0: Vec<F> = shifts
+                let eq_at_r0 = zinc_poly::utils::eq_eval(cfg, &r0, family.eval_point)?;
+                let shifts_at_r0: Vec<C::Element> = shifts
                     .iter()
                     .map(|spec| {
-                        eval_shift_predicate(family.eval_point, &r0, spec.shift_amount(), cfg)
+                        eval_shift_predicate(cfg, family.eval_point, &r0, spec.shift_amount())
                     })
                     .collect();
 
@@ -643,12 +609,12 @@ where
     /// `open_evals`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_subclaim(
-        subclaim: &Subclaim<F>,
-        open_evals: &[F],
-        bit_op_open_evals: &[F],
+        subclaim: &Subclaim<C::Element>,
+        open_evals: &[C::Element],
+        bit_op_open_evals: &[C::Element],
         shifts: &[ShiftSpec],
-        field_cfg: &F::Config,
-    ) -> Result<(), MultipointEvalError<F>> {
+        field_cfg: &C,
+    ) -> Result<(), MultipointEvalError<C::Element>> {
         let num_cols = subclaim.gammas.len();
         let num_bit_op_cols = subclaim.bit_op_gammas.len();
 
@@ -666,35 +632,43 @@ where
             });
         }
 
-        let zero = F::zero_with_cfg(field_cfg);
+        let zero = field_cfg.zero();
 
-        let batched_up: F = subclaim
+        let batched_up: C::Element = subclaim
             .gammas
             .iter()
             .zip(open_evals.iter())
             .fold(zero.clone(), |acc, (gamma, eval)| {
-                acc + gamma.clone() * eval
+                field_cfg.add(&acc, &field_cfg.mul(gamma, eval))
             });
         let batched_up = subclaim
             .bit_op_gammas
             .iter()
             .zip(bit_op_open_evals.iter())
-            .fold(batched_up, |acc, (gamma, eval)| acc + gamma.clone() * eval);
+            .fold(batched_up, |acc, (gamma, eval)| {
+                field_cfg.add(&acc, &field_cfg.mul(gamma, eval))
+            });
 
         // open_evals[j] = trace_col_j(r_0) for all committed (up) columns.
         // Shifted columns reuse the same opening: the shift is captured by
         // the shift_at_r0 selector, so we index by source_col into open_evals.
-        let batched_down: F = subclaim
+        let batched_down: C::Element = subclaim
             .alphas
             .iter()
             .enumerate()
             .zip(subclaim.shifts_at_r0.iter())
             .fold(zero, |acc, ((k, alpha), shift_at_r0)| {
                 let src_col = shifts[k].source_col();
-                acc + alpha.clone() * shift_at_r0 * &open_evals[src_col]
+                field_cfg.add(
+                    &acc,
+                    &field_cfg.mul(&field_cfg.mul(alpha, shift_at_r0), &open_evals[src_col]),
+                )
             });
 
-        let expected_evaluation = subclaim.eq_at_r0.clone() * &batched_up + batched_down;
+        let expected_evaluation = field_cfg.add(
+            &field_cfg.mul(&subclaim.eq_at_r0, &batched_up),
+            &batched_down,
+        );
 
         if expected_evaluation != subclaim.expected_evaluation {
             return Err(MultipointEvalError::ClaimMismatch {
@@ -711,29 +685,35 @@ where
 ///                + \sum_k \alpha_k * down_eval_k
 ///                + \sum_l \gamma_l^bit * bit_op_eval_l`
 #[allow(clippy::too_many_arguments)]
-fn compute_expected_sum<F: PrimeField>(
-    up_evals: &[F],
-    down_evals: &[F],
-    bit_op_evals: &[F],
-    gammas: &[F],
-    alphas: &[F],
-    bit_op_gammas: &[F],
-    zero: F,
-) -> F {
+fn compute_expected_sum<C: SemiringConfig>(
+    cfg: &C,
+    up_evals: &[C::Element],
+    down_evals: &[C::Element],
+    bit_op_evals: &[C::Element],
+    gammas: &[C::Element],
+    alphas: &[C::Element],
+    bit_op_gammas: &[C::Element],
+) -> C::Element {
     let up_sum = gammas
         .iter()
         .zip(up_evals.iter())
-        .fold(zero, |acc, (gamma, up)| acc + gamma.clone() * up);
+        .fold(cfg.zero(), |acc, (gamma, up)| {
+            cfg.add(&acc, &cfg.mul(gamma, up))
+        });
 
     let up_and_down = alphas
         .iter()
         .zip(down_evals.iter())
-        .fold(up_sum, |acc, (alpha, down)| acc + alpha.clone() * down);
+        .fold(up_sum, |acc, (alpha, down)| {
+            cfg.add(&acc, &cfg.mul(alpha, down))
+        });
 
     bit_op_gammas
         .iter()
         .zip(bit_op_evals.iter())
-        .fold(up_and_down, |acc, (gamma, eval)| acc + gamma.clone() * eval)
+        .fold(up_and_down, |acc, (gamma, eval)| {
+            cfg.add(&acc, &cfg.mul(gamma, eval))
+        })
 }
 
 //
@@ -741,14 +721,14 @@ fn compute_expected_sum<F: PrimeField>(
 //
 
 #[derive(Debug, Error)]
-pub enum MultipointEvalError<F: PrimeField> {
+pub enum MultipointEvalError<F: std::fmt::Debug> {
     #[error("wrong number of open evaluations: got {got}, expected {expected}")]
     WrongOpenEvalsNumber { got: usize, expected: usize },
     #[error("wrong number of bit-op open evaluations: got {got}, expected {expected}")]
     WrongBitOpOpenEvalsNumber { got: usize, expected: usize },
-    #[error("wrong sumcheck claimed sum: got {got}, expected {expected}")]
+    #[error("wrong sumcheck claimed sum: got {got:?}, expected {expected:?}")]
     WrongSumcheckSum { got: F, expected: F },
-    #[error("multi-point eval claim mismatch: got {got}, expected {expected}")]
+    #[error("multi-point eval claim mismatch: got {got:?}, expected {expected:?}")]
     ClaimMismatch { got: F, expected: F },
     #[error("sumcheck error: {0}")]
     SumcheckError(#[from] SumCheckError<F>),
@@ -766,13 +746,14 @@ pub enum MultipointEvalError<F: PrimeField> {
 mod tests {
     use super::*;
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
+    use crypto_primitives::{FixedConfig, crypto_bigint_const_monty::ConstMontyField};
     use num_traits::{ConstOne, ConstZero};
-    use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+    use zinc_poly::mle::DenseMultilinearExtension;
     use zinc_transcript::Blake3Transcript;
 
     const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
     type F = ConstMontyField<Params, { U128::LIMBS }>;
+    type Cfg = FixedConfig<F>;
 
     /// Data known to both prover and verifier from earlier protocol steps.
     #[derive(Clone)]
@@ -801,19 +782,14 @@ mod tests {
         num_vars: usize,
         num_cols: usize,
         shifts: &[ShiftSpec],
-    ) -> (
-        Vec<DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>>,
-        SharedSubprotocolInput,
-    ) {
+    ) -> (Vec<DenseMultilinearExtension<F>>, SharedSubprotocolInput) {
+        let cfg = Cfg::default();
         let n = 1usize << num_vars;
-        let zero_inner = F::ZERO.into_inner();
 
         let trace_mles: Vec<DenseMultilinearExtension<_>> = (0..num_cols)
             .map(|col| {
-                let evals: Vec<_> = (0..n)
-                    .map(|i| F::from((col * n + i + 1) as u32).into_inner())
-                    .collect();
-                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero_inner)
+                let evals: Vec<_> = (0..n).map(|i| F::from((col * n + i + 1) as u32)).collect();
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, F::ZERO)
             })
             .collect();
 
@@ -821,7 +797,7 @@ mod tests {
 
         let up_evals: Vec<F> = trace_mles
             .iter()
-            .map(|mle| mle.clone().evaluate_with_config(&eval_point, &()).unwrap())
+            .map(|mle| mle.clone().evaluate(&cfg, &eval_point).unwrap())
             .collect();
 
         let down_evals: Vec<F> = shifts
@@ -830,10 +806,10 @@ mod tests {
                 let mle = &trace_mles[spec.source_col()];
                 let c = spec.shift_amount();
                 let mut shifted = mle.evaluations[c..].to_vec();
-                shifted.extend(vec![zero_inner; c]);
+                shifted.extend(vec![F::ZERO; c]);
                 let shifted_mle =
-                    DenseMultilinearExtension::from_evaluations_vec(num_vars, shifted, zero_inner);
-                shifted_mle.evaluate_with_config(&eval_point, &()).unwrap()
+                    DenseMultilinearExtension::from_evaluations_vec(num_vars, shifted, F::ZERO);
+                shifted_mle.evaluate(&cfg, &eval_point).unwrap()
             })
             .collect();
 
@@ -849,14 +825,15 @@ mod tests {
 
     /// Prover: has access to the trace, produces a proof and open_evals.
     fn run_prover(
-        trace_mles: &[DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>],
+        trace_mles: &[DenseMultilinearExtension<F>],
         public: &SharedSubprotocolInput,
     ) -> ProverMessage {
+        let cfg = Cfg::default();
         let mut transcript = make_transcript();
-        let mut outputs = MultipointEval::<F>::prove_as_subprotocol(
+        let mut outputs = MultipointEval::<Cfg>::prove_as_subprotocol(
             &mut transcript,
             vec![MultipointEvalFamilyInputs {
-                field_cfg: &(),
+                field_cfg: &cfg,
                 trace_mles,
                 bit_op_mles: &[],
                 eval_point: &public.eval_point,
@@ -865,7 +842,7 @@ mod tests {
                 down_evals: &public.down_evals,
             }],
             &public.shifts,
-            &(),
+            &cfg,
         )
         .expect("prover should succeed");
         assert_eq!(outputs.len(), 1, "single-family shape");
@@ -874,7 +851,7 @@ mod tests {
         let r_0 = &prover_state.eval_point;
         let open_evals: Vec<F> = trace_mles
             .iter()
-            .map(|mle| mle.clone().evaluate_with_config(r_0, &()).unwrap())
+            .map(|mle| mle.clone().evaluate(&cfg, r_0).unwrap())
             .collect();
 
         ProverMessage { proof, open_evals }
@@ -885,11 +862,12 @@ mod tests {
         public: &SharedSubprotocolInput,
         msg: &ProverMessage,
     ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
-        let mut subclaims = MultipointEval::<F>::verify_as_subprotocol(
+        let cfg = Cfg::default();
+        let mut subclaims = MultipointEval::<Cfg>::verify_as_subprotocol(
             &mut make_transcript(),
             vec![msg.proof.clone()],
             vec![MultipointEvalFamilyInputs {
-                field_cfg: &(),
+                field_cfg: &cfg,
                 trace_mles: &[],
                 bit_op_mles: &[],
                 eval_point: &public.eval_point,
@@ -899,12 +877,18 @@ mod tests {
             }],
             &public.shifts,
             public.num_vars,
-            &(),
+            &cfg,
         )?;
         assert_eq!(subclaims.len(), 1, "single-family shape");
         let subclaim = subclaims.pop().expect("single family");
 
-        MultipointEval::<F>::verify_subclaim(&subclaim, &msg.open_evals, &[], &public.shifts, &())?;
+        MultipointEval::<Cfg>::verify_subclaim(
+            &subclaim,
+            &msg.open_evals,
+            &[],
+            &public.shifts,
+            &cfg,
+        )?;
 
         Ok(subclaim)
     }
@@ -975,6 +959,7 @@ mod tests {
 
     #[test]
     fn bit_op_virtual_opening_is_bound_in_subclaim() {
+        let cfg = Cfg::default();
         let shifts = vec![ShiftSpec::new(0, 1)];
         let (trace_mles, public) = build_trace(3, 2, &shifts);
 
@@ -983,24 +968,20 @@ mod tests {
             trace_mles[0]
                 .evaluations
                 .iter()
-                .map(|eval| (F::new_unchecked_with_cfg(*eval, &()) + F::from(11_u32)).into_inner())
+                .map(|eval| *eval + F::from(11_u32))
                 .collect(),
-            F::ZERO.into_inner(),
+            F::ZERO,
         )];
         let bit_op_evals: Vec<F> = bit_op_mles
             .iter()
-            .map(|mle| {
-                mle.clone()
-                    .evaluate_with_config(&public.eval_point, &())
-                    .unwrap()
-            })
+            .map(|mle| mle.clone().evaluate(&cfg, &public.eval_point).unwrap())
             .collect();
 
         let mut prover_transcript = make_transcript();
-        let mut prover_outputs = MultipointEval::<F>::prove_as_subprotocol(
+        let mut prover_outputs = MultipointEval::<Cfg>::prove_as_subprotocol(
             &mut prover_transcript,
             vec![MultipointEvalFamilyInputs {
-                field_cfg: &(),
+                field_cfg: &cfg,
                 trace_mles: &trace_mles,
                 bit_op_mles: &bit_op_mles,
                 eval_point: &public.eval_point,
@@ -1009,7 +990,7 @@ mod tests {
                 down_evals: &public.down_evals,
             }],
             &public.shifts,
-            &(),
+            &cfg,
         )
         .expect("prover should succeed");
         assert_eq!(prover_outputs.len(), 1, "single-family shape");
@@ -1018,19 +999,19 @@ mod tests {
         let r_0 = &prover_state.eval_point;
         let open_evals: Vec<F> = trace_mles
             .iter()
-            .map(|mle| mle.clone().evaluate_with_config(r_0, &()).unwrap())
+            .map(|mle| mle.clone().evaluate(&cfg, r_0).unwrap())
             .collect();
         let bit_op_open_evals: Vec<F> = bit_op_mles
             .iter()
-            .map(|mle| mle.clone().evaluate_with_config(r_0, &()).unwrap())
+            .map(|mle| mle.clone().evaluate(&cfg, r_0).unwrap())
             .collect();
 
         let mut verifier_transcript = make_transcript();
-        let mut subclaims = MultipointEval::<F>::verify_as_subprotocol(
+        let mut subclaims = MultipointEval::<Cfg>::verify_as_subprotocol(
             &mut verifier_transcript,
             vec![proof],
             vec![MultipointEvalFamilyInputs {
-                field_cfg: &(),
+                field_cfg: &cfg,
                 trace_mles: &[],
                 bit_op_mles: &[],
                 eval_point: &public.eval_point,
@@ -1040,29 +1021,29 @@ mod tests {
             }],
             &public.shifts,
             public.num_vars,
-            &(),
+            &cfg,
         )
         .expect("verifier should accept sumcheck");
         assert_eq!(subclaims.len(), 1, "single-family shape");
         let subclaim = subclaims.pop().expect("single family");
 
-        MultipointEval::<F>::verify_subclaim(
+        MultipointEval::<Cfg>::verify_subclaim(
             &subclaim,
             &open_evals,
             &bit_op_open_evals,
             &public.shifts,
-            &(),
+            &cfg,
         )
         .expect("correct bit-op opening should satisfy subclaim");
 
         let mut bad_bit_op_open_evals = bit_op_open_evals;
         bad_bit_op_open_evals[0] += F::ONE;
-        let err = MultipointEval::<F>::verify_subclaim(
+        let err = MultipointEval::<Cfg>::verify_subclaim(
             &subclaim,
             &open_evals,
             &bad_bit_op_open_evals,
             &public.shifts,
-            &(),
+            &cfg,
         )
         .unwrap_err();
         assert!(

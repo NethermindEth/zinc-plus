@@ -32,8 +32,15 @@ pub mod verifier;
 use rayon::prelude::*;
 
 use crate::fold::FoldTrace;
-use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
-use std::{fmt::Debug, iter, marker::PhantomData};
+use crypto_primitives::{
+    BaseFieldConfig, ConstIntRing, ConstIntSemiring, ProjectElementWithConfig,
+    ProjectPrimitiveIntegersWithConfig, Semiring, SetElement, Wrapper,
+};
+use std::{
+    fmt::{Debug, Display},
+    iter,
+    marker::PhantomData,
+};
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
@@ -52,7 +59,7 @@ use zinc_poly::{
     univariate::{
         binary::BinaryPoly,
         dense::DensePolynomial,
-        dynamic::over_field::{DynamicPolyVecF, DynamicPolynomialF},
+        dynamic::{DynamicPolyVec, DynamicPolynomial, HasDynamicPolynomialConfig},
     },
 };
 use zinc_primality::PrimalityTest;
@@ -75,12 +82,12 @@ use zip_plus::{
 ///
 /// Witness lifted evals are sent **per family**: for each of the $n + 2$
 /// families (Q[X] / $q_0$, the declared $q_1, \dots, q_n$, and the
-/// PCS-only $q''$), the prover sends a vector of `DynamicPolynomialF<F>`
+/// PCS-only $q''$), the prover sends a vector of `DynamicPolynomial<F>`
 /// carrying the per-family coefficient lift of each witness column. The
 /// verifier reads each family's lifts under that family's field cfg, no
-/// per-coefficient `from_with_cfg` projection is needed.
+/// per-coefficient `cfg.project` projection is needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<F: PrimeField> {
+pub struct Proof<F> {
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
@@ -113,7 +120,7 @@ pub struct Proof<F: PrimeField> {
     /// data, interleaves them with these, evaluates at
     /// `projecting_elements[family_idx]` for the per-family MP-eval
     /// consistency check.
-    pub witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    pub witness_lifted_evals: Vec<Vec<DynamicPolynomial<F>>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
     pub lookup_proof: Option<BatchedLookupProof<F>>,
     /// Binary-polynomial booleanity argument proof. `None` when the UAIR
@@ -148,13 +155,12 @@ pub struct Proof<F: PrimeField> {
     ///
     /// If no $F_q[X]$ constraints are present, this will be `None` to indicate
     /// $q'' := q_0$ and this is identical to `witness_lifted_evals`.
-    pub witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
+    pub witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<F>>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
 where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
+    F: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let (commit0, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
@@ -175,13 +181,13 @@ where
             MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
 
         // witness_lifted_evals: u32 count (= n + 1, one per constraint
-        // family) + length-prefixed DynamicPolyVecF entries. Each entry
+        // family) + length-prefixed DynamicPolyVec entries. Each entry
         // carries its own field-cfg header.
         let (n_wlf, mut bytes) = u32::read_transcription_bytes_subset(bytes);
         let n_wlf = usize::try_from(n_wlf).expect("n_wlf must fit into usize");
-        let mut witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>> = Vec::with_capacity(n_wlf);
+        let mut witness_lifted_evals: Vec<Vec<DynamicPolynomial<F>>> = Vec::with_capacity(n_wlf);
         for _ in 0..n_wlf {
-            let (wv, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+            let (wv, rest) = DynamicPolyVec::<F>::read_transcription_bytes_subset(bytes);
             witness_lifted_evals.push(wv.0);
             bytes = rest;
         }
@@ -241,10 +247,10 @@ where
         }
 
         // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
-        // length-prefixed DynamicPolyVecF (q'' family).
+        // length-prefixed DynamicPolyVec (q'' family).
         let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
         let (witness_lifted_evals_pp, bytes) = if presence != 0 {
-            let (p, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+            let (p, rest) = DynamicPolyVec::<F>::read_transcription_bytes_subset(bytes);
             (Some(p.0), rest)
         } else {
             (None, bytes)
@@ -297,14 +303,14 @@ where
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
         // witness_lifted_evals (per constraint family, n + 1 entries):
-        // u32 count + per-family DynamicPolyVecF (each carries its own
+        // u32 count + per-family DynamicPolyVec (each carries its own
         // field-cfg header). Index 0 is Q[X] / q_0, indices 1..=n are
         // declared primes.
         let n_wlf = u32::try_from(self.witness_lifted_evals.len())
             .expect("witness_lifted_evals length must fit into u32");
         buf = n_wlf.write_transcription_bytes_subset(buf);
         for wlf in &self.witness_lifted_evals {
-            buf = DynamicPolyVecF::reinterpret(wlf).write_transcription_bytes_subset(buf);
+            buf = DynamicPolyVec::reinterpret(wlf).write_transcription_bytes_subset(buf);
         }
 
         // booleanity_proof: u32 presence flag, then (optionally) the body
@@ -348,11 +354,11 @@ where
         }
 
         // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
-        // length-prefixed DynamicPolyVecF (q'' family).
+        // length-prefixed DynamicPolyVec (q'' family).
         let presence = u32::from(self.witness_lifted_evals_pp.is_some());
         buf = presence.write_transcription_bytes_subset(buf);
         if let Some(ref lifted_pp) = self.witness_lifted_evals_pp {
-            buf = DynamicPolyVecF::reinterpret(lifted_pp).write_transcription_bytes_subset(buf);
+            buf = DynamicPolyVec::reinterpret(lifted_pp).write_transcription_bytes_subset(buf);
         }
 
         // TODO: serialize lookup_proof once BatchedLookupProof gets
@@ -363,8 +369,7 @@ where
 
 impl<F> Transcribable for Proof<F>
 where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
+    F: ConstTranscribable,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
@@ -396,14 +401,14 @@ where
             .witness_lifted_evals
             .iter()
             .map(|wlf| {
-                DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
-                    + DynamicPolyVecF::reinterpret(wlf).get_num_bytes()
+                DynamicPolyVec::<F>::LENGTH_NUM_BYTES
+                    + DynamicPolyVec::reinterpret(wlf).get_num_bytes()
             })
             .sum();
         let witness_lifted_evals_pp_bytes = match &self.witness_lifted_evals_pp {
             Some(wpp) => {
-                DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
-                    + DynamicPolyVecF::reinterpret(wpp).get_num_bytes()
+                DynamicPolyVec::<F>::LENGTH_NUM_BYTES
+                    + DynamicPolyVec::reinterpret(wpp).get_num_bytes()
             }
             None => 0,
         };
@@ -474,7 +479,13 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize, const FOLDED_DEG_PLUS_ONE: usi
 
     /// Randomly sampled field modulus type, used throughout the protocol for
     /// finite field operations.
-    type Fmod: ConstIntSemiring + ConstTranscribable + FromRef<Self::Fmod> + Named + Send + Sync;
+    type Fmod: ConstIntSemiring
+        + ConstTranscribable
+        + FromRef<Self::Fmod>
+        + Display
+        + Named
+        + Send
+        + Sync;
 
     /// Primality test for the field modulus.
     type PrimeTest: PrimalityTest<Self::Fmod>;
@@ -527,18 +538,18 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize, const FOLDED_DEG_PLUS_ONE: usi
 /// (Note that type parameters are further constrained in the impl blocks for
 /// the prover and verifier)
 #[derive(Copy, Clone, Default, Debug)]
-pub struct ZincPlusPiop<Zt, U, F, const DEGREE_PLUS_ONE: usize, const FOLDED_DEGREE_PLUS_ONE: usize>(
-    PhantomData<(Zt, U, F)>,
+pub struct ZincPlusPiop<Zt, U, C, const DEGREE_PLUS_ONE: usize, const FOLDED_DEGREE_PLUS_ONE: usize>(
+    PhantomData<(Zt, U, C)>,
 )
 where
     Zt: ZincTypes<DEGREE_PLUS_ONE, FOLDED_DEGREE_PLUS_ONE>,
     U: Uair,
-    F: PrimeField;
+    C: BaseFieldConfig;
 
 /// Error type for error happening during the protocol execution (prover and
 /// verifier).
 #[derive(Debug, Error)]
-pub enum ProtocolError<F: PrimeField> {
+pub enum ProtocolError<F: SetElement> {
     #[error("ideal check failed: {0}")]
     IdealCheck(#[from] IdealCheckError<F>),
     #[error("combined poly resolver failed: {0}")]
@@ -608,49 +619,53 @@ fn absorb_public_columns<T: ConstTranscribable>(
 /// Binary columns exploit the 0/1 structure for conditional additions only.
 /// The `eq(point, *)` table is built once and reused across all columns.
 #[allow(clippy::arithmetic_side_effects)]
-fn compute_lifted_evals<F: PrimeField, const D: usize>(
-    point: &[F],
+fn compute_lifted_evals<C: BaseFieldConfig + Sync, const D: usize>(
+    point: &[C::Element],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    projected_trace: &ProjectedTrace<F>,
-    field_cfg: &F::Config,
-) -> Vec<DynamicPolynomialF<F>> {
-    let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
+    projected_trace: &ProjectedTrace<C::Element>,
+    field_cfg: &C,
+) -> Vec<DynamicPolynomial<C::Element>> {
+    let eq_table = zinc_poly::utils::build_eq_x_r_vec(field_cfg, point)
         .expect("compute_lifted_evals: eq table build failed");
 
     let n_bin = trace_bin_poly.len();
-    let zero = F::zero_with_cfg(field_cfg);
+    let zero = field_cfg.zero();
+    let poly_cfg = field_cfg.dyn_poly_cfg();
 
     // Binary columns: exploit 0/1 structure for conditional additions.
-    let mut result: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_bin_poly)
+    let mut result: Vec<DynamicPolynomial<C::Element>> = cfg_iter!(trace_bin_poly)
         .map(|col| {
             let mut coeffs = vec![zero.clone(); D];
             for (b, entry) in col.iter().enumerate() {
                 for (l, coeff) in entry.iter().enumerate() {
-                    if coeff.into_inner() {
-                        coeffs[l] += &eq_table[b];
+                    if *coeff.inner() {
+                        field_cfg.add_assign(&mut coeffs[l], &eq_table[b]);
                     }
                 }
             }
-            DynamicPolynomialF::new_trimmed(coeffs)
+            poly_cfg.new_trimmed(coeffs)
         })
         .collect();
 
     // Non-binary columns: coefficient-wise eq-weighted sum.
-    fn weighted_eq_sum<'a, F2: PrimeField + 'a>(
-        col: impl Iterator<Item = &'a DynamicPolynomialF<F2>> + Clone,
-        eq_table: &[F2],
-        zero: &F2,
-    ) -> DynamicPolynomialF<F2> {
+    fn weighted_eq_sum<'a, C2: BaseFieldConfig>(
+        cfg: &C2,
+        col: impl Iterator<Item = &'a DynamicPolynomial<C2::Element>> + Clone,
+        eq_table: &[C2::Element],
+        zero: &C2::Element,
+    ) -> DynamicPolynomial<C2::Element>
+    where
+        C2::Element: 'a,
+    {
         let num_coeffs = col.clone().map(|e| e.coeffs.len()).max().unwrap_or(0);
         let mut coeffs = vec![zero.clone(); num_coeffs];
         for (b, entry) in col.enumerate() {
             for (l, coeff) in entry.coeffs.iter().enumerate() {
-                let mut term = eq_table[b].clone();
-                term *= coeff;
-                coeffs[l] += &term;
+                let term = cfg.mul(&eq_table[b], coeff);
+                cfg.add_assign(&mut coeffs[l], &term);
             }
         }
-        DynamicPolynomialF::new_trimmed(coeffs)
+        cfg.dyn_poly_cfg().new_trimmed(coeffs)
     }
 
     match projected_trace {
@@ -659,6 +674,7 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
             cfg_extend!(
                 result,
                 cfg_into_iter!(n_bin..num_cols).map(|col_idx| weighted_eq_sum(
+                    field_cfg,
                     t.iter().map(|row| &row[col_idx]),
                     &eq_table,
                     &zero,
@@ -669,6 +685,7 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
             cfg_extend!(
                 result,
                 cfg_iter!(t[n_bin..]).map(|col_mle| weighted_eq_sum(
+                    field_cfg,
                     col_mle.iter(),
                     &eq_table,
                     &zero,
@@ -695,44 +712,44 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
 /// $\alpha'$, replacing the previous (underconstrained for $D > 1$)
 /// $\psi_a$ linear pin-down.
 #[allow(clippy::arithmetic_side_effects)]
-fn alpha_prime_bridge_up_evals<F: PrimeField, const D: usize>(
-    bit_slice_evals: &[F],
+fn alpha_prime_bridge_up_evals<C: BaseFieldConfig, const D: usize>(
+    bit_slice_evals: &[C::Element],
     num_wit_bin: usize,
-    alpha_prime: &F,
-    field_cfg: &F::Config,
-) -> Vec<F> {
+    alpha_prime: &C::Element,
+    field_cfg: &C,
+) -> Vec<C::Element> {
     debug_assert_eq!(bit_slice_evals.len(), num_wit_bin * D);
-    let one = F::one_with_cfg(field_cfg);
-    let alpha_powers: Vec<F> = powers(alpha_prime.clone(), one, D);
+    let alpha_powers: Vec<C::Element> = powers(field_cfg, alpha_prime, D);
     bit_slice_evals
         .chunks_exact(D)
         .map(|slice| {
             slice
                 .iter()
                 .zip(&alpha_powers)
-                .fold(F::zero_with_cfg(field_cfg), |acc, (b, alpha_pow)| {
-                    acc + b.clone() * alpha_pow
+                .fold(field_cfg.zero(), |mut acc, (b, alpha_pow)| {
+                    field_cfg.add_assign(&mut acc, &field_cfg.mul(b, alpha_pow));
+                    acc
                 })
         })
         .collect()
 }
 
-/// Project a DensePolynomial scalar to DynamicPolynomialF by projecting each
+/// Project a DensePolynomial scalar to DynamicPolynomial by projecting each
 /// coefficient via \phi_q.
-pub fn project_scalar_fn<R, F, const D: usize>(
+pub fn project_scalar_fn<R, C, const D: usize>(
     scalar: &DensePolynomial<R, D>,
-    field_cfg: &F::Config,
-) -> DynamicPolynomialF<F>
+    field_cfg: &C,
+) -> DynamicPolynomial<C::Element>
 where
-    F: PrimeField + for<'a> FromWithConfig<&'a R>,
+    C: BaseFieldConfig + ProjectElementWithConfig<R>,
 {
     scalar
         .iter()
-        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+        .map(|coeff| field_cfg.project(coeff))
         .collect()
 }
 
-/// Build the list of per-family [`F::Config`]'s in family order:
+/// Build the list of per-family field configs in family order:
 /// `prime_cfgs[0]` is the $Q[X]$ family's sampled prime $q_0$,
 /// `prime_cfgs[1..=n]` are the declared $q_1, ..., q_n$ in
 /// [`zinc_uair::UairSignature::primes`] order.
@@ -743,15 +760,15 @@ where
 ///
 /// Primality is the UAIR author's responsibility (the UAIR is part of the
 /// pre-agreed relation index); no runtime check needed here.
-fn build_all_cfgs<F>(sig: &UairSignature<F::Integer>, qx_cfg: F::Config) -> Vec<F::Config>
+fn build_all_cfgs<C>(sig: &UairSignature<C::Integer>, qx_cfg: C) -> Vec<C>
 where
-    F: PrimeField,
+    C: BaseFieldConfig,
 {
     iter::once(qx_cfg)
         .chain(
             sig.primes()
                 .iter()
-                .map(|q| F::make_cfg(q).expect("declared prime is assumed prime")),
+                .map(|q| C::new(q).expect("declared prime is assumed prime")),
         )
         .collect()
 }
@@ -765,15 +782,21 @@ where
 #[allow(
     clippy::arithmetic_side_effects,
     clippy::result_large_err,
-    clippy::type_complexity
+    clippy::type_complexity,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_copy,
+    clippy::redundant_clone
 )]
 mod tests {
     use super::*;
     use crate::fold::FoldBinaryTrace4x;
-    use crypto_bigint::U64;
     use crypto_primitives::{
-        Field, HasPrimeFieldConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
-        crypto_bigint_uint::Uint,
+        FieldConfig, RingConfig, SemiringConfig,
+        crypto_bigint_int::Int,
+        crypto_bigint_monty::{MontyField, MontyFieldElement},
+        crypto_bigint_uint::{U64, Uint},
     };
     use rand::rng;
     use zinc_piop::{
@@ -818,6 +841,7 @@ mod tests {
     const REP_FACTOR: usize = 8;
 
     type F = MontyField<FIELD_LIMBS>;
+    type E = MontyFieldElement<FIELD_LIMBS>;
     type ZtFmod = Uint<FIELD_LIMBS>;
 
     #[derive(Debug, Clone)]
@@ -833,8 +857,14 @@ mod tests {
         type CombR = Int<M>;
         type Comb = DensePolynomial<Self::CombR, QUARTER_D>;
         type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, QUARTER_D>;
-        type CombDotChal =
-            DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, QUARTER_D>;
+        type CombDotChal = DensePolyInnerProduct<
+            (),
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            QUARTER_D,
+        >;
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
@@ -850,9 +880,10 @@ mod tests {
         type Pt = i128;
         type CombR = Int<M>;
         type Comb = DensePolynomial<Self::CombR, D>;
-        type EvalDotChal = DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, D>;
+        type EvalDotChal =
+            DensePolyInnerProduct<(), i64, Self::Chal, Self::CombR, MBSInnerProduct, D>;
         type CombDotChal =
-            DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D>;
+            DensePolyInnerProduct<(), Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D>;
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
@@ -870,9 +901,10 @@ mod tests {
         type Pt = i128;
         type CombR = Int<M>;
         type Comb = DensePolynomial<Self::CombR, D>;
-        type EvalDotChal = DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, D>;
+        type EvalDotChal =
+            DensePolyInnerProduct<(), i64, Self::Chal, Self::CombR, MBSInnerProduct, D>;
         type CombDotChal =
-            DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D>;
+            DensePolyInnerProduct<(), Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D>;
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
@@ -979,7 +1011,7 @@ mod tests {
 
     macro_rules! default_project_ideal {
         () => {
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg))
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i))
         };
     }
 
@@ -988,7 +1020,7 @@ mod tests {
     /// must pass a concrete projection closure.
     macro_rules! default_project_fq_ideal {
         () => {
-            |_ideal, _cfg| -> IdealOrZero<DegreeOneIdeal<F>> {
+            |_ideal, _cfg| -> IdealOrZero<DegreeOneIdeal<E>> {
                 unreachable!("this UAIR has no F_q[X] constraints")
             }
         };
@@ -997,32 +1029,17 @@ mod tests {
     fn do_test<Zt, U>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
-        project_ideal: impl Fn(
-            &IdealOrZero<U::Ideal>,
-            &<F as HasPrimeFieldConfig>::Config,
-        ) -> IdealOrZero<DegreeOneIdeal<F>>
-        + Copy,
-        project_fq_ideal: impl Fn(
-            &IdealOrZero<U::FqIdeal>,
-            &<F as HasPrimeFieldConfig>::Config,
-        ) -> IdealOrZero<DegreeOneIdeal<F>>
-        + Copy,
-        tamper: impl Fn(&mut Proof<F>),
-        check_verification: impl Fn(Result<(), ProtocolError<F>>),
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F) -> IdealOrZero<DegreeOneIdeal<E>> + Copy,
+        project_fq_ideal: impl Fn(&IdealOrZero<U::FqIdeal>, &F) -> IdealOrZero<DegreeOneIdeal<E>> + Copy,
+        tamper: impl Fn(&mut Proof<E>),
+        check_verification: impl Fn(Result<(), ProtocolError<E>>),
     ) where
-        Zt: ZincTypes<D, QUARTER_D>,
-        <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+        Zt: ZincTypes<D, QUARTER_D, Fmod = ZtFmod, Int = ZtInt, Chal = i128, CombR = Int<M>>,
+        Zt::Int: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-        <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
-        <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
         U: Uair<Scalar = DensePolynomial<Zt::Int, D>, Prime = Zt::Fmod>
             + GenerateRandomTrace<D, PolyCoeff = Zt::Int, Int = Zt::Int>
             + 'static,
-        F: Field<Integer = Zt::Fmod>
-            + for<'a> FromWithConfig<&'a Zt::Int>
-            + for<'a> FromWithConfig<&'a Zt::CombR>
-            + for<'a> FromWithConfig<&'a Zt::Chal>
-            + for<'a> FromWithConfig<&'a Zt::Pt>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);
@@ -1114,7 +1131,7 @@ mod tests {
                 RaaCode::new(num_vars),
                 RaaCode::new(num_vars),
             ),
-            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<E>>::zero(),
             default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -1135,7 +1152,7 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
             ),
-            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<E>>::zero(),
             default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
@@ -1180,10 +1197,10 @@ mod tests {
                 make_iprs(num_vars),
             ),
             // No Q[X] constraints -> Q[X] ideal projection is never invoked.
-            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<E>>::zero(),
             // F_q[X] ideal projection: `DegreeOneIdeal<R>` -> `DegreeOneIdeal<F>`
             // by lifting the generating root through the per-prime field cfg.
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
             |_| {},
             |res| res.unwrap(),
         );
@@ -1202,7 +1219,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
             |_| {},
             |res| res.unwrap(),
         );
@@ -1335,8 +1352,8 @@ mod tests {
                 make_iprs(num_vars),
             ),
             // No Q[X] constraints (mirrors test_e2e_fq_large_prime).
-            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<E>>::zero(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
             |proof| {
                 // Family 1 = declared prime q_1. The UAIR has a single
                 // (arbitrary-poly) witness column, so the inner Vec has
@@ -1377,17 +1394,19 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
             |proof| {
                 // Family 1 = declared prime q_1. Source column 0 is `w`, the
                 // source of the UAIR's single bit-op virtual `ShR(w, 3)`.
-                let cfg = *proof.cpr_proofs_fq[0].up_evals[0].cfg();
-                let one = F::one_with_cfg(&cfg);
+                // The family's declared prime is statically known.
+                let sig = TestUairBitOpsFqFamily::<ZtInt, ZtFmod>::signature();
+                let cfg = F::new(&sig.primes()[0]).expect("declared prime");
+                let one = cfg.one();
                 let lifted = &mut proof.witness_lifted_evals[1][0];
                 if lifted.coeffs.is_empty() {
                     lifted.coeffs.push(one);
                 } else {
-                    lifted.coeffs[0] += one;
+                    cfg.add_assign(&mut lifted.coeffs[0], &one);
                 }
             },
             |res| {
@@ -1416,11 +1435,13 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
             |proof| {
+                // The family's declared prime is statically known.
+                let sig = TestUairBitOpsFqFamily::<ZtInt, ZtFmod>::signature();
+                let cfg = F::new(&sig.primes()[0]).expect("declared prime");
                 let bit_op_eval = &mut proof.cpr_proofs_fq[0].bit_op_evals[0];
-                let cfg = *bit_op_eval.cfg();
-                *bit_op_eval += F::one_with_cfg(&cfg);
+                cfg.add_assign(bit_op_eval, &cfg.one());
             },
             |res| {
                 assert!(
@@ -1444,8 +1465,8 @@ mod tests {
                 make_iprs(num_vars),
                 make_iprs(num_vars),
             ),
-            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
-            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<E>>::zero(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
             // Drop family 1's only witness column, making its inner vec shorter
             // than the witness-column count.
             |proof| proof.witness_lifted_evals[1].clear(),
@@ -1597,12 +1618,10 @@ mod tests {
                     .booleanity_proof
                     .as_mut()
                     .expect("BigLinearUair has binary-poly witnesses");
-                let two = {
-                    let cfg = bp.bit_slice_evals[0].cfg();
-                    let one = F::one_with_cfg(cfg);
-                    one.clone() + one
-                };
-                bp.bit_slice_evals[0] += two;
+                // The Q-family cfg (random q_0) is not carried by raw
+                // elements; swapping two (distinct w.o.p.) evals is an
+                // equally non-trivial perturbation of the residue.
+                bp.bit_slice_evals.swap(0, 1);
             },
             |res| {
                 assert!(matches!(
@@ -1690,13 +1709,12 @@ mod tests {
     #[test]
     #[allow(clippy::arithmetic_side_effects)]
     fn test_big_linear_alpha_prime_bridge_catches_pin_down_preserving_tamper() {
-        use num_traits::Inv;
         use zinc_piop::{
             combined_poly_resolver::CombinedPolyResolver, lookup::booleanity::BooleanityChecker,
         };
 
         type Piop = ZincPlusPiop<TestZincTypesIprs, BigLinearUair<ZtInt, ZtFmod>, F, D, QUARTER_D>;
-        type Ideal = IdealOrZero<DegreeOneIdeal<F>>;
+        type Ideal = IdealOrZero<DegreeOneIdeal<E>>;
 
         let num_constraints = count_constraints::<BigLinearUair<ZtInt, ZtFmod>>();
 
@@ -1729,7 +1747,7 @@ mod tests {
             .and_then(|s| s.step3_eval_projection(project_scalar_fn))
             .expect("steps 0..=3");
 
-            let cfg = *v3.field_cfg();
+            let cfg = v3.field_cfg().clone();
             let a = v3.projecting_element_f().clone();
             let nv = v3.num_vars();
             let claimed_sums = v3.proof_combined_sumcheck().claimed_sums().to_vec();
@@ -1741,7 +1759,7 @@ mod tests {
                 sig.total_cols().num_binary_poly_cols() - sig.public_cols().num_binary_poly_cols();
             let transcript = v3.fs_transcript_mut();
 
-            let folding_challenge: F = transcript.get_field_challenge(&cfg);
+            let folding_challenge: E = transcript.get_field_challenge(&cfg);
             CombinedPolyResolver::<F>::prepare_verifier::<BigLinearUair<ZtInt, ZtFmod>>(
                 &proof_cpr,
                 claimed_sums[0].clone(),
@@ -1768,37 +1786,43 @@ mod tests {
         };
 
         // Build (\delta_0, \delta_1) from the closed form (see doc-comment).
-        let one = F::one_with_cfg(&cfg);
-        let zero = F::zero_with_cfg(&cfg);
-        let two = one.clone() + &one;
+        let one = cfg.one();
+        let two = cfg.add(&one, &one);
 
-        let a_inv: F = Inv::inv(a.clone()).expect("a != 0");
-        let alpha_over_a: F = alpha.clone() * &a_inv;
-        let alpha_over_a_sq: F = alpha_over_a.clone() * &a_inv;
+        let a_inv: E = cfg.inv(&a).expect("a != 0");
+        let alpha_over_a: E = cfg.mul(&alpha, &a_inv);
+        let alpha_over_a_sq: E = cfg.mul(&alpha_over_a, &a_inv);
 
         let bp = proof
             .booleanity_proof
             .as_mut()
             .expect("BigLinearUair has binary-poly witnesses");
-        let s0: F = two.clone() * &bp.bit_slice_evals[0] - &one; // 2 b_0 - 1
-        let s1: F = two * &bp.bit_slice_evals[1] - &one; // 2 b_1 - 1
+        let s0: E = cfg.sub(&cfg.mul(&two, &bp.bit_slice_evals[0]), &one); // 2 b_0 - 1
+        let s1: E = cfg.sub(&cfg.mul(&two, &bp.bit_slice_evals[1]), &one); // 2 b_1 - 1
 
-        let denom_inv: F = Inv::inv(one + &alpha_over_a_sq).expect("1 + α/a² != 0");
-        let delta_0: F = zero.clone() - (s0.clone() - alpha_over_a * &s1) * &denom_inv;
-        let delta_1: F = zero - a_inv * &delta_0;
+        let denom_inv: E = cfg
+            .inv(&cfg.add(&one, &alpha_over_a_sq))
+            .expect("1 + α/a² != 0");
+        let delta_0: E = cfg.neg(&cfg.mul(&cfg.sub(&s0, &cfg.mul(&alpha_over_a, &s1)), &denom_inv));
+        let delta_1: E = cfg.neg(&cfg.mul(&a_inv, &delta_0));
 
         // Sanity: tamper is non-trivial and preserves both OLD checks.
-        assert!(!F::is_zero(&delta_0), "tamper must be non-zero");
+        assert!(!cfg.is_zero(&delta_0), "tamper must be non-zero");
         assert!(
-            F::is_zero(&(delta_0.clone() + a * &delta_1)),
+            cfg.is_zero(&cfg.add(&delta_0, &cfg.mul(&a, &delta_1))),
             "must preserve OLD ψ_a linear pin-down"
         );
-        let residue = (delta_0.clone() * &s0 + delta_0.clone() * &delta_0)
-            + alpha * &(delta_1.clone() * &s1 + delta_1.clone() * &delta_1);
-        assert!(F::is_zero(&residue), "must preserve booleanity residue");
+        let residue = cfg.add(
+            &cfg.add(&cfg.mul(&delta_0, &s0), &cfg.mul(&delta_0, &delta_0)),
+            &cfg.mul(
+                &alpha,
+                &cfg.add(&cfg.mul(&delta_1, &s1), &cfg.mul(&delta_1, &delta_1)),
+            ),
+        );
+        assert!(cfg.is_zero(&residue), "must preserve booleanity residue");
 
-        bp.bit_slice_evals[0] += delta_0;
-        bp.bit_slice_evals[1] += delta_1;
+        bp.bit_slice_evals[0] = cfg.add(&bp.bit_slice_evals[0], &delta_0);
+        bp.bit_slice_evals[1] = cfg.add(&bp.bit_slice_evals[1], &delta_1);
 
         let err = Piop::verify::<_, CHECKED>(
             &pp,

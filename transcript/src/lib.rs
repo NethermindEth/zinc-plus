@@ -1,9 +1,8 @@
 pub mod traits;
 
 use crate::traits::{ConstTranscribable, GenTranscribable, Transcript};
-use crypto_primitives::{ConstIntSemiring, PrimeField};
+use crypto_primitives::{BaseFieldConfig, ConstIntSemiring};
 use zinc_primality::PrimalityTest;
-use zinc_utils::add;
 
 /// A cryptographic transcript implementation using the BLAKE3 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof
@@ -76,52 +75,23 @@ impl Transcript for Blake3Transcript {
     }
 }
 
-pub fn read_field_cfg<F>(bytes: &[u8]) -> F::Config
+pub fn read_field_cfg<C>(bytes: &[u8]) -> C
 where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
+    C: BaseFieldConfig,
+    C::Integer: ConstTranscribable,
 {
-    let mod_size = F::Integer::NUM_BYTES;
-    let modulus = F::Integer::read_transcription_bytes_exact(&bytes[..mod_size]);
-    F::make_cfg(&modulus).expect("valid field modulus in proof transcription")
+    let mod_size = C::Integer::NUM_BYTES;
+    let modulus = C::Integer::read_transcription_bytes_exact(&bytes[..mod_size]);
+    C::new(&modulus).expect("valid field modulus in proof transcription")
 }
 
-pub fn read_field_vec_with_cfg<F>(bytes: &[u8], field_cfg: &F::Config) -> Vec<F>
+pub fn append_field_cfg<'a, C>(buf: &'a mut [u8], modulus: &C::Integer) -> &'a mut [u8]
 where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
+    C: BaseFieldConfig,
+    C::Integer: ConstTranscribable,
 {
-    let int_size = F::Integer::NUM_BYTES;
-    bytes
-        .chunks_exact(int_size)
-        .map(F::Integer::read_transcription_bytes_exact)
-        .map(|int| F::from_with_cfg(int, field_cfg))
-        .collect()
-}
-
-pub fn append_field_cfg<'a, F>(buf: &'a mut [u8], modulus: &F::Integer) -> &'a mut [u8]
-where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
-{
-    let mod_size = F::Integer::NUM_BYTES;
+    let mod_size = C::Integer::NUM_BYTES;
     let (buf, rest) = buf.split_at_mut(mod_size);
     modulus.write_transcription_bytes_exact(buf);
     rest
-}
-
-pub fn append_field_vec_lifted<'a, F>(buf: &'a mut [u8], slice: &[F]) -> &'a mut [u8]
-where
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
-{
-    let int_size = F::Integer::NUM_BYTES;
-    let mut offset = 0;
-    for elem in slice {
-        let offset_end = add!(offset, int_size);
-        elem.lift_to_integer()
-            .write_transcription_bytes_exact(&mut buf[offset..offset_end]);
-        offset = offset_end;
-    }
-    &mut buf[offset..]
 }

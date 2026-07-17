@@ -1,7 +1,9 @@
 mod pntt;
 
 use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
+use crypto_primitives::{
+    BaseFieldConfig, ProjectElementWithConfig, ProjectPrimitiveIntegersWithConfig,
+};
 use num_traits::{CheckedAdd, CheckedMul};
 use pntt::radix8::params::Config as PnttConfig;
 pub use pntt::radix8::params::{PnttConfigF65537, PnttInt, Radix8PnttParams};
@@ -11,7 +13,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign},
 };
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{add, from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
@@ -53,12 +55,12 @@ where
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        In: for<'a> MulByScalar<&'a PnttInt, Out> + Clone + Send + Sync,
+        In: Clone + Send + Sync,
+        (): MulByScalar<In, PnttInt, Out> + MulByScalar<Out, PnttInt>,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
             + for<'a> Add<&'a Out, Output = Out>
             + CheckedMul
-            + for<'a> MulByScalar<&'a PnttInt>
             + Sum
             + FromRef<In>
             + Clone
@@ -76,21 +78,38 @@ where
 
         macro_rules! mul_fn {
             () => {
-                |v, tw| {
-                    v.mul_by_scalar::<CHECK>(tw)
+                |v: &_, tw: &PnttInt| {
+                    ().mul_by_scalar::<CHECK>(v.clone(), tw)
                         .expect("Multiplication by twiddle should not overflow")
                 }
             };
         }
 
-        pntt::radix8::pntt::<_, _, _, CHECK>(row, &self.pntt_params, mul_fn!(), mul_fn!())
+        #[allow(clippy::arithmetic_side_effects)] // intended
+        let add_fn = |mut a: Out, b: &Out| {
+            if CHECK {
+                add!(a, b)
+            } else {
+                a += b;
+                a
+            }
+        };
+
+        pntt::radix8::pntt(
+            row,
+            &self.pntt_params,
+            Out::from_ref,
+            mul_fn!(),
+            mul_fn!(),
+            add_fn,
+        )
     }
 
     // Do the encoding but make use of the fact
     // that we are dealing with a field.
-    fn encode_inner_f<F>(&self, row: &[F]) -> Vec<F>
+    fn encode_inner_f<C>(&self, cfg: &C, row: &[C::Element]) -> Vec<C::Element>
     where
-        F: PrimeField + FromWithConfig<PnttInt> + FromRef<F>,
+        C: BaseFieldConfig + ProjectElementWithConfig<PnttInt>,
     {
         assert_eq!(
             row.len(),
@@ -100,9 +119,20 @@ where
             self.pntt_params.row_len,
         );
 
-        let mul_fn = |f: &F, tw: &PnttInt| f.clone() * F::from_with_cfg(*tw, f.cfg());
+        let mul_fn = |f: &C::Element, tw: &PnttInt| cfg.mul(f, &cfg.project(tw));
+        let add_fn = |mut a: C::Element, b: &C::Element| {
+            cfg.add_assign(&mut a, b);
+            a
+        };
 
-        pntt::radix8::pntt::<_, _, _, CHECK>(row, &self.pntt_params, mul_fn, mul_fn)
+        pntt::radix8::pntt(
+            row,
+            &self.pntt_params,
+            |v| v.clone(),
+            mul_fn,
+            mul_fn,
+            add_fn,
+        )
     }
 }
 
@@ -111,9 +141,10 @@ impl<Zt: ZipTypes, Config, const REP: usize, const CHECK: bool> LinearCode<Zt>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
-    Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
-    Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
-    Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
+    (): MulByScalar<Zt::Eval, PnttInt, Zt::Cw>
+        + MulByScalar<Zt::Cw, PnttInt>
+        + MulByScalar<Zt::CombR, PnttInt>,
+    Zt::Cw: CheckedAdd,
 {
     const REPETITION_FACTOR: usize = REP;
 
@@ -149,11 +180,11 @@ where
         self.encode_inner(row)
     }
 
-    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
+    fn encode_f<C>(&self, cfg: &C, row: &[C::Element]) -> Vec<C::Element>
     where
-        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>,
+        C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
     {
-        self.encode_inner_f(row)
+        self.encode_inner_f(cfg, row)
     }
 }
 
@@ -192,7 +223,7 @@ mod tests {
     use crate::pcs::{structs::ZipPlus, test_utils::*};
     use crypto_bigint::U64;
     use crypto_primitives::{
-        FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+        Semiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
     };
     use rand::{
         distr::{Distribution, StandardUniform},
@@ -237,9 +268,10 @@ mod tests {
     fn do_encode<Zt, const REP: usize>(num_vars: usize)
     where
         Zt: ZipTypes,
-        Zt::Eval: for<'a> MulByScalar<&'a PnttInt, Zt::Cw>,
-        Zt::CombR: for<'a> MulByScalar<&'a PnttInt>,
-        Zt::Cw: CheckedAdd + for<'a> MulByScalar<&'a PnttInt>,
+        (): MulByScalar<Zt::Eval, PnttInt, Zt::Cw>
+            + MulByScalar<Zt::Cw, PnttInt>
+            + MulByScalar<Zt::CombR, PnttInt>,
+        Zt::Cw: CheckedAdd,
         StandardUniform: Distribution<Zt::Eval>,
     {
         let mut rng = ThreadRng::default();
@@ -291,7 +323,7 @@ mod tests {
                 + Default
                 + FromRef<Boolean>
                 + Named
-                + FixedSemiring
+                + Semiring
                 + Send
                 + Sync,
             Int<5>: FromRef<CwCoeff>,
@@ -307,6 +339,7 @@ mod tests {
             type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
             type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
             type CombDotChal = DensePolyInnerProduct<
+                (),
                 Self::CombR,
                 Self::Chal,
                 Self::CombR,

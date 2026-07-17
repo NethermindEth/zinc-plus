@@ -1,7 +1,7 @@
 //! Verifier
 
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
+use crypto_primitives::{BaseFieldConfig, ProjectPrimitiveIntegersWithConfig, SetConfig};
+use zinc_poly::univariate::nat_evaluation::NatEvaluatedPoly;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::add;
 
@@ -11,8 +11,8 @@ use super::SumCheckError;
 
 pub const SQUEEZE_NATIVE_ELEMENTS_NUM: usize = 1;
 
-/// Sumcheck Verifier State.
-pub struct VerifierState<F: PrimeField> {
+/// Sumcheck Verifier State, generic over the field config `C`.
+pub struct VerifierState<C: SetConfig> {
     /// The current round number.
     pub round: usize,
     /// The number of variables the sumcheck polynomial
@@ -24,18 +24,18 @@ pub struct VerifierState<F: PrimeField> {
     pub finished: bool,
     /// A list storing the univariate polynomial in evaluation form sent by the
     /// prover at each round so far.
-    pub polynomials_received: Vec<NatEvaluatedPolyWithoutConstant<F>>,
+    pub polynomials_received: Vec<NatEvaluatedPolyWithoutConstant<C::Element>>,
     /// A list storing the randomness sampled by the verifier at each round so
     /// far.
-    pub randomness: Vec<F>,
+    pub randomness: Vec<C::Element>,
     /// The field configuration to which
     /// all the field elements belong to.
-    pub config: F::Config,
+    pub config: C,
 }
 
-impl<F: PrimeField> VerifierState<F> {
+impl<C: SetConfig + Clone> VerifierState<C> {
     /// Initialize the verifier state.
-    pub fn new(nvars: usize, degree: usize, config: &F::Config) -> Self {
+    pub fn new(nvars: usize, degree: usize, config: &C) -> Self {
         Self {
             round: 1,
             nv: nvars,
@@ -58,16 +58,20 @@ pub struct Subclaim<F> {
     pub expected_evaluation: F,
 }
 
-impl<F: PrimeField + FromPrimitiveWithConfig> VerifierState<F> {
+impl<C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig> VerifierState<C> {
     /// Run verifier at current round, given prover message.
     ///
     /// Samples a Fiat-Shamir challenge from the transcript and delegates to
     /// [`Self::verify_round_with_challenge`]. Returns the sampled challenge.
-    pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
+    pub fn verify_round(
+        &mut self,
+        prover_msg: &ProverMsg<C::Element>,
+        transcript: &mut impl Transcript,
+    ) -> C::Element
     where
-        F::Integer: ConstTranscribable,
+        C::Integer: ConstTranscribable,
     {
-        let challenge: F = transcript.get_field_challenge(&self.config);
+        let challenge: C::Element = transcript.get_field_challenge(&self.config);
         self.verify_round_with_challenge(prover_msg, challenge.clone());
         challenge
     }
@@ -76,7 +80,11 @@ impl<F: PrimeField + FromPrimitiveWithConfig> VerifierState<F> {
     /// challenge. Stores the prover's round polynomial and the challenge, then
     /// advances the round counter. Actual consistency checks are deferred
     /// to [`Self::check_and_generate_subclaim`].
-    pub fn verify_round_with_challenge(&mut self, prover_msg: &ProverMsg<F>, challenge: F) {
+    pub fn verify_round_with_challenge(
+        &mut self,
+        prover_msg: &ProverMsg<C::Element>,
+        challenge: C::Element,
+    ) {
         if self.finished {
             panic!("Incorrect verifier state: Verifier is already finished.");
         }
@@ -108,8 +116,8 @@ impl<F: PrimeField + FromPrimitiveWithConfig> VerifierState<F> {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn check_and_generate_subclaim(
         self,
-        asserted_sum: F,
-    ) -> Result<Subclaim<F>, SumCheckError<F>> {
+        asserted_sum: C::Element,
+    ) -> Result<Subclaim<C::Element>, SumCheckError<C::Element>> {
         if !self.finished {
             panic!("Verifier has not finished.");
         }
@@ -134,7 +142,7 @@ impl<F: PrimeField + FromPrimitiveWithConfig> VerifierState<F> {
                 let p1 = evaluations_without_constant
                     .first()
                     .expect("degree > 0 implies the polynomial has an evaluation at 1");
-                expected.clone() - p1.clone()
+                self.config.sub(&expected, p1)
             };
             let mut reconstructed_evaluations =
                 Vec::with_capacity(add!(evaluations_without_constant.len(), 1));
@@ -142,7 +150,7 @@ impl<F: PrimeField + FromPrimitiveWithConfig> VerifierState<F> {
             reconstructed_evaluations.extend_from_slice(evaluations_without_constant);
 
             let reconstructed_poly = NatEvaluatedPoly::new(reconstructed_evaluations);
-            expected = reconstructed_poly.evaluate_at_point(&self.randomness[i])?;
+            expected = reconstructed_poly.evaluate_at_point(&self.config, &self.randomness[i])?;
         }
 
         Ok(Subclaim {

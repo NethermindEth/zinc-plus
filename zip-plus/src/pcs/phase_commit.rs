@@ -160,6 +160,17 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let row_len = pp.linear_code.row_len();
         let codeword_len = pp.linear_code.codeword_len();
 
+        // The fill loop below writes exactly evals.len() / row_len rows; a
+        // mismatch with pp.num_rows would leave uninitialized rows behind.
+        assert_eq!(
+            evals.len(),
+            pp.num_rows * row_len,
+            "evals length {} does not match num_rows ({}) * row_len ({})",
+            evals.len(),
+            pp.num_rows,
+            row_len,
+        );
+
         // Performance: Using DenseRowMatrix's linearized row in an uninit form
         // is much more performant that using Vec<Vec<_>>.
         let mut encoded_matrix = DenseRowMatrix::<Zt::Cw>::uninit(pp.num_rows, codeword_len);
@@ -193,9 +204,12 @@ mod tests {
         },
         pcs_transcript::PcsProverTranscript,
     };
-    use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
-        Matrix, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+        Matrix,
+        boolean::Boolean,
+        crypto_bigint_int::Int,
+        crypto_bigint_monty::MontyField,
+        crypto_bigint_uint::{U64, U256},
     };
     use itertools::Itertools;
     use num_traits::Zero;
@@ -468,7 +482,7 @@ mod tests {
         let results: Vec<Vec<Vec<Int<4>>>> = (0..10)
             .into_par_iter()
             .map(|_| {
-                let row_len = 1 << (num_vars / 2);
+                let row_len = C.row_len();
                 let pp = ZipPlusParams::new(num_vars, poly_size / row_len, C.clone());
 
                 let rows = TestZip::encode_rows(&pp, &poly.evaluations);
@@ -530,11 +544,11 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // long running
     fn encode_rows_succeeds_for_single_row() {
-        let num_vars = 10;
+        // Exactly one code row: poly_size == row_len.
+        let num_vars = C.row_len().ilog2() as usize;
         let poly_size = 1 << num_vars;
         let pp = ZipPlusParams::new(num_vars, 1, C.clone());
 
-        // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![Int::from(5); poly_size];
         let poly =
             DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, Zero::zero());
@@ -546,14 +560,14 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // long running
     fn encode_rows_succeeds_for_single_poly_row() {
-        let num_vars = 10;
+        // Exactly one code row: poly_size == row_len.
+        let num_vars = POLY_C.row_len().ilog2() as usize;
         let pp = ZipPlusParams::new(num_vars, 1, POLY_C.clone());
 
-        // Create a polynomial with 2 variables and 4 evaluations
         let evaluations = vec![
-            BinaryPoly::new(vec![Boolean::FALSE, Boolean::FALSE]),
-            BinaryPoly::new(vec![Boolean::FALSE, Boolean::TRUE]),
-            BinaryPoly::new(vec![Boolean::TRUE, Boolean::FALSE]),
+            BinaryPoly::new_padded([Boolean::FALSE, Boolean::FALSE]),
+            BinaryPoly::new_padded([Boolean::FALSE, Boolean::TRUE]),
+            BinaryPoly::new_padded([Boolean::TRUE, Boolean::FALSE]),
         ];
         let poly =
             DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, Zero::zero());
@@ -674,7 +688,10 @@ mod tests {
                 let coeffs: Vec<Boolean> = (0..poly_size * d)
                     .map(|i| ((i + b * 7) % 3 != 0).into())
                     .collect();
-                let evals = coeffs.chunks_exact(d).map(BinaryPoly::new).collect_vec();
+                let evals = coeffs
+                    .chunks_exact(d)
+                    .map(BinaryPoly::new_padded)
+                    .collect_vec();
                 DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, Zero::zero())
             })
             .collect()
@@ -750,6 +767,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // long running
     fn proof_size_is_correct_for_parameters() {
+        use crypto_bigint::Word;
         use std::mem::size_of;
 
         fn calculate_expected_proof_size_bytes(
@@ -760,8 +778,8 @@ mod tests {
             let size_of_zt_k = K * size_of::<Word>();
             // size of CombR in combine row
             let size_of_zt_m = M * size_of::<Word>();
-            // size_f = field_value || field_modulus
-            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
+            // Field elements are transcribed raw (no per-element modulus)
+            let size_of_f = U256::LIMBS * size_of::<Word>();
             let size_of_usize_field = size_of::<u64>();
             let size_of_path_elem = size_of::<MtHash>();
 
@@ -795,7 +813,7 @@ mod tests {
         let mle =
             DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations, Zero::zero());
         let point: Vec<_> = (0..num_vars)
-            .map(|_| <Zt as ZipTypes>::Pt::random_from_rng(&mut rng))
+            .map(|_| rng.random::<<Zt as ZipTypes>::Pt>())
             .collect();
 
         let (hint, comm) = TestZip::commit_single(&param, &mle).unwrap();

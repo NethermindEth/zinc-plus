@@ -1,29 +1,21 @@
-use std::convert::identity;
+use crypto_primitives::{
+    FieldConfig, ProjectPrimitiveIntegersWithConfig, Semiring, SetConfig, SetElement,
+};
 
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Semiring};
-
-use crate::{EvaluatablePolynomial, EvaluationError, Polynomial};
+use crate::EvaluationError;
 
 /// Polynomial evaluated on 0, 1, 2, ....
 #[derive(Clone, Debug, PartialEq)]
-pub struct NatEvaluatedPoly<F> {
+pub struct NatEvaluatedPoly<E: SetElement> {
     /// Evaluations on P(0), P(1), P(2), ...
-    pub evaluations: Vec<F>,
+    pub evaluations: Vec<E>,
 }
 
-impl<F> NatEvaluatedPoly<F> {
+impl<E: SetElement> NatEvaluatedPoly<E> {
     #[inline(always)]
-    pub const fn new(evaluations: Vec<F>) -> Self {
+    pub const fn new(evaluations: Vec<E>) -> Self {
         Self { evaluations }
     }
-}
-
-impl<F: Clone> Polynomial<F> for NatEvaluatedPoly<F> {
-    const DEGREE_BOUND: usize = usize::MAX;
-}
-
-impl<F: PrimeField + FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for NatEvaluatedPoly<F> {
-    type EvaluationPoint = F;
 
     /// Interpolate the *unique* univariate polynomial of degree *at most*
     /// `evaluations.len()-1` passing through the y-values in `evaluations` at x
@@ -34,17 +26,17 @@ impl<F: PrimeField + FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for Na
     // All the arithmetic ops in the function
     // are made sure to not overflow.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
-    fn evaluate_at_point(&self, point: &Self::EvaluationPoint) -> Result<F, EvaluationError> {
+    pub fn evaluate_at_point<C>(&self, cfg: &C, point: &E) -> Result<E, EvaluationError>
+    where
+        C: FieldConfig + ProjectPrimitiveIntegersWithConfig + SetConfig<Element = E>,
+    {
         let evaluations = &self.evaluations;
         // TODO(Alex): Once we have benches, it's worth checking
         //             if we're even winning anything
         //             with specialized branches above.
 
-        // We will need these a few times
-        let point = point.clone();
-        let config = point.cfg();
-        let zero = F::zero_with_cfg(config);
-        let one = F::one_with_cfg(config);
+        let zero = cfg.zero();
+        let one = cfg.one();
 
         let len = evaluations.len();
 
@@ -57,19 +49,21 @@ impl<F: PrimeField + FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for Na
         // we return early if 0 <= x < len, i.e. if the desired value has been passed
         let mut j = zero.clone();
         for i in 1..len {
-            if point == j {
+            if *point == j {
                 return Ok(evaluations[i - 1].clone());
             }
-            j += &one;
+            cfg.add_assign(&mut j, &one);
 
-            let tmp = point.clone() - j.clone();
+            let tmp = cfg.sub(point, &j);
             evals.push(tmp.clone());
-            prod *= tmp;
+            cfg.mul_assign(&mut prod, &tmp);
         }
 
-        if point == j {
+        if *point == j {
             return Ok(evaluations[len - 1].clone());
         }
+
+        let div = |num: &E, denom: &E| cfg.div(num, denom);
 
         let mut res = zero;
         // we want to compute \prod (j!=i) (i-j) for a given i
@@ -96,22 +90,23 @@ impl<F: PrimeField + FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for Na
         // so we will be able to compute the ratio
         //  - for len <= 20 with i64
         //  - for len <= 33 with i128
-        //  - for len >  33 with BigInt
+        //  - for len >  33 with field elements
         if evaluations.len() <= 20 {
-            let last_denom: F = F::from_with_cfg(factorial(len - 1, identity), config);
+            let last_denom: E = cfg.project(&factorial(len - 1, u64::from));
 
             let mut ratio_numerator = 1i64;
             let mut ratio_denominator = 1u64;
 
             for i in (0..len).rev() {
-                let ratio_numerator_f = F::from_with_cfg(ratio_numerator, config);
+                let ratio_numerator_f = cfg.project(&ratio_numerator);
+                let ratio_denominator_f = cfg.project(&ratio_denominator);
 
-                let ratio_denominator_f = F::from_with_cfg(ratio_denominator, config);
+                let num = cfg.mul(&prod, &ratio_denominator_f);
+                let denom = cfg.mul(&cfg.mul(&last_denom, &ratio_numerator_f), &evals[i]);
+                let x = div(&num, &denom);
 
-                let x = prod.clone() * ratio_denominator_f
-                    / (last_denom.clone() * ratio_numerator_f * &evals[i]);
-
-                res += &(evaluations[i].clone() * x);
+                let term = cfg.mul(&evaluations[i], &x);
+                cfg.add_assign(&mut res, &term);
 
                 // compute ratio for the next step which is current_ratio * -(len-i)/i
                 if i != 0 {
@@ -121,18 +116,20 @@ impl<F: PrimeField + FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for Na
                 }
             }
         } else if evaluations.len() <= 33 {
-            let last_denom = F::from_with_cfg(factorial(len - 1, u128::from), config);
+            let last_denom: E = cfg.project(&factorial(len - 1, u128::from));
             let mut ratio_numerator = 1i128;
             let mut ratio_denominator = 1u128;
 
             for i in (0..len).rev() {
-                let ratio_numerator_f = F::from_with_cfg(ratio_numerator, config);
+                let ratio_numerator_f = cfg.project(&ratio_numerator);
+                let ratio_denominator_f = cfg.project(&ratio_denominator);
 
-                let ratio_denominator_f = F::from_with_cfg(ratio_denominator, config);
+                let num = cfg.mul(&prod, &ratio_denominator_f);
+                let denom = cfg.mul(&cfg.mul(&last_denom, &ratio_numerator_f), &evals[i]);
+                let x = div(&num, &denom);
 
-                let x: F = prod.clone() * ratio_denominator_f
-                    / (last_denom.clone() * ratio_numerator_f * &evals[i]);
-                res += &(evaluations[i].clone() * x);
+                let term = cfg.mul(&evaluations[i], &x);
+                cfg.add_assign(&mut res, &term);
 
                 // compute ratio for the next step which is current_ratio * -(len-i)/i
                 if i != 0 {
@@ -143,20 +140,24 @@ impl<F: PrimeField + FromPrimitiveWithConfig> EvaluatablePolynomial<F, F> for Na
         } else {
             // since we are using field operations, we can merge
             // `last_denom` and `ratio_numerator` into a single field element.
-            let mut denom_up = factorial(len - 1, |u| F::from_with_cfg(u, config));
+            let mut denom_up = cfg.product((1..=(len as u64 - 1)).map(|u: u64| cfg.project(&u)));
             let mut denom_down = one;
 
             for i in (0..len).rev() {
-                let x = prod.clone() * &denom_down / (denom_up.clone() * &evals[i]);
-                res += &(evaluations[i].clone() * x);
+                let num = cfg.mul(&prod, &denom_down);
+                let denom = cfg.mul(&denom_up, &evals[i]);
+                let x = div(&num, &denom);
+
+                let term = cfg.mul(&evaluations[i], &x);
+                cfg.add_assign(&mut res, &term);
 
                 // compute denom for the next step is -current_denom * (len-i)/i
                 if i != 0 {
-                    let denom_up_factor = F::from_with_cfg((len - i) as u64, config);
-                    denom_up *= -denom_up_factor;
+                    let denom_up_factor = cfg.project(&((len - i) as u64));
+                    denom_up = cfg.neg(&cfg.mul(&denom_up, &denom_up_factor));
 
-                    let denom_down_factor = F::from_with_cfg(i as u64, config);
-                    denom_down *= denom_down_factor;
+                    let denom_down_factor = cfg.project(&(i as u64));
+                    cfg.mul_assign(&mut denom_down, &denom_down_factor);
                 }
             }
         }
@@ -183,35 +184,30 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{Odd, modular::FixedMontyParams};
-    use crypto_primitives::{FromWithConfig, crypto_bigint_monty::F256};
+    use super::*;
+    use crypto_primitives::{
+        BaseFieldConfig, ProjectElementWithConfig, crypto_bigint_monty::MontyField,
+        crypto_bigint_uint::Uint,
+    };
     use itertools::Itertools;
 
-    use crate::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
-
     const LIMBS: usize = 4;
-    type F = F256;
 
-    fn test_config() -> FixedMontyParams<LIMBS> {
-        let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
-            "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
-        );
-        let modulus = Odd::new(modulus).expect("modulus should be odd");
-        FixedMontyParams::new(modulus)
+    fn test_config() -> MontyField<LIMBS> {
+        let modulus =
+            Uint::from_be_hex("0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33");
+        MontyField::new(&modulus).expect("modulus should be a valid odd prime")
     }
 
     #[test]
     fn evaluate_nat_evaluation() {
-        let field_elem = F::from_with_cfg(100, &test_config());
+        let cfg = test_config();
+        let field_elem = cfg.project(&100u64);
 
-        let poly = NatEvaluatedPoly::new(
-            (0..1024)
-                .map(|x| F::from_with_cfg(x, &test_config()))
-                .collect_vec(),
-        );
+        let poly = NatEvaluatedPoly::new((0..1024u64).map(|x| cfg.project(&x)).collect_vec());
 
-        let res = poly.evaluate_at_point(&field_elem).unwrap();
+        let res = poly.evaluate_at_point(&cfg, &field_elem).unwrap();
 
-        assert_eq!(res, F::from_with_cfg(100, &test_config()));
+        assert_eq!(res, cfg.project(&100u64));
     }
 }

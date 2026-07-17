@@ -1,3 +1,4 @@
+use crypto_primitives::SetConfig;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use thiserror::Error;
@@ -8,10 +9,11 @@ use zinc_utils::cfg_iter;
 /// of elements `values`. Returns an error if the
 /// lengths mismatch or if any of the `values`
 /// does not belong to the corresponding ideal.
-pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone + Send + Sync>(
+pub fn batched_ideal_check<C: SetConfig, I: Ideal + IdealCheck<C>>(
+    cfg: &C,
     ideals: &[I],
-    values: &[R],
-) -> Result<(), BatchedIdealCheckError<R>> {
+    values: &[C::Element],
+) -> Result<(), BatchedIdealCheckError<C::Element>> {
     if ideals.len() != values.len() {
         return Err(BatchedIdealCheckError::LengthMismatch {
             num_ideals: ideals.len(),
@@ -22,7 +24,7 @@ pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone + Send + Sync>(
     cfg_iter!(ideals)
         .zip(cfg_iter!(values))
         .try_for_each(|(ideal, value)| {
-            if !ideal.contains(value)? {
+            if !ideal.contains(cfg, value)? {
                 Err(BatchedIdealCheckError::NotInIdeal(
                     value.clone(),
                     ideal.to_string(),

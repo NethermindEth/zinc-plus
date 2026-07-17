@@ -3,7 +3,7 @@ mod generate_trace;
 
 pub use generate_trace::*;
 
-use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
+use crypto_primitives::{ConstSemiring, FixedConfig, Semiring, SemiringConfig, boolean::Boolean};
 use num_traits::Zero;
 use rand::{
     distr::{Distribution, StandardUniform},
@@ -14,8 +14,9 @@ use zinc_poly::{
     EvaluatablePolynomial,
     mle::{DenseMultilinearExtension, MultilinearExtensionRand},
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial,
-        dynamic::over_fixed_semiring::DynamicPolynomialFS,
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::{DynamicPolynomial, HasDynamicPolynomialConfig},
     },
 };
 use zinc_uair::{
@@ -44,29 +45,31 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         _ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
     {
         let up = up.arbitrary_poly;
         let down = down.arbitrary_poly;
 
-        b.assert_zero(up[0].clone() * &up[1] - &down[0]);
-        b.assert_zero(up[1].clone() * &up[2] - &down[1]);
-        b.assert_zero(up[0].clone() * &up[2] - &down[2]);
+        b.assert_zero(expr_cfg.sub(&expr_cfg.mul(&up[0], &up[1]), &down[0]));
+        b.assert_zero(expr_cfg.sub(&expr_cfg.mul(&up[1], &up[2]), &down[1]));
+        b.assert_zero(expr_cfg.sub(&expr_cfg.mul(&up[0], &up[2]), &down[2]));
     }
 }
 
 impl<R, P> GenerateRandomTrace<32> for TestUairSimpleMultiplication<R, P>
 where
-    R: FixedSemiring + From<i8> + 'static,
+    R: Semiring + From<i8> + 'static,
     P: Semiring + 'static,
     StandardUniform: Distribution<R>,
 {
@@ -77,13 +80,16 @@ where
         num_vars: usize,
         rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
-        let mut a: Vec<DynamicPolynomialFS<R>> =
-            vec![DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())])];
-        let mut b: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
+        let ring_cfg = FixedConfig::<R>::default();
+        let poly_cfg = ring_cfg.dyn_poly_cfg();
+
+        let mut a: Vec<DynamicPolynomial<R>> =
+            vec![DynamicPolynomial::new(vec![R::from(rng.random::<i8>())])];
+        let mut b: Vec<DynamicPolynomial<R>> = vec![DynamicPolynomial::new(vec![
             R::zero(),
             R::from(rng.random::<i8>()),
         ])];
-        let mut c: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
+        let mut c: Vec<DynamicPolynomial<R>> = vec![DynamicPolynomial::new(vec![
             R::zero(),
             R::from(rng.random::<i8>()),
         ])];
@@ -93,40 +99,43 @@ where
             let prev_b = b[i - 1].clone();
             let prev_c = c[i - 1].clone();
 
-            a.push(prev_a.clone() * &prev_b);
-            b.push(prev_b * &prev_c);
-            c.push(prev_a * prev_c);
+            a.push(poly_cfg.mul(&prev_a, &prev_b));
+            b.push(poly_cfg.mul(&prev_b, &prev_c));
+            c.push(poly_cfg.mul(&prev_a, &prev_c));
         }
 
         let arbitrary_poly = vec![
             a.into_iter()
                 .map(|x| {
+                    let deg = poly_cfg.degree(&x);
                     assert!(
-                        x.degree() < Some(32),
+                        deg < Some(32),
                         "degree bound exceeded: {}",
-                        x.degree().expect("if the degree is large it's not None")
+                        deg.expect("if the degree is large it's not None")
                     );
-                    DensePolynomial::new(x.coeffs)
+                    DensePolynomial::new_with_zero(x.coeffs, R::zero())
                 })
                 .collect(),
             b.into_iter()
                 .map(|x| {
+                    let deg = poly_cfg.degree(&x);
                     assert!(
-                        x.degree() < Some(32),
+                        deg < Some(32),
                         "degree bound exceeded: {}",
-                        x.degree().expect("if the degree is large it's not None"),
+                        deg.expect("if the degree is large it's not None"),
                     );
-                    DensePolynomial::new(x.coeffs)
+                    DensePolynomial::new_with_zero(x.coeffs, R::zero())
                 })
                 .collect(),
             c.into_iter()
                 .map(|x| {
+                    let deg = poly_cfg.degree(&x);
                     assert!(
-                        x.degree() < Some(32),
+                        deg < Some(32),
                         "degree bound exceeded: {}",
-                        x.degree().expect("if the degree is large it's not None"),
+                        deg.expect("if the degree is large it's not None"),
                     );
-                    DensePolynomial::new(x.coeffs)
+                    DensePolynomial::new_with_zero(x.coeffs, R::zero())
                 })
                 .collect(),
         ]
@@ -156,22 +165,24 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        _down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        _down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
     {
         let up = up.arbitrary_poly;
 
         b.assert_in_ideal(
-            up[0].clone() + &up[1] - &up[2],
+            expr_cfg.sub(&expr_cfg.add(&up[0], &up[1]), &up[2]),
             &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
         );
     }
@@ -235,36 +246,39 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        _down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        _down: TraceRow<C::Element>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
-        FromR: Fn(&DensePolynomial<R, 32>) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &DensePolynomial<R, 32>) -> Option<B::Expr>,
+        FromR: Fn(&DensePolynomial<R, 32>) -> C::Element,
+        MulByScalar: Fn(&C::Element, &DensePolynomial<R, 32>) -> Option<C::Element>,
     {
         let up = up.arbitrary_poly;
 
+        let scaled = mbs(
+            &up[0],
+            &DensePolynomial::new_with_zero([R::from(-1), R::from(0), R::from(1)], R::zero()),
+        )
+        .expect("arithmetic overflow");
+        let constant = from_ref(&DensePolynomial::new_with_zero(
+            [R::from(1), R::from(2), R::from(3), R::from(4)],
+            R::zero(),
+        ));
+        // (up_0 * const[-1,0,1]) + up_1 - up_2 + const[1,2,3,4]
         b.assert_in_ideal(
-            mbs(
-                &up[0],
-                &DensePolynomial::new([R::from(-1), R::from(0), R::from(1)]),
-            )
-            .expect("arithmetic overflow")
-                + &up[1]
-                - &up[2]
-                + from_ref(&DensePolynomial::new([
-                    R::from(1),
-                    R::from(2),
-                    R::from(3),
-                    R::from(4),
-                ])),
+            expr_cfg.add(
+                &expr_cfg.sub(&expr_cfg.add(&scaled, &up[1]), &up[2]),
+                &constant,
+            ),
             &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
         );
     }
@@ -288,25 +302,27 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        _down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        _down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
-        FromR: Fn(&Self::Scalar) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        FromR: Fn(&Self::Scalar) -> C::Element,
+        MulByScalar: Fn(&C::Element, &Self::Scalar) -> Option<C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
     {
         let int_col = &up.int[0];
         let binary_poly_col = &up.binary_poly[0];
 
         b.assert_in_ideal(
-            binary_poly_col.clone() - int_col,
+            expr_cfg.sub(binary_poly_col, int_col),
             &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
         );
     }
@@ -359,18 +375,20 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
-        FromR: Fn(&Self::Scalar) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        FromR: Fn(&Self::Scalar) -> C::Element,
+        MulByScalar: Fn(&C::Element, &Self::Scalar) -> Option<C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
     {
         let one_ideal = DegreeOneIdeal::new(R::from(1));
@@ -378,18 +396,20 @@ where
 
         let sum_of_binary_polys = up.binary_poly[1..]
             .iter()
-            .fold(up.binary_poly[0].clone(), |acc, next| acc + next);
+            .fold(up.binary_poly[0].clone(), |acc, next| {
+                expr_cfg.add(&acc, next)
+            });
 
         // up.binary_poly[0] + up.binary_poly[1] + ... up.binary_poly[16]
         //      = up.int[0] mod (X - 1)
         b.assert_in_ideal(
-            sum_of_binary_polys - &up.int[0],
+            expr_cfg.sub(&sum_of_binary_polys, &up.int[0]),
             &ideal_from_ref(&one_ideal),
         );
 
         // down.binary_poly[0] = up.int[0] mod (X - 1)
         b.assert_in_ideal(
-            down.binary_poly[0].clone() - &up.int[0],
+            expr_cfg.sub(&down.binary_poly[0], &up.int[0]),
             &ideal_from_ref(&two_ideal),
         );
 
@@ -399,7 +419,7 @@ where
             .iter()
             .zip(&down.binary_poly[1..])
             .for_each(|(up, down)| {
-                b.assert_in_ideal(up.clone() - down, &ideal_from_ref(&one_ideal));
+                b.assert_in_ideal(expr_cfg.sub(up, down), &ideal_from_ref(&one_ideal));
             });
     }
 }
@@ -498,23 +518,26 @@ where
         UairSignature::new(total, public, shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
         fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
-        FromR: Fn(&Self::Scalar) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        FromR: Fn(&Self::Scalar) -> C::Element,
+        MulByScalar: Fn(&C::Element, &Self::Scalar) -> Option<C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
         IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
     {
         BigLinearUair::<R, P>::constrain_general(
             b,
+            expr_cfg,
             up,
             down,
             from_ref,
@@ -577,70 +600,82 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         _from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
-        FromR: Fn(&Self::Scalar) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        FromR: Fn(&Self::Scalar) -> C::Element,
+        MulByScalar: Fn(&C::Element, &Self::Scalar) -> Option<C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
     {
         let one_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
         let two_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::from(2)));
         // The polynomial X = 0 + 1*X, used to express `X * c_k` via `mbs`.
-        let x_scalar = DensePolynomial::<R, 32>::new([R::ZERO, R::from(1)]);
+        let x_scalar = DensePolynomial::<R, 32>::new_with_zero([R::ZERO, R::from(1)], R::zero());
 
         // `down.binary_poly` is indexed by ShiftSpec position, not source col.
         // Our shifts vec is [ShiftSpec::new(0, 1), ShiftSpec::new(4, 1)], so
         // down.binary_poly[0] = bp[0][t+1], down.binary_poly[1] = bp[4][t+1].
 
         // (C1) dbp[0] - bp[1] - bp[2] - bp[3] - int[0] - int[1] - int[2] ∈ (X-2)
-        b.assert_in_ideal(
-            down.binary_poly[0].clone()
-                - &up.binary_poly[1]
-                - &up.binary_poly[2]
-                - &up.binary_poly[3]
-                - &up.int[0]
-                - &up.int[1]
-                - &up.int[2],
-            &two_ideal,
-        );
+        let c1 = [
+            &up.binary_poly[1],
+            &up.binary_poly[2],
+            &up.binary_poly[3],
+            &up.int[0],
+            &up.int[1],
+            &up.int[2],
+        ]
+        .into_iter()
+        .fold(down.binary_poly[0].clone(), |acc, term| {
+            expr_cfg.sub(&acc, term)
+        });
+        b.assert_in_ideal(c1, &two_ideal);
 
         // (C2) dbp[4] - bp[5] - bp[6] - bp[7] - int[1] - int[2] - int[3] ∈ (X-2)
-        b.assert_in_ideal(
-            down.binary_poly[1].clone()
-                - &up.binary_poly[5]
-                - &up.binary_poly[6]
-                - &up.binary_poly[7]
-                - &up.int[1]
-                - &up.int[2]
-                - &up.int[3],
-            &two_ideal,
-        );
+        let c2 = [
+            &up.binary_poly[5],
+            &up.binary_poly[6],
+            &up.binary_poly[7],
+            &up.int[1],
+            &up.int[2],
+            &up.int[3],
+        ]
+        .into_iter()
+        .fold(down.binary_poly[1].clone(), |acc, term| {
+            expr_cfg.sub(&acc, term)
+        });
+        b.assert_in_ideal(c2, &two_ideal);
 
         // (C3) bp[8] - int[0] ∈ (X-2)
-        b.assert_in_ideal(up.binary_poly[8].clone() - &up.int[0], &two_ideal);
+        b.assert_in_ideal(expr_cfg.sub(&up.binary_poly[8], &up.int[0]), &two_ideal);
 
         // (C4) bp[9] - int[1] ∈ (X-2)
-        b.assert_in_ideal(up.binary_poly[9].clone() - &up.int[1], &two_ideal);
+        b.assert_in_ideal(expr_cfg.sub(&up.binary_poly[9], &up.int[1]), &two_ideal);
 
         // (C5) bp[10] - X * bp[11] ∈ (X-1)
         b.assert_in_ideal(
-            up.binary_poly[10].clone()
-                - &mbs(&up.binary_poly[11], &x_scalar).expect("mul-by-X overflow"),
+            expr_cfg.sub(
+                &up.binary_poly[10],
+                &mbs(&up.binary_poly[11], &x_scalar).expect("mul-by-X overflow"),
+            ),
             &one_ideal,
         );
 
         // (C6) bp[12] - X * bp[13] ∈ (X-1)
         b.assert_in_ideal(
-            up.binary_poly[12].clone()
-                - &mbs(&up.binary_poly[13], &x_scalar).expect("mul-by-X overflow"),
+            expr_cfg.sub(
+                &up.binary_poly[12],
+                &mbs(&up.binary_poly[13], &x_scalar).expect("mul-by-X overflow"),
+            ),
             &one_ideal,
         );
     }
@@ -836,28 +871,30 @@ where
     // Constraints:
     //   a[i+1] = a[i] + b[i]  →  down[0] - up[0] - up[1] = 0
     //   c[i]   = b[i+2]       →  up[2] - down[1] = 0
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         builder: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         _ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
     {
         let up = up.arbitrary_poly;
         let down = down.arbitrary_poly;
 
-        builder.assert_zero(down[0].clone() - &up[0] - &up[1]);
-        builder.assert_zero(up[2].clone() - &down[1]);
+        builder.assert_zero(expr_cfg.sub(&expr_cfg.sub(&down[0], &up[0]), &up[1]));
+        builder.assert_zero(expr_cfg.sub(&up[2], &down[1]));
     }
 }
 
 impl<R, P> GenerateRandomTrace<32> for TestUairMixedShifts<R, P>
 where
-    R: FixedSemiring + From<i8> + 'static,
+    R: Semiring + From<i8> + 'static,
     P: Semiring + 'static,
     StandardUniform: Distribution<R>,
 {
@@ -872,32 +909,36 @@ where
         let n = 1 << num_vars;
 
         // Random b column (degree-0 polynomials to stay under degree 32)
-        let b_col: Vec<DynamicPolynomialFS<R>> = (0..n)
-            .map(|_| DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())]))
+        let ring_cfg = FixedConfig::<R>::default();
+        let poly_cfg = ring_cfg.dyn_poly_cfg();
+
+        let b_col: Vec<DynamicPolynomial<R>> = (0..n)
+            .map(|_| DynamicPolynomial::new(vec![R::from(rng.random::<i8>())]))
             .collect();
 
         // a[0] random, a[i+1] = a[i] + b[i]
-        let mut a_col: Vec<DynamicPolynomialFS<R>> =
-            vec![DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())])];
+        let mut a_col: Vec<DynamicPolynomial<R>> =
+            vec![DynamicPolynomial::new(vec![R::from(rng.random::<i8>())])];
         for i in 0..n - 1 {
-            a_col.push(a_col[i].clone() + &b_col[i]);
+            a_col.push(poly_cfg.add(&a_col[i], &b_col[i]));
         }
 
         // c[i] = b[i+2], zero-padded for last 2 entries
-        let mut c_col: Vec<DynamicPolynomialFS<R>> = Vec::with_capacity(n);
+        let mut c_col: Vec<DynamicPolynomial<R>> = Vec::with_capacity(n);
         for i in 0..n {
             if i + 2 < n {
                 c_col.push(b_col[i + 2].clone());
             } else {
-                c_col.push(DynamicPolynomialFS::zero());
+                c_col.push(DynamicPolynomial::ZERO);
             }
         }
 
-        let to_mle = |col: Vec<DynamicPolynomialFS<R>>| -> DenseMultilinearExtension<DensePolynomial<R, 32>> {
-            col.into_iter()
-                .map(|x| DensePolynomial::new(x.coeffs))
-                .collect()
-        };
+        let to_mle =
+            |col: Vec<DynamicPolynomial<R>>| -> DenseMultilinearExtension<DensePolynomial<R, 32>> {
+                col.into_iter()
+                    .map(|x| DensePolynomial::new_with_zero(x.coeffs, R::zero()))
+                    .collect()
+            };
 
         UairTrace {
             arbitrary_poly: vec![to_mle(a_col), to_mle(b_col), to_mle(c_col)].into(),
@@ -937,23 +978,31 @@ where
         sig
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
         _fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
     {
         let one_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
-        b.assert_in_ideal(down.binary_poly[0].clone() - &up.binary_poly[2], &one_ideal);
-        b.assert_in_ideal(down.binary_poly[1].clone() - &up.binary_poly[1], &one_ideal);
         b.assert_in_ideal(
-            down.arbitrary_poly[0].clone() - &up.arbitrary_poly[1],
+            expr_cfg.sub(&down.binary_poly[0], &up.binary_poly[2]),
+            &one_ideal,
+        );
+        b.assert_in_ideal(
+            expr_cfg.sub(&down.binary_poly[1], &up.binary_poly[1]),
+            &one_ideal,
+        );
+        b.assert_in_ideal(
+            expr_cfg.sub(&down.arbitrary_poly[0], &up.arbitrary_poly[1]),
             &one_ideal,
         );
     }
@@ -961,7 +1010,7 @@ where
 
 impl<R, P> GenerateRandomTrace<32> for TestUairBitOpsMixedSplice<R, P>
 where
-    R: ConstSemiring + FixedSemiring + From<i8> + 'static,
+    R: ConstSemiring + From<i8> + 'static,
     P: Semiring + 'static,
     StandardUniform: Distribution<R>,
 {
@@ -990,7 +1039,7 @@ where
             .collect();
 
         let a_cells: Vec<DensePolynomial<R, 32>> = (0..n)
-            .map(|_| DensePolynomial::new([R::from(rng.random::<i8>())]))
+            .map(|_| DensePolynomial::new_with_zero([R::from(rng.random::<i8>())], R::zero()))
             .collect();
         let a_next_cells: Vec<DensePolynomial<R, 32>> = (0..n)
             .map(|i| {
@@ -1040,22 +1089,24 @@ where
             .with_primes(vec![P::from(MERSENNE_61_PRIME)])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
         fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
         IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
     {
         let q_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
         let fq_ideal = fq_ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
-        let bit_op_matches_expected = down.binary_poly[0].clone() - &up.binary_poly[1];
+        let bit_op_matches_expected = expr_cfg.sub(&down.binary_poly[0], &up.binary_poly[1]);
 
         b.assert_in_ideal(bit_op_matches_expected.clone(), &q_ideal);
         b.assert_in_fq_ideal(0, bit_op_matches_expected, &fq_ideal);
@@ -1136,18 +1187,20 @@ where
             .with_primes(vec![P::from(MERSENNE_61_PRIME), P::from(GOLDILOCKS_PRIME)])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        _down: TraceRow<B::Expr>,
+        _expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        _down: TraceRow<C::Element>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         _ideal_from_ref: IFromR,
         fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
-        FromR: Fn(&Self::Scalar) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        FromR: Fn(&Self::Scalar) -> C::Element,
+        MulByScalar: Fn(&C::Element, &Self::Scalar) -> Option<C::Element>,
         IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
     {
         // One constraint per declared prime: `phi_{q_i}(a) \in (X - 0)`.
@@ -1204,6 +1257,7 @@ where
 mod tests {
     use super::*;
     use crypto_primitives::crypto_bigint_int::Int;
+    use num_traits::ConstZero;
     use zinc_uair::{
         collect_scalars::collect_scalars,
         constraint_counter::count_constraints,
@@ -1241,13 +1295,19 @@ mod tests {
         assert_eq!(
             collect_scalars::<TestUairScalarMultiplications<Int<LIMBS>, u64>>(),
             (vec![
-                DensePolynomial::new([Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)]),
-                DensePolynomial::new([
-                    Int::from_i8(1),
-                    Int::from_i8(2),
-                    Int::from_i8(3),
-                    Int::from_i8(4),
-                ])
+                DensePolynomial::new_with_zero(
+                    [Int::from_i8(-1), Int::from_i8(0), Int::from_i8(1)],
+                    Int::ZERO
+                ),
+                DensePolynomial::new_with_zero(
+                    [
+                        Int::from_i8(1),
+                        Int::from_i8(2),
+                        Int::from_i8(3),
+                        Int::from_i8(4),
+                    ],
+                    Int::ZERO
+                )
             ]
             .into_iter()
             .collect())

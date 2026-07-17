@@ -1,12 +1,11 @@
 mod utils;
 
 use crypto_bigint::{U128, const_monty_params};
-use crypto_primitives::{Field, crypto_bigint_const_monty::ConstMontyField};
+use crypto_primitives::{FixedConfig, crypto_bigint_const_monty::ConstMontyField};
 use num_traits::{ConstOne, ConstZero, Zero};
 use rand::prelude::*;
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::{Blake3Transcript, traits::Transcript};
-use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 use crate::sumcheck::{
     prover::ProverState,
@@ -18,14 +17,15 @@ use super::{MLSumcheck, SumcheckProof};
 const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
 
 type F = ConstMontyField<Params, { U128::LIMBS }>;
+type Cfg = FixedConfig<F>;
 
 fn generate_sumcheck_proof(num_vars: usize, mut rng: &mut impl Rng) -> (usize, SumcheckProof<F>) {
     let mut transcript = Blake3Transcript::default();
 
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
@@ -33,7 +33,7 @@ fn generate_sumcheck_proof(num_vars: usize, mut rng: &mut impl Rng) -> (usize, S
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
     (poly_degree, proof)
 }
@@ -47,8 +47,13 @@ fn full_sumcheck_protocol_works_correctly() {
         let (poly_degree, proof) = generate_sumcheck_proof(num_vars, &mut rng);
 
         let mut transcript = Blake3Transcript::default();
-        let res =
-            MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, poly_degree, &proof, &());
+        let res = MLSumcheck::verify_as_subprotocol(
+            &mut transcript,
+            num_vars,
+            poly_degree,
+            &proof,
+            &Cfg::default(),
+        );
         assert!(res.is_ok())
     }
 }
@@ -70,9 +75,9 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
 
     let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (mut proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
@@ -80,7 +85,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let one = F::from(1u32);
@@ -92,7 +97,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     )
     .unwrap();
 
@@ -104,7 +109,7 @@ fn subclaim_differs_with_incorrect_claimed_sum() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     )
     .unwrap();
 
@@ -119,9 +124,9 @@ fn subclaim_changes_when_prover_message_is_tampered() {
 
     let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
@@ -129,7 +134,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let mut clean_verifier_transcript = Blake3Transcript::default();
@@ -138,7 +143,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     )
     .unwrap();
 
@@ -152,7 +157,7 @@ fn subclaim_changes_when_prover_message_is_tampered() {
         num_vars,
         poly_degree,
         &tampered_proof,
-        &(),
+        &Cfg::default(),
     )
     .unwrap();
 
@@ -167,9 +172,9 @@ fn verifier_rejects_proof_with_wrong_degree() {
 
     let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
@@ -177,7 +182,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let incorrect_degree = poly_degree - 1;
@@ -188,7 +193,7 @@ fn verifier_rejects_proof_with_wrong_degree() {
         num_vars,
         incorrect_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     );
 
     assert!(res.is_err());
@@ -200,9 +205,9 @@ fn protocol_is_deterministic_with_same_transcript() {
     let num_vars = 3;
 
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let mut transcript1 = Blake3Transcript::default();
     let (proof1, _) = MLSumcheck::prove_as_subprotocol(
@@ -211,7 +216,7 @@ fn protocol_is_deterministic_with_same_transcript() {
         num_vars,
         poly_degree,
         comb_fn.clone(),
-        &(),
+        &Cfg::default(),
     );
 
     let mut transcript2 = Blake3Transcript::default();
@@ -221,7 +226,7 @@ fn protocol_is_deterministic_with_same_transcript() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     assert_eq!(proof1, proof2);
@@ -233,11 +238,11 @@ fn different_polynomials_produce_different_proofs() {
     let num_vars = 3;
 
     let ((poly_mles1, poly_degree1), products1, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
     let comb_fn1 = {
         let products = products1.clone();
-        move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) }
+        move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) }
     };
 
     let mut transcript1 = Blake3Transcript::default();
@@ -247,14 +252,14 @@ fn different_polynomials_produce_different_proofs() {
         num_vars,
         poly_degree1,
         comb_fn1,
-        &(),
+        &Cfg::default(),
     );
 
     let mut poly_mles2 = poly_mles1;
     let one: F = F::ONE;
-    poly_mles2[0][0] = F::add_inner(&poly_mles2[0].evaluations[0], one.inner(), &());
+    poly_mles2[0][0] = poly_mles2[0].evaluations[0] + one;
 
-    let comb_fn2 = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products1, ()) };
+    let comb_fn2 = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products1) };
 
     let mut transcript2 = Blake3Transcript::default();
     let (proof2, _) = MLSumcheck::prove_as_subprotocol(
@@ -263,7 +268,7 @@ fn different_polynomials_produce_different_proofs() {
         num_vars,
         poly_degree1,
         comb_fn2,
-        &(),
+        &Cfg::default(),
     );
 
     assert_ne!(proof1, proof2);
@@ -275,14 +280,10 @@ fn sumcheck_with_zero_polynomial() {
 
     let poly_degree = 2;
     let num_mles = 2;
-    let zero_evals = vec![<F as Field>::Integer::ZERO; 1 << num_vars];
-    let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = (0..num_mles)
+    let zero_evals = vec![F::ZERO; 1 << num_vars];
+    let poly_mles: Vec<DenseMultilinearExtension<F>> = (0..num_mles)
         .map(|_| {
-            DenseMultilinearExtension::from_evaluations_vec(
-                num_vars,
-                zero_evals.clone(),
-                <F as Field>::Integer::ZERO,
-            )
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, zero_evals.clone(), F::ZERO)
         })
         .collect();
 
@@ -295,7 +296,7 @@ fn sumcheck_with_zero_polynomial() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     assert_eq!(proof.claimed_sum, F::zero());
@@ -308,7 +309,7 @@ fn sumcheck_with_zero_polynomial() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     );
 
     assert!(res.is_ok());
@@ -321,14 +322,10 @@ fn sumcheck_with_constant_polynomial() {
     let poly_degree = 2;
     let num_mles = 2;
     let one: F = F::ONE;
-    let const_evals = vec![*one.inner(); 1 << num_vars];
-    let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = (0..num_mles)
+    let const_evals = vec![one; 1 << num_vars];
+    let poly_mles: Vec<DenseMultilinearExtension<F>> = (0..num_mles)
         .map(|_| {
-            DenseMultilinearExtension::from_evaluations_vec(
-                num_vars,
-                const_evals.clone(),
-                <F as Field>::Integer::ZERO,
-            )
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, const_evals.clone(), F::ZERO)
         })
         .collect();
 
@@ -344,7 +341,7 @@ fn sumcheck_with_constant_polynomial() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     assert_eq!(proof.claimed_sum, sum);
@@ -355,7 +352,7 @@ fn sumcheck_with_constant_polynomial() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     );
 
     assert!(res.is_ok());
@@ -368,9 +365,9 @@ fn sumcheck_with_single_variable() {
 
     let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
@@ -378,7 +375,7 @@ fn sumcheck_with_single_variable() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let mut verifier_transcript = Blake3Transcript::default();
@@ -387,7 +384,7 @@ fn sumcheck_with_single_variable() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     );
 
     assert!(res.is_ok());
@@ -400,9 +397,9 @@ fn subclaim_changes_if_transcript_is_tampered() {
 
     let mut prover_transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut prover_transcript,
@@ -410,7 +407,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let mut clean_transcript = Blake3Transcript::default();
@@ -419,7 +416,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     )
     .unwrap();
 
@@ -430,7 +427,7 @@ fn subclaim_changes_if_transcript_is_tampered() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     )
     .unwrap();
 
@@ -460,7 +457,7 @@ fn prover_panics_if_round_exceeds_num_vars() {
 
     let verifier_msg = Some(F::ZERO);
 
-    prover_state.prove_round(&verifier_msg, comb_fn, &());
+    prover_state.prove_round(&verifier_msg, comb_fn, &Cfg::default());
 }
 
 #[test]
@@ -470,9 +467,9 @@ fn verifier_errors_on_incomplete_proof() {
 
     let mut transcript = Blake3Transcript::default();
     let ((poly_mles, poly_degree), products, _) =
-        rand_poly(num_vars, 2..5, 7, &mut rng, &()).unwrap();
+        rand_poly(num_vars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut transcript,
@@ -480,7 +477,7 @@ fn verifier_errors_on_incomplete_proof() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let mut incomplete_proof = proof;
@@ -493,7 +490,7 @@ fn verifier_errors_on_incomplete_proof() {
         num_vars,
         poly_degree,
         &incomplete_proof,
-        &(),
+        &Cfg::default(),
     );
 
     assert!(
@@ -506,7 +503,7 @@ fn verifier_errors_on_incomplete_proof() {
 fn prover_handles_empty_mle_list() {
     let num_vars = 3;
 
-    let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = Vec::new();
+    let poly_mles: Vec<DenseMultilinearExtension<F>> = Vec::new();
     let poly_degree = 0;
 
     let comb_fn = |_vals: &[F]| -> F { F::ZERO };
@@ -518,7 +515,7 @@ fn prover_handles_empty_mle_list() {
         num_vars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let mut verifier_transcript = Blake3Transcript::default();
@@ -527,7 +524,7 @@ fn prover_handles_empty_mle_list() {
         num_vars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     );
 
     assert!(res.is_ok());
@@ -547,7 +544,7 @@ fn verifier_errors_on_mismatched_nvars() {
         nvars_verifier, // verifier expects more rounds than the proof contains
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     );
 
     assert!(
@@ -563,12 +560,13 @@ fn verifier_produces_correct_subclaim() {
     let nvars = 3;
 
     let mut prover_transcript = Blake3Transcript::default();
-    let ((poly_mles, poly_degree), products, _) = rand_poly(nvars, 2..5, 7, &mut rng, &()).unwrap();
+    let ((poly_mles, poly_degree), products, _) =
+        rand_poly(nvars, 2..5, 7, &mut rng, &Cfg::default()).unwrap();
 
     let original_mles = poly_mles.clone();
     let products_for_verification = products.clone();
 
-    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(vals, &products, ()) };
+    let comb_fn = move |vals: &[F]| -> F { rand_poly_comb_fn(&Cfg::default(), vals, &products) };
 
     let (proof, _) = MLSumcheck::prove_as_subprotocol(
         &mut prover_transcript,
@@ -576,7 +574,7 @@ fn verifier_produces_correct_subclaim() {
         nvars,
         poly_degree,
         comb_fn,
-        &(),
+        &Cfg::default(),
     );
 
     let mut verifier_transcript = Blake3Transcript::default();
@@ -585,16 +583,20 @@ fn verifier_produces_correct_subclaim() {
         nvars,
         poly_degree,
         &proof,
-        &(),
+        &Cfg::default(),
     )
     .unwrap();
 
     let mle_evals_at_point: Vec<F> = original_mles
         .into_iter()
-        .map(|mle| mle.evaluate_with_config(&subclaim.point, &()).unwrap())
+        .map(|mle| mle.evaluate(&Cfg::default(), &subclaim.point).unwrap())
         .collect();
 
-    let manual_eval = rand_poly_comb_fn(&mle_evals_at_point, &products_for_verification, ());
+    let manual_eval = rand_poly_comb_fn(
+        &Cfg::default(),
+        &mle_evals_at_point,
+        &products_for_verification,
+    );
 
     assert_eq!(manual_eval, subclaim.expected_evaluation);
 }
@@ -615,6 +617,11 @@ fn zero_variable_case_returns_correct_subclaim() {
     };
 
     let mut transcript = Blake3Transcript::default();
-    let _subclaim =
-        MLSumcheck::verify_as_subprotocol(&mut transcript, num_vars, degree, &proof, &());
+    let _subclaim = MLSumcheck::verify_as_subprotocol(
+        &mut transcript,
+        num_vars,
+        degree,
+        &proof,
+        &Cfg::default(),
+    );
 }

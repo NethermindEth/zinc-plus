@@ -1,5 +1,5 @@
 use crypto_bigint::Odd;
-use crypto_primitives::crypto_bigint_uint::Uint;
+use crypto_primitives::{Wrapper, crypto_bigint_uint::Uint};
 use std::fmt::Debug;
 
 pub trait PrimalityTest<R>: Debug + Clone {

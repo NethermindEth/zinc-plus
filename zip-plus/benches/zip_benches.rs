@@ -4,8 +4,10 @@
 mod zip_common;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use crypto_bigint::U64;
-use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crypto_primitives::{
+    crypto_bigint_int::Int,
+    crypto_bigint_uint::{U64, Uint},
+};
 use zinc_primality::MillerRabin;
 use zinc_utils::inner_product::{MBSInnerProduct, ScalarProduct};
 use zip_common::*;

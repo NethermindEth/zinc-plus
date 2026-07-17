@@ -1,10 +1,9 @@
 use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
-use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
 use zinc_transcript::{
     Blake3Transcript,
-    traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
+    traits::{ConstTranscribable, Transcribable, Transcript},
 };
 use zinc_utils::{add, mul, rem};
 
@@ -92,49 +91,18 @@ impl PcsProverTranscript {
 
     common_methods!();
 
-    // Note: Currently this only works for fields whose modulus and inner element
-    // have the same byte length
-    //
-    // TODO if we change this to an iterator we may be able to save some memory
-    pub fn write_field_elements<F>(&mut self, elems: &[F]) -> Result<(), ZipError>
-    where
-        F: PrimeField,
-        F::Integer: Transcribable,
-    {
-        if !elems.is_empty() {
-            let num_bytes = F::Integer::get_num_bytes(&F::modulus(elems[0].cfg()));
-            let num_bytes_arr = num_bytes
-                .to_le_bytes()
-                .into_iter()
-                .take(F::Integer::LENGTH_NUM_BYTES)
-                .collect_vec();
-            self.stream.write_all(&num_bytes_arr)?;
-
-            let mut buf = vec![0; num_bytes];
-            for elem in elems {
-                self.write_field_element_no_length(elem, &mut buf)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Writes a field element to the proof stream and absorbs it into the
-    /// transcript. Used during proof generation to store field elements for
-    /// later verification.
+    /// Writes field elements to the proof stream and absorbs them into the
+    /// transcript, as raw (inner-representation) bytes.
     ///
-    /// Field element length must've been written before calling this method.
-    fn write_field_element_no_length<F>(&mut self, fe: &F, buf: &mut [u8]) -> Result<(), ZipError>
+    /// The field modulus is NOT written here.
+    pub fn write_field_elements<E>(&mut self, elems: &[E]) -> Result<(), ZipError>
     where
-        F: PrimeField,
-        F::Integer: Transcribable,
+        E: ConstTranscribable,
     {
-        self.fs_transcript.absorb_random_field(fe, buf);
-        F::modulus(fe.cfg()).write_transcription_bytes_exact(buf);
-        self.stream.write_all(buf)?;
-        fe.lift_to_integer().write_transcription_bytes_exact(buf);
-        self.stream.write_all(buf)?;
-        Ok(())
+        let mut buf = vec![0; E::NUM_BYTES];
+        self.fs_transcript
+            .absorb_field_element_slice(elems, &mut buf);
+        self.write_const_many(elems)
     }
 
     pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), ZipError> {
@@ -233,45 +201,18 @@ pub struct PcsVerifierTranscript {
 impl PcsVerifierTranscript {
     common_methods!();
 
-    // Note: Currently this only works for fields whose modulus and inner element
-    // have the same byte length
-    pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, ZipError>
+    /// Reads field elements from the proof stream and absorbs them into the
+    /// transcript, as raw (inner-representation) bytes. The mirror of
+    /// [`PcsProverTranscript::write_field_elements`].
+    pub fn read_field_elements<E>(&mut self, n: usize) -> Result<Vec<E>, ZipError>
     where
-        F: PrimeField,
-        F::Integer: Transcribable,
+        E: ConstTranscribable,
     {
-        if n > 0 {
-            let mut buf = vec![0; F::Integer::LENGTH_NUM_BYTES];
-            self.stream.read_exact(&mut buf)?;
-            let num_bytes = F::Integer::read_num_bytes(&buf);
-
-            let mut buf = vec![0; num_bytes];
-            (0..n)
-                .map(|_| self.read_field_element_no_length(&mut buf))
-                .collect::<Result<Vec<_>, _>>()
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    /// Reads a field element from the proof stream and absorbs it into the
-    /// transcript. Used during proof verification to retrieve and process
-    /// field elements.
-    ///
-    /// Provided buffer must be of exact size of the field element.
-    fn read_field_element_no_length<F>(&mut self, buf: &mut [u8]) -> Result<F, ZipError>
-    where
-        F: PrimeField,
-        F::Integer: Transcribable,
-    {
-        self.stream.read_exact(buf)?;
-        let modulus = F::Integer::read_transcription_bytes_exact(buf);
-        self.stream.read_exact(buf)?;
-        let int = F::Integer::read_transcription_bytes_exact(buf);
-        let field_cfg = F::make_cfg(&modulus)?;
-        let fe = F::from_with_cfg(int, &field_cfg);
-        self.fs_transcript.absorb_random_field(&fe, buf);
-        Ok(fe)
+        let elems: Vec<E> = self.read_const_many(n)?;
+        let mut buf = vec![0; E::NUM_BYTES];
+        self.fs_transcript
+            .absorb_field_element_slice(&elems, &mut buf);
+        Ok(elems)
     }
 
     pub fn read<T: Transcribable>(&mut self) -> Result<T, ZipError> {

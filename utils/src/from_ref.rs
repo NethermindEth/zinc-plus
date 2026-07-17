@@ -1,4 +1,6 @@
-use crypto_primitives::{boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crypto_primitives::{
+    Wrapper, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+};
 
 //
 // FromRef

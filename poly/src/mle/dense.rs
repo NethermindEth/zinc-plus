@@ -1,26 +1,20 @@
 mod try_collect_dense_mle;
 
-use core::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
-use num_traits::Zero;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-use std::{
-    ops::{Deref, DerefMut},
-    slice::SliceIndex,
-};
-
 use crate::{
     EvaluationError,
     mle::{MultilinearExtension, MultilinearExtensionRand},
 };
-use crypto_primitives::{HasPrimeFieldConfig, Matrix, PrimeField, Ring, Semiring};
+use core::ops::{Add, AddAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
+use crypto_primitives::{FieldConfig, Matrix, Ring, Semiring, SemiringConfig, SetElement};
 use rand::{distr::StandardUniform, prelude::*};
-use zinc_utils::{
-    CHECKED, add, cfg_into_iter, inner_transparent_field::InnerTransparentField,
-    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField, sub,
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use std::{
+    fmt::Debug,
+    ops::{Deref, DerefMut},
+    slice::SliceIndex,
 };
-
-use super::MultilinearExtensionWithConfig;
+use zinc_utils::{cfg_into_iter, projectable_to_field::ProjectableToField, sub};
 
 pub use try_collect_dense_mle::*;
 
@@ -200,14 +194,14 @@ impl<'data, R: Send + Sync> IntoParallelRefMutIterator<'data>
     }
 }
 
-impl<R: Semiring> DenseMultilinearExtension<R> {
-    pub fn evaluate<S>(&self, point: &[S], zero: R) -> Result<R, EvaluationError>
+impl<R: SetElement> DenseMultilinearExtension<R> {
+    pub fn evaluate<C>(&self, cfg: &C, point: &[R]) -> Result<R, EvaluationError>
     where
-        R: for<'a> MulByScalar<&'a S>,
+        C: SemiringConfig<Element = R>,
     {
         if point.len() == self.num_vars {
             Ok(self
-                .fixed_variables(point, zero)
+                .fixed_variables(cfg, point)
                 .into_iter()
                 .next()
                 .expect("Evaluations should not be empty"))
@@ -234,90 +228,9 @@ impl<R: Semiring> DenseMultilinearExtension<R> {
     }
 }
 
-impl<F> MultilinearExtensionWithConfig<F> for DenseMultilinearExtension<F::Inner>
-where
-    F: InnerTransparentField,
-{
+impl<C: SemiringConfig> MultilinearExtension<C> for DenseMultilinearExtension<C::Element> {
     #[allow(clippy::arithmetic_side_effects)]
-    fn fix_variables_with_config(
-        &mut self,
-        partial_point: &[F],
-        config: &<F as HasPrimeFieldConfig>::Config,
-    ) {
-        assert!(
-            partial_point.len() <= self.num_vars,
-            "too many partial points"
-        );
-
-        if partial_point.len().is_zero() {
-            return;
-        }
-
-        let nv = self.num_vars;
-        let dim = partial_point.len();
-
-        let mut r = partial_point[0].clone();
-        for i in 1..dim + 1 {
-            for b in 0..1 << (nv - i) {
-                *r.inner_mut() = partial_point[i - 1].inner().clone();
-                if self[2 * b + 1] != self[2 * b] {
-                    // a = f(1) - f(0)
-                    let a = F::sub_inner(&self[2 * b + 1], &self[2 * b], config);
-
-                    // self[b] = f(0) + r * a
-                    r.mul_assign_by_inner(&a);
-                    self[b] = F::add_inner(&self[2 * b], r.inner(), config);
-                } else {
-                    self[b] = self[2 * b].clone();
-                };
-            }
-        }
-
-        self.evaluations.truncate(1 << (nv - dim));
-        self.num_vars = sub!(nv, dim);
-    }
-
-    fn fixed_variables_with_config(
-        &self,
-        partial_point: &[F],
-        config: &<F as HasPrimeFieldConfig>::Config,
-    ) -> Self {
-        let mut res = self.clone();
-        res.fix_variables_with_config(partial_point, config);
-        res
-    }
-
-    fn evaluate_with_config(
-        mut self,
-        point: &[F],
-        config: &<F as HasPrimeFieldConfig>::Config,
-    ) -> Result<F, EvaluationError> {
-        if point.len() == self.num_vars {
-            self.fix_variables_with_config(point, config);
-            Ok(F::new_unchecked_with_cfg(
-                self.into_iter()
-                    .next()
-                    .expect("Evaluations should not be empty"),
-                config,
-            ))
-        } else {
-            Err(EvaluationError::WrongPointWidth {
-                expected: point.len(),
-                actual: self.num_vars,
-            })
-        }
-    }
-}
-
-impl<R> MultilinearExtension<R> for DenseMultilinearExtension<R>
-where
-    R: Semiring,
-{
-    #[allow(clippy::arithmetic_side_effects)]
-    fn fix_variables<S>(&mut self, partial_point: &[S], zero: R)
-    where
-        R: for<'a> MulByScalar<&'a S>,
-    {
+    fn fix_variables(&mut self, cfg: &C, partial_point: &[C::Element]) {
         assert!(
             partial_point.len() <= self.num_vars,
             "too many partial points"
@@ -332,13 +245,11 @@ where
                 let left = &self[2 * b];
                 let right = &self[2 * b + 1];
                 // a = f(1) - f(0)
-                let a = sub!(*right, left);
-                if a != zero {
+                let a = cfg.checked_sub(right, left).expect("Subtraction overflow");
+                if !cfg.is_zero(&a) {
                     // self[b] = f(0) + r * a
-                    let ar = a
-                        .mul_by_scalar::<CHECKED>(r)
-                        .expect("Multiplication overflow");
-                    self[b] = add!(*left, ar);
+                    let ar = cfg.checked_mul(&a, r).expect("Multiplication overflow");
+                    self[b] = cfg.checked_add(left, &ar).expect("Addition overflow");
                 } else {
                     self[b] = left.clone();
                 };
@@ -349,12 +260,9 @@ where
         self.num_vars = sub!(nv, dim);
     }
 
-    fn fixed_variables<S>(&self, partial_point: &[S], zero: R) -> Self
-    where
-        R: for<'a> MulByScalar<&'a S>,
-    {
+    fn fixed_variables(&self, cfg: &C, partial_point: &[C::Element]) -> Self {
         let mut res = self.clone();
-        res.fix_variables(partial_point, zero);
+        res.fix_variables(cfg, partial_point);
         res
     }
 }
@@ -470,15 +378,20 @@ impl<R: Semiring> AddAssign<(R, &Self)> for DenseMultilinearExtension<R> {
     }
 }
 
-pub fn project_coeffs<F: PrimeField, R: ProjectableToField<F> + Send + Sync>(
+pub fn project_coeffs<C, R>(
+    cfg: &C,
     mle: DenseMultilinearExtension<R>,
-    sampled_value: &F,
-) -> DenseMultilinearExtension<F::Inner> {
-    let projection = R::prepare_projection(sampled_value);
+    sampled_value: &C::Element,
+) -> DenseMultilinearExtension<C::Element>
+where
+    C: FieldConfig,
+    R: ProjectableToField<C> + Send + Sync + 'static,
+{
+    let projection = R::prepare_projection(cfg, sampled_value);
 
     DenseMultilinearExtension {
         evaluations: cfg_into_iter!(mle.evaluations)
-            .map(|x| projection(&x).into_inner())
+            .map(|x| projection(&x))
             .collect(),
         num_vars: mle.num_vars,
     }
@@ -512,41 +425,43 @@ where
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::clone_on_copy
 )]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
+    use crypto_bigint::{U256, const_monty_params};
     use crypto_primitives::{
-        DenseRowMatrix, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
-        crypto_bigint_uint::Uint,
+        BaseFieldConfig, DenseRowMatrix, FixedConfig, LiftElementWithConfig,
+        ProjectElementWithConfig, SetConfig, crypto_bigint_const_monty::F256,
+        crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use proptest::prelude::*;
 
     const LIMBS: usize = 4;
 
-    fn get_dyn_config(hex_modulus: &str) -> <MontyField<LIMBS> as HasPrimeFieldConfig>::Config {
-        let modulus = Uint::new(
-            crypto_bigint::Uint::from_str_radix_vartime(hex_modulus, 16)
-                .expect("Invalid modulus hex string"),
-        );
-        MontyField::make_cfg(&modulus).expect("Failed to create field config")
+    fn get_dyn_config(hex_modulus: &str) -> MontyField<LIMBS> {
+        let modulus =
+            Uint::from_str(&format!("0x{hex_modulus}")).unwrap("Invalid modulus hex string");
+        MontyField::new(&modulus).expect("Failed to create field config")
     }
 
     const MODULUS: &str = "0076F668F4274572E39A3EA8285319B5";
     type F = MontyField<LIMBS>;
+    type E = <F as SetConfig>::Element;
 
-    fn any_f(cfg: <F as HasPrimeFieldConfig>::Config) -> impl Strategy<Value = F> + 'static {
-        any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
+    fn any_e(cfg: F) -> impl Strategy<Value = E> + 'static {
+        any::<u128>().prop_map(move |v| cfg.project(&v))
     }
 
-    fn any_dme() -> impl Strategy<Value = DenseMultilinearExtension<F>> {
+    fn any_dme() -> impl Strategy<Value = DenseMultilinearExtension<E>> {
         let cfg = get_dyn_config(MODULUS);
         (0usize..=5).prop_flat_map(move |n| {
             let len = 1usize << n;
-            let cfg = cfg;
-            prop::collection::vec(any_f(cfg), len).prop_map(move |evals| {
-                DenseMultilinearExtension::from_evaluations_vec(n, evals, F::zero_with_cfg(&cfg))
+            prop::collection::vec(any_e(cfg), len).prop_map(move |evals| {
+                DenseMultilinearExtension::from_evaluations_vec(n, evals, cfg.zero())
             })
         })
     }
@@ -555,76 +470,63 @@ mod tests {
     fn test_dense_from_slice_and_indexing() {
         let cfg = get_dyn_config(MODULUS);
         let n_vars = 3usize;
-        let v = vec![
-            1u64.into_with_cfg(&cfg),
-            2u64.into_with_cfg(&cfg),
-            3u64.into_with_cfg(&cfg),
-        ];
-        let dense =
-            DenseMultilinearExtension::from_evaluations_slice(n_vars, &v, F::zero_with_cfg(&cfg));
+        let v = vec![cfg.project(&1u64), cfg.project(&2u64), cfg.project(&3u64)];
+        let dense = DenseMultilinearExtension::from_evaluations_slice(n_vars, &v, cfg.zero());
         assert_eq!(dense.num_vars, n_vars);
         let mut expected = v.clone();
-        expected.resize(1 << n_vars, F::zero_with_cfg(&cfg));
+        expected.resize(1 << n_vars, cfg.zero());
         assert_eq!(dense.evaluations, expected);
-        assert_eq!(dense[0], 1u64.into_with_cfg(&cfg));
+        assert_eq!(dense[0], cfg.project(&1u64));
         let mut d2 = dense.clone();
-        d2[1] = 99u64.into_with_cfg(&cfg);
-        assert_eq!(d2[1], 99u64.into_with_cfg(&cfg));
+        d2[1] = cfg.project(&99u64);
+        assert_eq!(d2[1], cfg.project(&99u64));
     }
 
     #[test]
     fn test_fix_variables_and_evaluate() {
         let cfg = get_dyn_config(MODULUS);
-        let evals = vec![
-            10u64.into_with_cfg(&cfg),
-            20u64.into_with_cfg(&cfg),
-            30u64.into_with_cfg(&cfg),
-            40u64.into_with_cfg(&cfg),
-        ];
-        let mle = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            evals.clone(),
-            F::zero_with_cfg(&cfg),
-        );
+        let evals: Vec<E> = [10u64, 20, 30, 40].iter().map(|v| cfg.project(v)).collect();
+        let mle = DenseMultilinearExtension::from_evaluations_vec(2, evals.clone(), cfg.zero());
         for (idx, (x0, x1)) in [
-            (F::zero_with_cfg(&cfg), F::zero_with_cfg(&cfg)),
-            (F::one_with_cfg(&cfg), F::zero_with_cfg(&cfg)),
-            (F::zero_with_cfg(&cfg), F::one_with_cfg(&cfg)),
-            (F::one_with_cfg(&cfg), F::one_with_cfg(&cfg)),
+            (cfg.zero(), cfg.zero()),
+            (cfg.one(), cfg.zero()),
+            (cfg.zero(), cfg.one()),
+            (cfg.one(), cfg.one()),
         ]
         .iter()
         .enumerate()
         {
             let val = mle
-                .evaluate(&[x0.clone(), x1.clone()], F::zero_with_cfg(&cfg))
+                .clone()
+                .evaluate(&cfg, &[x0.clone(), x1.clone()])
                 .unwrap();
             assert_eq!(val, evals[idx]);
         }
         let mut m2 = mle.clone();
-        m2.fix_variables(&[F::one_with_cfg(&cfg)], F::zero_with_cfg(&cfg));
+        m2.fix_variables(&cfg, &[cfg.one()]);
         assert_eq!(m2.num_vars, 1);
         assert_eq!(
             m2.evaluations,
-            vec![20u64.into_with_cfg(&cfg), 40u64.into_with_cfg(&cfg)]
+            vec![cfg.project(&20u64), cfg.project(&40u64)]
         );
     }
 
     #[test]
     fn test_from_matrix_padding_and_conversion() {
         let cfg = get_dyn_config(MODULUS);
-        let m: DenseRowMatrix<F> = DenseRowMatrix::from(vec![
-            vec![5u64.into_with_cfg(&cfg), F::zero_with_cfg(&cfg)],
-            vec![F::zero_with_cfg(&cfg), F::zero_with_cfg(&cfg)],
-            vec![F::zero_with_cfg(&cfg), 7u64.into_with_cfg(&cfg)],
+        let m: DenseRowMatrix<E> = DenseRowMatrix::from(vec![
+            vec![cfg.project(&5u64), cfg.zero()],
+            vec![cfg.zero(), cfg.zero()],
+            vec![cfg.zero(), cfg.project(&7u64)],
         ]);
-        let dense = DenseMultilinearExtension::from_matrix(&m, F::zero_with_cfg(&cfg));
+        let dense = DenseMultilinearExtension::from_matrix(&m, cfg.zero());
         assert_eq!(dense.num_vars, 3);
-        assert_eq!(dense[0], 5u64.into_with_cfg(&cfg));
-        assert_eq!(dense[5], 7u64.into_with_cfg(&cfg));
+        assert_eq!(dense[0], cfg.project(&5u64));
+        assert_eq!(dense[5], cfg.project(&7u64));
         assert!(dense.iter().enumerate().all(|(i, v)| if i == 0 || i == 5 {
             true
         } else {
-            F::is_zero(v)
+            cfg.is_zero(v)
         }));
     }
 
@@ -632,261 +534,112 @@ mod tests {
     fn test_from_evaluations_vec_padding_branch_and_slice() {
         let cfg = get_dyn_config(MODULUS);
         // len < 2^n triggers padding branch
-        let evals = vec![1u64.into_with_cfg(&cfg), 2u64.into_with_cfg(&cfg)];
+        let evals = vec![cfg.project(&1u64), cfg.project(&2u64)];
         let n = 2usize; // 4 expected
-        let d1 = DenseMultilinearExtension::from_evaluations_vec(
-            n,
-            evals.clone(),
-            F::zero_with_cfg(&cfg),
-        );
+        let d1 = DenseMultilinearExtension::from_evaluations_vec(n, evals.clone(), cfg.zero());
         let mut expected = evals.clone();
-        expected.resize(1 << n, F::zero_with_cfg(&cfg));
+        expected.resize(1 << n, cfg.zero());
         assert_eq!(d1.evaluations, expected);
-        let d2 =
-            DenseMultilinearExtension::from_evaluations_slice(n, &evals, F::zero_with_cfg(&cfg));
+        let d2 = DenseMultilinearExtension::from_evaluations_slice(n, &evals, cfg.zero());
         assert_eq!(d2.evaluations, expected);
     }
 
     #[test]
     fn test_fix_variables_edge_cases_and_full_truncate() {
         let cfg = get_dyn_config(MODULUS);
-        let d = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            vec![
-                1.into_with_cfg(&cfg),
-                2.into_with_cfg(&cfg),
-                3.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg),
-            ],
-            F::zero_with_cfg(&cfg),
-        );
-        let d_fixed = d.fixed_variables(&[], F::zero_with_cfg(&cfg));
+        let evals: Vec<E> = [1u64, 2, 3, 4].iter().map(|v| cfg.project(v)).collect();
+        let d = DenseMultilinearExtension::from_evaluations_vec(2, evals.clone(), cfg.zero());
+        let d_fixed = d.fixed_variables(&cfg, &[]);
         assert_eq!(d_fixed.num_vars, 2);
-        assert_eq!(
-            d_fixed.evaluations,
-            vec![
-                1.into_with_cfg(&cfg),
-                2.into_with_cfg(&cfg),
-                3.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg)
-            ]
-        );
-        let mut d2 = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            vec![
-                10.into_with_cfg(&cfg),
-                20.into_with_cfg(&cfg),
-                30.into_with_cfg(&cfg),
-                40.into_with_cfg(&cfg),
-            ],
-            F::zero_with_cfg(&cfg),
-        );
-        d2.fix_variables(
-            &[F::one_with_cfg(&cfg), F::zero_with_cfg(&cfg)],
-            F::zero_with_cfg(&cfg),
-        );
+        assert_eq!(d_fixed.evaluations, evals);
+
+        let evals: Vec<E> = [10u64, 20, 30, 40].iter().map(|v| cfg.project(v)).collect();
+        let mut d2 = DenseMultilinearExtension::from_evaluations_vec(2, evals, cfg.zero());
+        d2.fix_variables(&cfg, &[cfg.one(), cfg.zero()]);
         assert_eq!(d2.num_vars, 0);
-        assert_eq!(d2.evaluations, vec![20.into_with_cfg(&cfg)]);
+        assert_eq!(d2.evaluations, vec![cfg.project(&20u64)]);
     }
 
     #[test]
     fn test_evaluate_length_mismatch_returns_error() {
         let cfg = get_dyn_config(MODULUS);
-        let d = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            vec![
-                1.into_with_cfg(&cfg),
-                2.into_with_cfg(&cfg),
-                3.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg),
-            ],
-            F::zero_with_cfg(&cfg),
-        );
+        let evals: Vec<E> = [1u64, 2, 3, 4].iter().map(|v| cfg.project(v)).collect();
+        let d = DenseMultilinearExtension::from_evaluations_vec(2, evals, cfg.zero());
+        assert!(d.clone().evaluate(&cfg, &[cfg.one()]).is_err());
         assert!(
-            d.evaluate(&[F::one_with_cfg(&cfg)], F::zero_with_cfg(&cfg))
+            d.evaluate(&cfg, &[cfg.one(), cfg.one(), cfg.zero()])
                 .is_err()
-        );
-        assert!(
-            d.evaluate(
-                &[
-                    F::one_with_cfg(&cfg),
-                    F::one_with_cfg(&cfg),
-                    F::zero_with_cfg(&cfg)
-                ],
-                F::zero_with_cfg(&cfg)
-            )
-            .is_err()
         );
     }
 
     #[test]
     fn test_zero_impl_for_dense_mle() {
         let cfg = get_dyn_config(MODULUS);
-        let z: DenseMultilinearExtension<F> =
-            DenseMultilinearExtension::zero_vars(F::zero_with_cfg(&cfg));
+        let z: DenseMultilinearExtension<E> = DenseMultilinearExtension::zero_vars(cfg.zero());
         assert_eq!(z.num_vars, 0);
-        assert_eq!(z.evaluations, vec![F::zero_with_cfg(&cfg)]);
+        assert_eq!(z.evaluations, vec![cfg.zero()]);
     }
 
     #[test]
     fn test_arithmetic_ops_elementwise_add_sub_mul_and_neg() {
-        let cfg = get_dyn_config(MODULUS);
-        let a = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            vec![
-                1.into_with_cfg(&cfg),
-                2.into_with_cfg(&cfg),
-                3.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg),
-            ],
-            F::zero_with_cfg(&cfg),
-        );
-        let b = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            vec![
-                5.into_with_cfg(&cfg),
-                6.into_with_cfg(&cfg),
-                7.into_with_cfg(&cfg),
-                8.into_with_cfg(&cfg),
-            ],
-            F::zero_with_cfg(&cfg),
-        );
+        let a: DenseMultilinearExtension<i128> =
+            DenseMultilinearExtension::from_evaluations_vec(2, vec![1, 2, 3, 4], 0);
+        let b: DenseMultilinearExtension<i128> =
+            DenseMultilinearExtension::from_evaluations_vec(2, vec![5, 6, 7, 8], 0);
 
         let sum = a.clone() + &b;
-        assert_eq!(
-            sum.evaluations,
-            vec![
-                6.into_with_cfg(&cfg),
-                8.into_with_cfg(&cfg),
-                10.into_with_cfg(&cfg),
-                12.into_with_cfg(&cfg)
-            ]
-        );
+        assert_eq!(sum.evaluations, vec![6, 8, 10, 12]);
 
         let diff = b.clone() - &a;
-        assert_eq!(
-            diff.evaluations,
-            vec![
-                4.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg)
-            ]
-        );
+        assert_eq!(diff.evaluations, vec![4, 4, 4, 4]);
 
         let prod = a.clone() * &b;
-        assert_eq!(
-            prod.evaluations,
-            vec![
-                5.into_with_cfg(&cfg),
-                12.into_with_cfg(&cfg),
-                21.into_with_cfg(&cfg),
-                32.into_with_cfg(&cfg)
-            ]
-        );
+        assert_eq!(prod.evaluations, vec![5, 12, 21, 32]);
 
         // Neg
         let neg_a = -a.clone();
-        let mut expected = vec![];
-        for v in a.evaluations {
-            expected.push(-v);
-        }
-        assert_eq!(neg_a.evaluations, expected);
+        assert_eq!(neg_a.evaluations, vec![-1, -2, -3, -4]);
     }
 
     #[test]
     fn test_scalar_mul_and_assign_variants() {
-        let cfg = get_dyn_config(MODULUS);
-        let a = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            vec![
-                1.into_with_cfg(&cfg),
-                2.into_with_cfg(&cfg),
-                3.into_with_cfg(&cfg),
-                4.into_with_cfg(&cfg),
-            ],
-            F::zero_with_cfg(&cfg),
-        );
-        let b = DenseMultilinearExtension::from_evaluations_vec(
-            2,
-            vec![
-                10.into_with_cfg(&cfg),
-                20.into_with_cfg(&cfg),
-                30.into_with_cfg(&cfg),
-                40.into_with_cfg(&cfg),
-            ],
-            F::zero_with_cfg(&cfg),
-        );
+        let a: DenseMultilinearExtension<i128> =
+            DenseMultilinearExtension::from_evaluations_vec(2, vec![1, 2, 3, 4], 0);
+        let b: DenseMultilinearExtension<i128> =
+            DenseMultilinearExtension::from_evaluations_vec(2, vec![10, 20, 30, 40], 0);
 
-        let three: F = 3u64.into_with_cfg(&cfg);
-        let scaled = a.clone() * three;
-        assert_eq!(
-            scaled.evaluations,
-            vec![
-                3.into_with_cfg(&cfg),
-                6.into_with_cfg(&cfg),
-                9.into_with_cfg(&cfg),
-                12.into_with_cfg(&cfg)
-            ]
-        );
+        let scaled = a.clone() * 3;
+        assert_eq!(scaled.evaluations, vec![3, 6, 9, 12]);
 
         let mut c = a.clone();
         c += &b;
-        assert_eq!(
-            c.evaluations,
-            vec![
-                11.into_with_cfg(&cfg),
-                22.into_with_cfg(&cfg),
-                33.into_with_cfg(&cfg),
-                44.into_with_cfg(&cfg)
-            ]
-        );
+        assert_eq!(c.evaluations, vec![11, 22, 33, 44]);
 
         c -= &b;
         assert_eq!(c.evaluations, a.evaluations);
 
         let mut d = a.clone();
         d *= &b;
-        assert_eq!(
-            d.evaluations,
-            vec![
-                10.into_with_cfg(&cfg),
-                40.into_with_cfg(&cfg),
-                90.into_with_cfg(&cfg),
-                160.into_with_cfg(&cfg)
-            ]
-        );
+        assert_eq!(d.evaluations, vec![10, 40, 90, 160]);
 
         let mut e = a.clone();
-        let two = 2u64.into_with_cfg(&cfg);
-        e += (two, &b);
-        assert_eq!(
-            e.evaluations,
-            vec![
-                21.into_with_cfg(&cfg),
-                42.into_with_cfg(&cfg),
-                63.into_with_cfg(&cfg),
-                84.into_with_cfg(&cfg)
-            ]
-        );
+        e += (2, &b);
+        assert_eq!(e.evaluations, vec![21, 42, 63, 84]);
     }
 
     fn any_aligned_pair_with_point() -> impl Strategy<
         Value = (
-            DenseMultilinearExtension<F>,
-            DenseMultilinearExtension<F>,
-            Vec<F>,
+            DenseMultilinearExtension<E>,
+            DenseMultilinearExtension<E>,
+            Vec<E>,
         ),
     > {
         let cfg = get_dyn_config(MODULUS);
         (0usize..=5).prop_flat_map(move |n| {
-            let cfg = cfg;
             let len = 1usize << n;
-            prop::collection::vec(any_f(cfg), len).prop_flat_map(move |e1| {
-                let cfg = cfg;
+            prop::collection::vec(any_e(cfg), len).prop_flat_map(move |e1| {
                 let n2 = n;
-                prop::collection::vec(any_f(cfg), len).prop_flat_map(move |e2| {
-                    let cfg = cfg;
+                prop::collection::vec(any_e(cfg), len).prop_flat_map(move |e2| {
                     let n3 = n2;
                     point_n(n3).prop_map({
                         let e1v = e1.clone();
@@ -896,12 +649,12 @@ mod tests {
                                 DenseMultilinearExtension::from_evaluations_vec(
                                     n3,
                                     e1v.clone(),
-                                    F::zero_with_cfg(&cfg),
+                                    cfg.zero(),
                                 ),
                                 DenseMultilinearExtension::from_evaluations_vec(
                                     n3,
                                     e2v.clone(),
-                                    F::zero_with_cfg(&cfg),
+                                    cfg.zero(),
                                 ),
                                 r,
                             )
@@ -911,8 +664,8 @@ mod tests {
             })
         })
     }
-    fn point_n(n: usize) -> impl Strategy<Value = Vec<F>> {
-        prop::collection::vec(any_f(get_dyn_config(MODULUS)), n)
+    fn point_n(n: usize) -> impl Strategy<Value = Vec<E>> {
+        prop::collection::vec(any_e(get_dyn_config(MODULUS)), n)
     }
 
     proptest! {
@@ -920,8 +673,21 @@ mod tests {
         #[cfg_attr(miri, ignore)] // long running
         fn prop_eval_add_is_linear((p1, p2, r) in any_aligned_pair_with_point()) {
             let cfg = get_dyn_config(MODULUS);
-            let lhs = (p1.clone() + &p2).evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
-            let rhs = p1.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap() + p2.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
+            // Elementwise sum via the config (raw elements have no std ops).
+            let sum = DenseMultilinearExtension {
+                num_vars: p1.num_vars,
+                evaluations: p1
+                    .evaluations
+                    .iter()
+                    .zip(p2.evaluations.iter())
+                    .map(|(a, b)| cfg.add(a, b))
+                    .collect(),
+            };
+            let lhs = sum.evaluate(&cfg, &r).unwrap();
+            let rhs = cfg.add(
+                &p1.evaluate(&cfg, &r).unwrap(),
+                &p2.evaluate(&cfg, &r).unwrap(),
+            );
             prop_assert_eq!(lhs, rhs);
         }
 
@@ -935,9 +701,9 @@ mod tests {
         })) {
             let cfg = get_dyn_config(MODULUS);
             let mut pfixed = p.clone();
-            pfixed.fix_variables(&r[..k], F::zero_with_cfg(&cfg));
-            let lhs = pfixed.evaluate(&r[k..], F::zero_with_cfg(&cfg)).unwrap();
-            let rhs = p.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
+            pfixed.fix_variables(&cfg, &r[..k]);
+            let lhs = pfixed.evaluate(&cfg, &r[k..]).unwrap();
+            let rhs = p.evaluate(&cfg, &r).unwrap();
             prop_assert_eq!(lhs, rhs);
         }
 
@@ -950,37 +716,61 @@ mod tests {
                 let ks2 = 0usize..=n.saturating_sub(k1);
                 (Just(p), Just(k1), ks2)
             })
-        }), r1 in prop::collection::vec(any_f(get_dyn_config(MODULUS)), 0..=8usize), r2 in prop::collection::vec(any_f(get_dyn_config(MODULUS)), 0..=8usize)) {
+        }), r1 in prop::collection::vec(any_e(get_dyn_config(MODULUS)), 0..=8usize), r2 in prop::collection::vec(any_e(get_dyn_config(MODULUS)), 0..=8usize)) {
             let cfg = get_dyn_config(MODULUS);
             let mut p_step = p.clone();
-            p_step.fix_variables(&r1[..k1.min(r1.len())], F::zero_with_cfg(&cfg));
-            p_step.fix_variables(&r2[..k2.min(r2.len())], F::zero_with_cfg(&cfg));
+            p_step.fix_variables(&cfg, &r1[..k1.min(r1.len())]);
+            p_step.fix_variables(&cfg, &r2[..k2.min(r2.len())]);
 
             let mut p_once = p.clone();
             let mut concat = r1[..k1.min(r1.len())].to_vec();
             concat.extend_from_slice(&r2[..k2.min(r2.len())]);
-            p_once.fix_variables(&concat, F::zero_with_cfg(&cfg));
+            p_once.fix_variables(&cfg, &concat);
 
             prop_assert_eq!(p_step.evaluations, p_once.evaluations);
             prop_assert_eq!(p_step.num_vars, p_once.num_vars);
         }
+    }
 
+    // Equivalence of the fixed-config path (`FixedConfig<ConstMontyField>`)
+    // and the dynamic-config path (`MontyField`) over the same modulus.
+    const_monty_params!(
+        ModQ,
+        U256,
+        "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27"
+    );
+    type CF = F256<ModQ>;
+    const MODULUS_Q: &str = "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27";
+
+    proptest! {
         #[test]
         #[cfg_attr(miri, ignore)] // long running
-        fn prop_mle_eval_eq_eval_with_config((p, r) in any_dme().prop_flat_map(|p| {
-            let n = p.num_vars;
-            let point = point_n(n);
-            (Just(p), point)
+        fn prop_mle_eval_fixed_cfg_matches_dyn_cfg((evals, point) in (0usize..=5).prop_flat_map(|n| {
+            (
+                prop::collection::vec(any::<u128>(), 1usize << n),
+                prop::collection::vec(any::<u128>(), n),
+            )
         })) {
-            let cfg = get_dyn_config(MODULUS);
+            let n = point.len();
+            let fixed_cfg = FixedConfig::<CF>::default();
+            let dyn_cfg = get_dyn_config(MODULUS_Q);
 
-            let p_inner = DenseMultilinearExtension {
-                num_vars: p.num_vars,
-                evaluations: p.evaluations.iter().map(|x| *x.inner()).collect()
-            };
+            let p_fixed = DenseMultilinearExtension::from_evaluations_vec(
+                n,
+                evals.iter().map(|v| CF::from(*v)).collect(),
+                fixed_cfg.zero(),
+            );
+            let p_dyn = DenseMultilinearExtension::from_evaluations_vec(
+                n,
+                evals.iter().map(|v| dyn_cfg.project(v)).collect(),
+                dyn_cfg.zero(),
+            );
 
-            let lhs = p.evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
-            let rhs = p_inner.evaluate_with_config(&r, &cfg).unwrap();
+            let r_fixed: Vec<CF> = point.iter().map(|v| CF::from(*v)).collect();
+            let r_dyn: Vec<E> = point.iter().map(|v| dyn_cfg.project(v)).collect();
+
+            let lhs = fixed_cfg.lift(&p_fixed.evaluate(&fixed_cfg, &r_fixed).unwrap());
+            let rhs = dyn_cfg.lift(&p_dyn.evaluate(&dyn_cfg, &r_dyn).unwrap());
             prop_assert_eq!(lhs, rhs);
         }
     }

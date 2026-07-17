@@ -436,8 +436,9 @@ pub enum MerkleError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_bigint::Random;
+    // use crypto_bigint::Random;
     use crypto_primitives::crypto_bigint_int::Int;
+    use rand::RngExt;
 
     #[test]
     #[cfg_attr(miri, ignore)] // long running
@@ -446,7 +447,7 @@ mod tests {
         let leaves_len = 1024;
         let mut rng = rand::rng();
         let leaves_data = (0..leaves_len)
-            .map(|_| Int::random_from_rng(&mut rng))
+            .map(|_| rng.random())
             .collect::<Vec<Int<N>>>();
 
         let merkle_tree = MerkleTree::new(&[leaves_data.as_slice()]);

@@ -4,14 +4,13 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 
-use crypto_primitives::Semiring;
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstOne, ConstZero, One, Zero};
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crypto_primitives::FixedConfig;
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstOne, ConstZero, One, Pow, Zero};
 
-/// A dummy type implementing `FixedSemiring` trait.
+/// A dummy type implementing the `Semiring` trait.
 /// Used for `ConstraintCounter` to have something
-/// that implements `FixedSemiring` but has zero-cost
-/// operations. Can be used in other contexts
+/// that implements `Semiring` (and hence bridges to a `SemiringConfig` via
+/// `FixedConfig`) but has zero-cost operations. Can be used in other contexts
 /// where operations on expression should be ignored.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
 pub struct DummySemiring;
@@ -81,6 +80,14 @@ impl_checked_op!(CheckedAdd, checked_add);
 impl_checked_op!(CheckedSub, checked_sub);
 impl_checked_op!(CheckedMul, checked_mul);
 
+impl Pow<u32> for DummySemiring {
+    type Output = Self;
+
+    fn pow(self, _rhs: u32) -> Self::Output {
+        DummySemiring
+    }
+}
+
 impl Sum for DummySemiring {
     #[inline(always)]
     fn sum<I: Iterator<Item = Self>>(_iter: I) -> Self {
@@ -133,18 +140,11 @@ impl ConstOne for DummySemiring {
     const ONE: Self = DummySemiring;
 }
 
-impl Semiring for DummySemiring {}
-
-impl<T> FromRef<T> for DummySemiring {
-    #[inline(always)]
-    fn from_ref(_value: &T) -> Self {
+impl From<bool> for DummySemiring {
+    fn from(_value: bool) -> Self {
         DummySemiring
     }
 }
 
-impl<T> MulByScalar<&T> for DummySemiring {
-    #[inline(always)]
-    fn mul_by_scalar<const CHECKED: bool>(&self, _rhs: &T) -> Option<Self> {
-        Some(DummySemiring)
-    }
-}
+pub type DummySemiringConfig = FixedConfig<DummySemiring>;
+pub static DUMMY_SEMIRING_CONFIG: FixedConfig<DummySemiring> = FixedConfig::const_default();

@@ -1,7 +1,8 @@
 use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use num_traits::CheckedAdd;
-use std::{fmt::Debug, marker::PhantomData, ops::AddAssign};
+use crypto_primitives::{
+    BaseFieldConfig, FixedConfig, ProjectPrimitiveIntegersWithConfig, SemiringConfig,
+};
+use std::{fmt::Debug, marker::PhantomData};
 use zinc_poly::ConstCoeffBitWidth;
 use zinc_utils::{add, from_ref::FromRef, mul};
 
@@ -90,9 +91,10 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaCode<Zt, Config, REP>
     }
 
     /// Do the actual encoding, as per RAA spec
-    fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
+    fn encode_inner<In, C, Map>(&self, cfg: &C, row: &[In], map: Map) -> Vec<C::Element>
     where
-        Out: CheckedAdd + for<'a> AddAssign<&'a Out> + FromRef<In> + Clone,
+        C: SemiringConfig,
+        Map: Fn(&In) -> C::Element + Clone,
     {
         debug_assert_eq!(
             row.len(),
@@ -100,16 +102,16 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaCode<Zt, Config, REP>
             "Row length must match the code's row length"
         );
 
-        let mut result: Vec<Out> = repeat(row, REP);
+        let mut result: Vec<C::Element> = repeat(row, REP, map);
         if Config::PERMUTE_IN_PLACE {
             shuffle_seeded(&mut result, self.perm_1_seed);
         } else {
             result = clone_shuffled(&result, &self.perm_1);
         }
         if Config::CHECK_FOR_OVERFLOWS {
-            accumulate(&mut result);
+            accumulate(cfg, &mut result);
         } else {
-            accumulate_unchecked(&mut result);
+            accumulate_unchecked(cfg, &mut result);
         }
         if Config::PERMUTE_IN_PLACE {
             shuffle_seeded(&mut result, self.perm_2_seed);
@@ -117,9 +119,9 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaCode<Zt, Config, REP>
             result = clone_shuffled(&result, &self.perm_2);
         }
         if Config::CHECK_FOR_OVERFLOWS {
-            accumulate(&mut result);
+            accumulate(cfg, &mut result);
         } else {
-            accumulate_unchecked(&mut result);
+            accumulate_unchecked(cfg, &mut result);
         }
         debug_assert_eq!(result.len(), self.codeword_len());
         result
@@ -145,18 +147,18 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
     }
 
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
-        self.encode_inner(row)
+        self.encode_inner(&FixedConfig::default(), row, Zt::Cw::from_ref)
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
-        self.encode_inner(row)
+        self.encode_inner(&FixedConfig::default(), row, |v| v.clone())
     }
 
-    fn encode_f<F>(&self, row: &[F]) -> Vec<F>
+    fn encode_f<C>(&self, cfg: &C, row: &[C::Element]) -> Vec<C::Element>
     where
-        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>,
+        C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
     {
-        self.encode_inner(row)
+        self.encode_inner(cfg, row, |v| v.clone())
     }
 }
 
@@ -182,13 +184,15 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Eq for RaaCode<Zt, Confi
 
 /// Repeat the given slice N times, e.g `[1,2,3] => [1,2,3,1,2,3]`
 #[allow(clippy::arithmetic_side_effects)]
-pub(crate) fn repeat<In, Out: FromRef<In> + Clone>(
+#[inline]
+pub(crate) fn repeat<In, Out: Clone>(
     input: &[In],
     repetition_factor: usize,
+    map: impl Fn(&In) -> Out + Clone,
 ) -> Vec<Out> {
     input
         .iter()
-        .map(Out::from_ref)
+        .map(map)
         .cycle()
         .take(input.len() * repetition_factor)
         .collect()
@@ -204,31 +208,23 @@ pub(crate) fn repeat<In, Out: FromRef<In> + Clone>(
 /// 1 1 1 0
 /// 1 1 1 1
 /// ```
-#[allow(clippy::arithmetic_side_effects)] // Clippy is too dumb to realize `i - 1` is safe here
-pub(crate) fn accumulate<I>(input: &mut [I])
-where
-    I: CheckedAdd + Clone,
-{
+pub(crate) fn accumulate<C: SemiringConfig>(cfg: &C, input: &mut [C::Element]) {
     if let Some(first) = input.first().cloned() {
         let mut acc = first;
         for curr in input.iter_mut().skip(1) {
-            acc = add!(*curr, acc, "Accumulation overflow");
+            acc = cfg.checked_add(curr, &acc).expect("Accumulation overflow");
             *curr = acc.clone();
         }
     }
 }
 
-#[allow(clippy::arithmetic_side_effects)]
-pub(crate) fn accumulate_unchecked<I>(input: &mut [I])
-where
-    I: for<'a> AddAssign<&'a I> + Clone,
-{
+pub(crate) fn accumulate_unchecked<C: SemiringConfig>(cfg: &C, input: &mut [C::Element]) {
     if let Some(first) = input.first().cloned() {
         let mut acc = first;
         for i in 1..input.len() {
             // Avoid bound checking
             unsafe {
-                acc += input.get_unchecked(i);
+                cfg.add_assign(&mut acc, input.get_unchecked(i));
                 *input.get_unchecked_mut(i) = acc.clone();
             };
         }
@@ -244,13 +240,12 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::clone_on_copy)]
 mod tests {
-    use crypto_bigint::U64;
-    use crypto_primitives::crypto_bigint_int::Int;
-    use num_traits::Zero;
-
     use super::*;
     use crate::{code::LinearCode, pcs::test_utils::TestZipTypes, utils::shuffle_seeded};
+    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_uint::U64};
+    use num_traits::Zero;
 
     const REPETITION_FACTOR: usize = 4;
 
@@ -269,6 +264,12 @@ mod tests {
     {
         const PERMUTE_IN_PLACE: bool = PERMUTE_IN_PLACE;
         const CHECK_FOR_OVERFLOWS: bool = CHECK_FOR_OVERFLOWS;
+    }
+
+    macro_rules! cfg {
+        () => {
+            &FixedConfig::default()
+        };
     }
 
     macro_rules! test_raa {
@@ -294,7 +295,7 @@ mod tests {
 
         let repetition_factor = 3;
 
-        let repeated_output = repeat::<_, I>(&input, repetition_factor);
+        let repeated_output = repeat::<_, I>(&input, repetition_factor, |v| v.clone());
 
         let expected_output: Vec<_> = [10, 20, 10, 20, 10, 20].into_iter().map(I::from).collect();
         assert_eq!(
@@ -303,10 +304,10 @@ mod tests {
         );
 
         let empty_input: Vec<I> = vec![];
-        let repeated_empty = repeat::<_, I>(&empty_input, 5);
+        let repeated_empty = repeat::<_, I>(&empty_input, 5, |v| v.clone());
         assert!(repeated_empty.is_empty(), "Failed on empty input vector");
 
-        let repeated_once = repeat::<_, I>(&input, 1);
+        let repeated_once = repeat::<_, I>(&input, 1, |v| v.clone());
         assert_eq!(repeated_once, input, "Failed on repetition factor of 1");
     }
 
@@ -315,26 +316,26 @@ mod tests {
         type I = Int<N>;
         let mut input1: Vec<I> = [1, 2, 3, 4].into_iter().map(I::from).collect();
         let expected1: Vec<I> = [1, 3, 6, 10].into_iter().map(I::from).collect();
-        accumulate(&mut input1);
+        accumulate(cfg!(), &mut input1);
         assert_eq!(input1, expected1, "Failed on positive integers");
 
         let mut input1: Vec<I> = [1, 2, 3, 4].into_iter().map(I::from).collect();
-        accumulate_unchecked(&mut input1);
+        accumulate_unchecked(cfg!(), &mut input1);
         assert_eq!(input1, expected1, "Failed on positive integers");
 
         let mut input2: Vec<I> = [5, 0, 2, 0].into_iter().map(I::from).collect();
         let expected2: Vec<I> = [5, 5, 7, 7].into_iter().map(I::from).collect();
-        accumulate(&mut input2);
+        accumulate(cfg!(), &mut input2);
         assert_eq!(input2, expected2, "Failed on vector with zeros");
 
         let mut input3: Vec<I> = [-1, 5, -10, 2].into_iter().map(I::from).collect();
         let expected3: Vec<I> = [-1, 4, -6, -4].into_iter().map(I::from).collect();
-        accumulate(&mut input3);
+        accumulate(cfg!(), &mut input3);
         assert_eq!(input3, expected3, "Failed on vector with negative numbers");
 
         let mut empty_input: Vec<I> = vec![];
         let expected_empty: Vec<I> = vec![];
-        accumulate(&mut empty_input);
+        accumulate(cfg!(), &mut empty_input);
         assert_eq!(empty_input, expected_empty, "Failed on empty vector");
     }
 
@@ -372,7 +373,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::arithmetic_side_effects)] // False alert
     fn encoding_preserves_linearity() {
         test_raa!(TestZipTypes<N, K, M>, 4, |code: &RaaCode<_, _, _>| {
             let a: Vec<Int<N>> = (1..=4).map(Int::<N>::from).collect();

@@ -1,4 +1,4 @@
-use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean};
+use crypto_primitives::{BaseFieldConfig, ProjectElementWithConfig, boolean::Boolean};
 use itertools::Itertools;
 use num_traits::Zero;
 use zinc_poly::{
@@ -33,14 +33,14 @@ pub trait FoldTrace<From, To> {
     /// Returns the value `<alphas, bar_u_folded>` where `bar_u_folded` is the
     /// column's lifted-eval polynomial after applying `k` chained 2x splits
     /// and pinning the appended boolean variables to `(gamma_1, ..., gamma_k)`.
-    fn fold_eval_claim<F, A>(
-        bar_u_coeffs: &[F],
+    fn fold_eval_claim<C, A>(
+        bar_u_coeffs: &[C::Element],
         alphas: &[A],
-        folding_challenges: &[F],
-        field_cfg: &F::Config,
-    ) -> F
+        folding_challenges: &[C::Element],
+        field_cfg: &C,
+    ) -> C::Element
     where
-        F: PrimeField + for<'a> FromWithConfig<&'a A>,
+        C: BaseFieldConfig + ProjectElementWithConfig<A>,
     {
         // MSB-first contiguous chained-2x-split chunking.
         //
@@ -65,24 +65,18 @@ pub trait FoldTrace<From, To> {
         );
 
         let chunk_size = alphas.len();
-        let alphas = alphas
-            .iter()
-            .map(|a| F::from_with_cfg(a, field_cfg))
-            .collect_vec();
-
-        let zero = F::zero_with_cfg(field_cfg);
-        let one = F::one_with_cfg(field_cfg);
+        let alphas = alphas.iter().map(|a| field_cfg.project(a)).collect_vec();
 
         // Step 1: Per-chunk inner products
         //   P_i = sum_{j < chunk_size} alphas[j] * bar_u_coeffs[i*chunk_size + j],
         // Trimmed (missing-trailing-zero) coefficients are treated as zero.
-        let chunk_evals: Vec<F> = (0..Self::FOLDING_FACTOR)
+        let chunk_evals: Vec<C::Element> = (0..Self::FOLDING_FACTOR)
             .map(|i| {
                 let start = mul!(i, chunk_size);
-                let mut acc = zero.clone();
+                let mut acc = field_cfg.zero();
                 for (j, alpha) in alphas.iter().enumerate() {
                     if let Some(coeff) = bar_u_coeffs.get(add!(start, j)) {
-                        acc += alpha.clone() * coeff;
+                        field_cfg.add_assign(&mut acc, &field_cfg.mul(alpha, coeff));
                     }
                 }
                 acc
@@ -91,7 +85,7 @@ pub trait FoldTrace<From, To> {
 
         // Step 2: MLE-evaluate the per-chunk inner products at folding_challenges,
         // MSB-first (gamma_1 = high bit, peeled first).
-        mle_eval_msb_first(chunk_evals, folding_challenges, &one)
+        mle_eval_msb_first(field_cfg, chunk_evals, folding_challenges)
     }
 }
 
@@ -227,7 +221,11 @@ fn split_binary_poly_mle_u64<const D: usize, const HALF_D: usize>(
 /// indexed) at point `gammas`. Peels `gammas[0]` (the high bit, equivalently
 /// the first sampled challenge) at each recursive step, splitting `values`
 /// into a lower half (high bit = 0) and an upper half (high bit = 1).
-fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], one: &F) -> F {
+fn mle_eval_msb_first<C: BaseFieldConfig>(
+    cfg: &C,
+    values: Vec<C::Element>,
+    gammas: &[C::Element],
+) -> C::Element {
     if gammas.is_empty() {
         debug_assert_eq!(values.len(), 1);
         return values.into_iter().next().expect("non-empty values");
@@ -236,23 +234,21 @@ fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], one: &F) -> F
 
     let half = values.len() >> 1;
     let g = &gammas[0];
-    let one_minus_g = one.clone() - g;
+    let one_minus_g = cfg.sub(&cfg.one(), g);
 
-    let mut next: Vec<F> = Vec::with_capacity(half);
+    let mut next: Vec<C::Element> = Vec::with_capacity(half);
     for i in 0..half {
-        let mut lo = one_minus_g.clone();
-        lo *= &values[i];
-        let mut hi = g.clone();
-        hi *= &values[add!(i, half)];
-        lo += &hi;
+        let mut lo = cfg.mul(&one_minus_g, &values[i]);
+        cfg.add_assign(&mut lo, &cfg.mul(g, &values[add!(i, half)]));
         next.push(lo);
     }
-    mle_eval_msb_first(next, &gammas[1..], one)
+    mle_eval_msb_first(cfg, next, &gammas[1..])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crypto_primitives::Wrapper;
     use rand::prelude::*;
     use zinc_transcript::traits::GenTranscribable;
 
@@ -304,7 +300,7 @@ mod tests {
             // Compare bits in two different ways - directly, as via iterator
 
             for i in 0..HALF_D {
-                let r_bit = r[i].inner();
+                let r_bit = *r[i].inner();
                 let u_bit = ((*u.inner()) >> i) & 1 != 0;
                 assert_eq!(
                     r_bit, u_bit,
@@ -316,7 +312,7 @@ mod tests {
                 match pair {
                     itertools::EitherOrBoth::Both(r_bit, u_bit) => {
                         assert_eq!(
-                            r_bit.inner(),
+                            *r_bit.inner(),
                             *u_bit,
                             "mismatch at output entry {idx}, coefficient bit {i}",
                         );

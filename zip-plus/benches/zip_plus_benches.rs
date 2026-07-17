@@ -6,9 +6,11 @@ mod zip_common;
 use zip_common::*;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use crypto_bigint::U64;
 use crypto_primitives::{
-    FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
+    Semiring,
+    boolean::Boolean,
+    crypto_bigint_int::Int,
+    crypto_bigint_uint::{U64, Uint},
 };
 use std::marker::PhantomData;
 use zinc_poly::univariate::{
@@ -41,14 +43,7 @@ struct BenchZipPlusTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>)
 
 impl<CwCoeff, const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypes<CwCoeff, D_PLUS_ONE>
 where
-    CwCoeff: ConstTranscribable
-        + Copy
-        + Default
-        + FromRef<Boolean>
-        + Named
-        + FixedSemiring
-        + Send
-        + Sync,
+    CwCoeff: Semiring + ConstTranscribable + FromRef<Boolean> + Named + Copy,
     Int<5>: FromRef<CwCoeff>,
 {
     const NUM_COLUMN_OPENINGS: usize = 100;
@@ -61,8 +56,14 @@ where
     type CombR = Int<{ INT_LIMBS * 5 }>;
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
     type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
-    type CombDotChal =
-        DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        (),
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProduct,
+        D_PLUS_ONE,
+    >;
     type ArrCombRDotChal = MBSInnerProduct;
 }
 

@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
-use crypto_primitives::Semiring;
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
+use crypto_primitives::FixedConfig;
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Pow, Zero};
 use zinc_utils::add;
 
 /// Compute the maximum number of multiplicands
@@ -43,6 +43,7 @@ pub fn count_constraint_degrees<U: Uair>() -> ConstraintDegreeCollector {
 
     U::constrain_general(
         &mut dc,
+        &FixedConfig::<DegreeCountingSemiring>::default(),
         up_row,
         down_row,
         |_| DegreeCountingSemiring::scalar(),
@@ -83,7 +84,7 @@ impl ConstraintBuilder for ConstraintDegreeCollector {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct DegreeCountingSemiring(usize);
 
 impl DegreeCountingSemiring {
@@ -203,4 +204,66 @@ impl CheckedMul for DegreeCountingSemiring {
     }
 }
 
-impl Semiring for DegreeCountingSemiring {}
+impl Zero for DegreeCountingSemiring {
+    #[inline(always)]
+    fn zero() -> Self {
+        Self::scalar()
+    }
+
+    #[inline(always)]
+    fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl One for DegreeCountingSemiring {
+    #[inline(always)]
+    fn one() -> Self {
+        Self::scalar()
+    }
+}
+
+impl From<bool> for DegreeCountingSemiring {
+    #[inline(always)]
+    fn from(_value: bool) -> Self {
+        Self::scalar()
+    }
+}
+
+impl Pow<u32> for DegreeCountingSemiring {
+    type Output = Self;
+
+    #[allow(clippy::arithmetic_side_effects)] // degrees are small
+    #[inline(always)]
+    fn pow(self, exp: u32) -> Self {
+        DegreeCountingSemiring(self.0 * exp as usize)
+    }
+}
+
+impl std::iter::Sum for DegreeCountingSemiring {
+    #[allow(clippy::arithmetic_side_effects)] // degrees are small
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::scalar(), |acc, x| acc + x)
+    }
+}
+
+impl<'a> std::iter::Sum<&'a Self> for DegreeCountingSemiring {
+    #[allow(clippy::arithmetic_side_effects)] // degrees are small
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Self::scalar(), |acc, x| acc + x)
+    }
+}
+
+impl std::iter::Product for DegreeCountingSemiring {
+    #[allow(clippy::arithmetic_side_effects)] // degrees are small
+    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::scalar(), |acc, x| acc * x)
+    }
+}
+
+impl<'a> std::iter::Product<&'a Self> for DegreeCountingSemiring {
+    #[allow(clippy::arithmetic_side_effects)] // degrees are small
+    fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Self::scalar(), |acc, x| acc * x)
+    }
+}

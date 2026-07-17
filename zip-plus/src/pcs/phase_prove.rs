@@ -7,17 +7,16 @@ use crate::{
     },
     pcs_transcript::PcsProverTranscript,
 };
-use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
+use crypto_primitives::{BaseFieldConfig, ProjectElementWithConfig};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{
     UNCHECKED, cfg_chunks, cfg_iter, cfg_iter_mut,
-    from_ref::FromRef,
-    inner_product::{InnerProduct, MBSInnerProduct},
+    inner_product::{FieldInnerProduct, InnerProduct},
     mul_by_scalar::MulByScalar,
 };
 
@@ -82,27 +81,27 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ///   variables than `pp` supports.
     /// - Returns `ZipError::OverflowError` (when `CHECK_FOR_OVERFLOW` is true)
     ///   if intermediate CombR sums exceed the integer precision.
-    pub fn prove<F, const CHECK_FOR_OVERFLOW: bool>(
+    pub fn prove<C, const CHECK_FOR_OVERFLOW: bool>(
         transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
         point: &[Zt::Pt],
         commit_hint: &ZipPlusHint<Zt::Cw>,
-        field_cfg: &F::Config,
-    ) -> Result<F, ZipError>
+        field_cfg: &C,
+    ) -> Result<C::Element, ZipError>
     where
-        F: PrimeField
-            + for<'a> FromWithConfig<&'a Zt::CombR>
-            + for<'a> FromWithConfig<&'a Zt::Pt>
-            + for<'a> MulByScalar<&'a F>
-            + FromRef<F>,
-        F::Integer: Transcribable,
+        C: BaseFieldConfig
+            + ProjectElementWithConfig<Zt::Pt>
+            + ProjectElementWithConfig<Zt::CombR>
+            + Sync,
+        C::Element: ConstTranscribable,
+        (): MulByScalar<Zt::CombR, Zt::Chal>,
     {
         let point = point
             .iter()
-            .map(|v| v.into_with_cfg(field_cfg))
-            .collect::<Vec<F>>();
-        Self::prove_f::<F, CHECK_FOR_OVERFLOW>(
+            .map(|v| field_cfg.project(v))
+            .collect::<Vec<C::Element>>();
+        Self::prove_f::<C, CHECK_FOR_OVERFLOW>(
             transcript,
             pp,
             polys,
@@ -115,20 +114,18 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// See [`Self::prove`] for details.
     /// This version takes the evaluation point already mapped to the field
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn prove_f<F, const CHECK_FOR_OVERFLOW: bool>(
+    pub fn prove_f<C, const CHECK_FOR_OVERFLOW: bool>(
         transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
-        point: &[F],
+        point: &[C::Element],
         commit_hint: &ZipPlusHint<Zt::Cw>,
-        field_cfg: &F::Config,
-    ) -> Result<F, ZipError>
+        field_cfg: &C,
+    ) -> Result<C::Element, ZipError>
     where
-        F: PrimeField
-            + for<'a> FromWithConfig<&'a Zt::CombR>
-            + for<'a> MulByScalar<&'a F>
-            + FromRef<F>,
-        F::Integer: Transcribable,
+        C: BaseFieldConfig + ProjectElementWithConfig<Zt::CombR> + Sync,
+        C::Element: ConstTranscribable,
+        (): MulByScalar<Zt::CombR, Zt::Chal>,
     {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>(
@@ -146,7 +143,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // TODO Lift q0, q1 back to int and take following dot products on ints instead
         // of MBSInnerProduct in field (see comboned row) We prove evaluations
         // over the field, so integers need to be mapped to field elements first
-        let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
+        let (q_0, q_1) = point_to_tensor(field_cfg, point, num_rows)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys
@@ -161,6 +158,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 cfg_iter!(poly.evaluations)
                     .map(|eval| {
                         Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                            &(),
                             eval,
                             &alphas,
                             Zt::CombR::ZERO,
@@ -171,29 +169,40 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             })
             .try_collect()?;
 
-        let zero_f = F::zero_with_cfg(field_cfg);
+        let zero_f = field_cfg.zero();
 
         // Compute per-polynomial row dot products, then sum across polynomials.
         let b = {
-            let per_poly_b: Vec<Vec<F>> = cfg_iter!(polys_as_comb_r)
+            let per_poly_b: Vec<Vec<C::Element>> = cfg_iter!(polys_as_comb_r)
                 .map(|poly_comb_r| {
                     cfg_chunks!(poly_comb_r, row_len)
-                        .map(|row| MBSInnerProduct::inner_product_field(row, &q_1, zero_f.clone()))
-                        .collect::<Result<Vec<F>, _>>()
+                        .map(|row| {
+                            FieldInnerProduct::inner_product::<UNCHECKED>(
+                                field_cfg,
+                                &q_1,
+                                row,
+                                zero_f.clone(),
+                            )
+                        })
+                        .collect::<Result<Vec<C::Element>, _>>()
                 })
                 .collect::<Result<_, _>>()?;
 
             let mut b = vec![zero_f.clone(); num_rows];
             for poly_b in &per_poly_b {
-                b.iter_mut().zip(poly_b).for_each(|(a, d)| *a += d);
+                b.iter_mut()
+                    .zip(poly_b)
+                    .for_each(|(a, d)| field_cfg.add_assign(a, d));
             }
             b
         };
 
         transcript.write_field_elements(&b)?;
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
-        // It is safe to use inner_product_unchecked because we're in a field.
-        let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f)?;
+        let eval = q_0.iter().zip(&b).fold(zero_f, |mut acc, (l, r)| {
+            field_cfg.add_assign(&mut acc, &field_cfg.mul(l, r));
+            acc
+        });
 
         // Matrix-vector product over the flat poly_comb_r layout:
         // Each poly is a row-major (num_rows x row_len) matrix, and coeffs is the
@@ -221,8 +230,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                             .step_by(row_len)
                             .zip(coeffs.iter())
                         {
-                            let scaled: Zt::CombR = eval
-                                .mul_by_scalar::<CHECK_FOR_OVERFLOW>(coeff)
+                            let scaled: Zt::CombR = ()
+                                .mul_by_scalar::<CHECK_FOR_OVERFLOW>(eval.clone(), coeff)
                                 .expect("Cannot multiply evaluation by coefficient");
                             if CHECK_FOR_OVERFLOW {
                                 *acc = zinc_utils::add!(
@@ -252,24 +261,23 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
     /// See [`Self::prove`] for details.
     #[inline(always)]
-    pub fn prove_single<F, const CHECK_FOR_OVERFLOW: bool>(
+    pub fn prove_single<C, const CHECK_FOR_OVERFLOW: bool>(
         transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         poly: &DenseMultilinearExtension<Zt::Eval>,
         point: &[Zt::Pt],
         commit_hint: &ZipPlusHint<Zt::Cw>,
-        field_cfg: &F::Config,
-    ) -> Result<F, ZipError>
+        field_cfg: &C,
+    ) -> Result<C::Element, ZipError>
     where
-        F: PrimeField
-            + for<'a> FromWithConfig<&'a Zt::CombR>
-            + for<'a> FromWithConfig<&'a Zt::Chal>
-            + for<'a> FromWithConfig<&'a Zt::Pt>
-            + for<'a> MulByScalar<&'a F>
-            + FromRef<F>,
-        F::Integer: FromRef<Zt::Fmod> + Transcribable,
+        C: BaseFieldConfig
+            + ProjectElementWithConfig<Zt::Pt>
+            + ProjectElementWithConfig<Zt::CombR>
+            + Sync,
+        C::Element: ConstTranscribable,
+        (): MulByScalar<Zt::CombR, Zt::Chal>,
     {
-        Self::prove::<F, CHECK_FOR_OVERFLOW>(
+        Self::prove::<C, CHECK_FOR_OVERFLOW>(
             transcript,
             pp,
             std::slice::from_ref(poly),
@@ -317,11 +325,11 @@ mod tests {
         },
         pcs_transcript::PcsProverTranscript,
     };
-    use crypto_bigint::U64;
     use crypto_primitives::{
-        IntoWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+        FixedConfig, ProjectElementWithConfig, crypto_bigint_int::Int,
+        crypto_bigint_monty::MontyField, crypto_bigint_uint::U64,
     };
-    use num_traits::{ConstOne, Zero};
+    use num_traits::ConstOne;
     use zinc_poly::mle::DenseMultilinearExtension;
     use zinc_utils::{CHECKED, from_ref::FromRef};
 
@@ -332,7 +340,7 @@ mod tests {
     const M: usize = INT_LIMBS * 8;
     const DEGREE_PLUS_ONE: usize = 3;
 
-    type F = MontyField<K>;
+    type Cfg = MontyField<K>;
 
     type Zt = TestZipTypes<N, K, M>;
     type C = IprsCode<Zt, TestIprsConfig, REP_FACTOR, CHECKED>;
@@ -355,9 +363,9 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
-        let result = TestZip::prove_single::<F, CHECKED>(
+        let result = TestZip::prove_single::<Cfg, CHECKED>(
             &mut transcript,
             &pp,
             &poly,
@@ -376,9 +384,9 @@ mod tests {
         let point: Vec<i128> = (0..num_vars).map(|i| i as i128 + 2).collect();
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
-        let result = TestPolyZip::prove_single::<F, CHECKED>(
+        let result = TestPolyZip::prove_single::<Cfg, CHECKED>(
             &mut transcript,
             &pp,
             &poly,
@@ -410,9 +418,9 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
-        let result = TestZip::prove_single::<F, CHECKED>(
+        let result = TestZip::prove_single::<Cfg, CHECKED>(
             &mut transcript,
             &pp,
             &poly,
@@ -436,9 +444,9 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
-        let result = TestZip::prove_single::<F, CHECKED>(
+        let result = TestZip::prove_single::<Cfg, CHECKED>(
             &mut transcript,
             &pp,
             &oversized_poly,
@@ -459,9 +467,9 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
-        let eval_f = TestZip::prove_single::<F, CHECKED>(
+        let eval_f = TestZip::prove_single::<Cfg, CHECKED>(
             &mut transcript,
             &pp,
             &poly,
@@ -473,8 +481,11 @@ mod tests {
 
         let poly_wide: DenseMultilinearExtension<Int<M>> =
             poly.evaluations.iter().map(Int::from_ref).collect();
-        let expected_int = poly_wide.evaluate(&point, Zero::zero()).unwrap();
-        let expected_f: F = (&expected_int).into_with_cfg(&field_cfg);
+        let point_wide: Vec<Int<M>> = point.iter().map(Int::from_ref).collect();
+        let expected_int = poly_wide
+            .evaluate(&FixedConfig::default(), &point_wide)
+            .unwrap();
+        let expected_f = field_cfg.project(&expected_int);
 
         assert_eq!(eval_f, expected_f);
     }
@@ -504,10 +515,10 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
         let result =
-            TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
+            TestZip::prove::<Cfg, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
         assert!(result.is_ok())
     }
 
@@ -521,10 +532,10 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
         let result =
-            TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
+            TestZip::prove::<Cfg, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
         assert!(result.is_ok())
     }
 
@@ -547,9 +558,9 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
-        let result = TestZip::prove::<F, CHECKED>(
+        let result = TestZip::prove::<Cfg, CHECKED>(
             &mut transcript,
             &pp,
             &polys,
@@ -573,10 +584,10 @@ mod tests {
         let point = test_point(num_vars);
 
         let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
-        let field_cfg = get_field_cfg::<Zt, F>(&mut transcript.fs_transcript);
+        let field_cfg = get_field_cfg::<Zt, Cfg>(&mut transcript.fs_transcript);
 
         let result =
-            TestZip::prove::<F, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
+            TestZip::prove::<Cfg, CHECKED>(&mut transcript, &pp, &polys, &point, &hint, &field_cfg);
         assert!(result.is_err());
     }
 }

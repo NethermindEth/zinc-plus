@@ -9,17 +9,18 @@ pub mod ideal;
 pub mod ideal_collector;
 pub mod lookup_types;
 
-use crypto_primitives::{PrimeField, Semiring};
+use crate::ideal::Ideal;
+use crypto_primitives::{Semiring, SemiringConfig, SetElement};
 use std::borrow::Cow;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::{DynamicPolynomial, HasDynamicPolynomialConfig},
     },
 };
-use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, sub};
-
-use crate::ideal::{Ideal, IdealCheck};
+use zinc_utils::{add, sub};
 
 pub use lookup_types::{LookupColumnSpec, LookupTableType};
 
@@ -27,12 +28,12 @@ pub use lookup_types::{LookupColumnSpec, LookupTableType};
 /// In essence it allows to create constraints modulo ideals.
 pub trait ConstraintBuilder {
     /// The expressions the constraint builder operates on.
-    /// It is opaque from the PoV of an AIR apart from
-    /// the fact that arithmetic operations are available on it
-    /// and one can check if an expression is in an ideal.
-    type Expr: Semiring;
+    /// It is opaque from the PoV of an AIR: arithmetic operations on it are
+    /// provided by the expression config passed to
+    /// [`Uair::constrain_general`] alongside the builder.
+    type Expr: SetElement;
     /// The type of ideals used by the constraint builder.
-    type Ideal: Ideal + IdealCheck<Self::Expr>;
+    type Ideal: Ideal;
     /// Ideals living over $F_{q_i}[X]$ for the prime tuple declared by
     /// the surrounding [`UairSignature::primes`]. A single
     /// `ConstraintBuilder` shares one runtime type for all primes; the prime
@@ -40,7 +41,7 @@ pub trait ConstraintBuilder {
     /// [`ConstraintBuilder::assert_in_fq_ideal`]. Builders that don't care
     /// about $F_q[X]$-constraints (counters, collectors, etc.) set
     /// this to `ImpossibleIdeal`.
-    type FqIdeal: Ideal + IdealCheck<Self::Expr>;
+    type FqIdeal: Ideal;
 
     /// Add a constraint saying that `expr` belongs to the ideal `ideal`.
     fn assert_in_ideal(&mut self, expr: Self::Expr, ideal: &Self::Ideal);
@@ -150,14 +151,15 @@ impl BitOp {
     }
 
     /// Apply the bit operation to a projected bit-polynomial cell.
-    pub fn transform<F: PrimeField, const D: usize>(
+    pub fn transform<S: SemiringConfig, const D: usize>(
         &self,
-        source: &DynamicPolynomialF<F>,
-        field_cfg: &F::Config,
-    ) -> DynamicPolynomialF<F> {
+        source: &DynamicPolynomial<S::Element>,
+        cfg: &S,
+    ) -> DynamicPolynomial<S::Element> {
+        let poly_cfg = cfg.dyn_poly_cfg();
         match self {
-            BitOp::Rot(c) => source.rotate_right::<D>(*c, field_cfg),
-            BitOp::ShR(c) => source.shr::<D>(*c, field_cfg),
+            BitOp::Rot(c) => poly_cfg.rotate_right::<D>(source, *c),
+            BitOp::ShR(c) => poly_cfg.shr::<D>(source, *c),
         }
     }
 }
@@ -794,6 +796,11 @@ pub trait Uair: Clone {
     /// - `b`: a builder encapsulating the constraint storing logic. Its type
     ///   `B` has to have compatible `B::Ideal` with the `Self::Ideal`, i.e. it
     ///   must implement `FromRef<Self::Ideal>` trait.
+    /// - `expr_cfg`: the [`SemiringConfig`] providing arithmetic operations on
+    ///   `B::Expr`. Per-family builder runs pass the family's config (e.g. a
+    ///   [`zinc_poly::univariate::dynamic::DynamicPolynomialConfig`] over the
+    ///   family's field, or the field config itself); static analyses pass a
+    ///   `FixedConfig`.
     /// - `up`: a `TraceRow` of expressions representing the current row of
     ///   UAIR.
     /// - `down`: a `TraceRow` of expressions representing the shifted (down)
@@ -811,40 +818,23 @@ pub trait Uair: Clone {
     ///   `B::FqIdeal` for the new $F_{q_i}[X]$-ideal-membership family emitted
     ///   via [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs without
     ///   $F_q[X]$-constraints can ignore this closure.
-    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+    #[allow(clippy::too_many_arguments)]
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
-        up: TraceRow<B::Expr>,
-        down: TraceRow<B::Expr>,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        down: TraceRow<C::Element>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
         fq_ideal_from_ref: IFqFromR,
     ) where
-        B: ConstraintBuilder,
-        FromR: Fn(&Self::Scalar) -> B::Expr,
-        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        FromR: Fn(&Self::Scalar) -> C::Element,
+        MulByScalar: Fn(&C::Element, &Self::Scalar) -> Option<C::Element>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
         IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal;
-
-    // Same as `constrain_general` but `from_ref` and `mbs`
-    // come from the trait implementations.
-    fn constrain<B>(b: &mut B, up: TraceRow<B::Expr>, down: TraceRow<B::Expr>)
-    where
-        B: ConstraintBuilder,
-        B::Expr: FromRef<Self::Scalar> + for<'b> MulByScalar<&'b Self::Scalar>,
-        B::Ideal: FromRef<Self::Ideal>,
-        B::FqIdeal: FromRef<Self::FqIdeal>,
-    {
-        Self::constrain_general(
-            b,
-            up,
-            down,
-            B::Expr::from_ref,
-            |x, y| B::Expr::mul_by_scalar::<UNCHECKED>(x, y),
-            B::Ideal::from_ref,
-            B::FqIdeal::from_ref,
-        )
-    }
 }
 
 #[cfg(test)]

@@ -6,40 +6,37 @@ use std::hint::black_box;
 use criterion::{
     AxisScale, BenchmarkId, Criterion, PlotConfiguration, criterion_group, criterion_main,
 };
-use crypto_bigint::{Odd, modular::FixedMontyParams};
-use crypto_primitives::{FromWithConfig, crypto_bigint_monty::F256};
+use crypto_primitives::{
+    BaseFieldConfig, ProjectElementWithConfig, crypto_bigint_monty::MontyField,
+    crypto_bigint_uint::Uint,
+};
 use itertools::Itertools;
-use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
+use zinc_poly::univariate::nat_evaluation::NatEvaluatedPoly;
 
 const LIMBS: usize = 4;
 
-type F = F256;
+type F = MontyField<LIMBS>;
 
-fn bench_config() -> FixedMontyParams<LIMBS> {
-    let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
-        "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
-    );
-    let modulus = Odd::new(modulus).expect("modulus should be odd");
-    FixedMontyParams::new(modulus)
+fn bench_config() -> F {
+    let modulus =
+        Uint::from_be_hex("0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33");
+    F::new(&modulus).expect("modulus should be a valid odd prime")
 }
 
 #[allow(clippy::arithmetic_side_effects)]
 fn bench_evaluation(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    let field_elem = F::from_with_cfg(695962179703_u64, &bench_config());
+    let cfg = bench_config();
+    let field_elem = cfg.project(&695962179703_u64);
 
     for i in 0..16 {
-        let poly = NatEvaluatedPoly::new(
-            (0..(1 << i))
-                .map(|x| F::from_with_cfg(x, &bench_config()))
-                .collect_vec(),
-        );
+        let poly = NatEvaluatedPoly::new((0..(1u64 << i)).map(|x| cfg.project(&x)).collect_vec());
 
         group.bench_with_input(
             BenchmarkId::new("Evaluate", format!("deg={}", 1 << i)),
             &field_elem,
             |b, field_elem| {
                 b.iter(|| {
-                    let _ = black_box(poly.evaluate_at_point(field_elem));
+                    let _ = black_box(poly.evaluate_at_point(&cfg, field_elem));
                 });
             },
         );
