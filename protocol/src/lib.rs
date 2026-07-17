@@ -848,10 +848,11 @@ mod tests {
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, BitOpRotUair,
-        EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal,
-        ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
-        TestUairSimpleMultiplication,
+        BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair, BinLookup16Uair,
+        BinaryDecompositionUair,
+        BitOpRotUair, EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair,
+        Sha256Ideal, ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts,
+        TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         ideal::{DegreeOneIdeal, rotation::RotationIdeal},
@@ -1176,6 +1177,72 @@ mod tests {
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test of the wired GKR-LogUp lookup path: 16 binary_poly
+    /// columns, all declared as a single BitPoly{32,8} lookup group
+    /// (n_groups = 1 → step-7 two-open fast path). Exercises step4b_lookup
+    /// (prove + verify), the chunk-lift parent binding, the proof
+    /// serialization round-trip, and the G=1 bin opens at r_inner + r_0.
+    #[test]
+    fn test_e2e_bin_lookup16() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BinLookup16Uair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Exercises the >=2-group step-7 bin multipoint reducer: 16 columns
+    /// split into a BitPoly{32,8} group (12 cols) and a BitPoly{32,16}
+    /// group (4 cols) → n_groups = 2. Validates the wired
+    /// BinMultipointReducer prove/verify plus the verifier-side P(r*)
+    /// cross-check (the reducer path that G=1 skips).
+    #[test]
+    fn test_e2e_bin_lookup16_multigroup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BinLookup16MultiGroupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Negative test: corrupting a lookup chunk-lift coefficient must make
+    /// verification fail (the step-4b GKR leaf / parent-binding check
+    /// rejects it).
+    #[test]
+    fn test_e2e_bin_lookup16_tampered_chunk_lift_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BinLookup16Uair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let c = &mut proof.lookup_proof.groups[0].chunk_lifts[0][0].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(res.is_err(), "verifier must reject a tampered lookup chunk lift");
+            },
         );
     }
 
