@@ -848,8 +848,8 @@ mod tests {
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
-        BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair, BinLookup16Uair,
-        BinaryDecompositionUair,
+        BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
+        BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair,
         BitOpRotUair, EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair,
         Sha256Ideal, ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts,
         TestUairNoMultiplication, TestUairSimpleMultiplication,
@@ -1244,6 +1244,86 @@ mod tests {
                 assert!(res.is_err(), "verifier must reject a tampered lookup chunk lift");
             },
         );
+    }
+
+    /// Opt-in A/B benchmark isolating the GKR-LogUp lookup cost: the
+    /// lookup-bearing BinLookup16 UAIRs (G=1 fast path, G=2 reducer path)
+    /// vs the no-lookup control with the identical 16-column layout.
+    /// Reports prove/verify wall-time (min of reps) and serialized proof
+    /// size. Run with:
+    ///   cargo test -p zinc-protocol --release -- --ignored --nocapture bench_bin_lookup16_ab
+    #[test]
+    #[ignore]
+    fn bench_bin_lookup16_ab() {
+        macro_rules! time_uair {
+            ($U:ty, $nv:expr, $reps:expr) => {{
+                let num_vars: usize = $nv;
+                let mut rng = rng();
+                let pp = setup_pp::<TestZincTypesIprs>(
+                    num_vars,
+                    (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+                );
+                let trace =
+                    <$U as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+                let sig = <$U as Uair>::signature();
+                let public_trace = trace.public(&sig);
+
+                let mut best_prove = f64::MAX;
+                let mut proof_bytes = 0usize;
+                let mut proof_keep: Option<Proof<F>> = None;
+                for _ in 0..$reps {
+                    let t = std::time::Instant::now();
+                    let proof = ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::prove::<
+                        false,
+                        CHECKED,
+                    >(&pp, &trace, num_vars, project_scalar_fn)
+                    .expect("prove");
+                    best_prove = best_prove.min(t.elapsed().as_secs_f64() * 1e3);
+                    proof_bytes = proof.get_num_bytes();
+                    proof_keep = Some(proof);
+                }
+
+                let mut best_verify = f64::MAX;
+                for _ in 0..$reps {
+                    let proof = proof_keep.clone().expect("proof");
+                    let t = std::time::Instant::now();
+                    ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar_fn,
+                        |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+                    )
+                    .expect("verify");
+                    best_verify = best_verify.min(t.elapsed().as_secs_f64() * 1e3);
+                }
+                (best_prove, best_verify, proof_bytes)
+            }};
+        }
+
+        println!("\n== BinLookup16 lookup A/B (16 bin cols, IPRS, CHECKED, min of reps) ==");
+        for &nv in &[8usize, 10, 12] {
+            let reps = if nv >= 12 { 3 } else { 6 };
+            let (np, nq, nb) = time_uair!(BinLookup16NoLookupUair<ZtInt>, nv, reps);
+            let (lp, lv, lb) = time_uair!(BinLookup16Uair<ZtInt>, nv, reps);
+            let (gp, gv, gb) = time_uair!(BinLookup16MultiGroupUair<ZtInt>, nv, reps);
+            println!("\nnv={nv}  ({} rows)", 1usize << nv);
+            println!("  no-lookup ctl : prove {np:8.2} ms | verify {nq:7.2} ms | proof {nb:7} B");
+            println!(
+                "  lookup  (G=1) : prove {lp:8.2} ms | verify {lv:7.2} ms | proof {lb:7} B   (Δ +{:.2} / +{:.2} ms, +{} B)",
+                lp - np,
+                lv - nq,
+                lb as i64 - nb as i64
+            );
+            println!(
+                "  lookup  (G=2) : prove {gp:8.2} ms | verify {gv:7.2} ms | proof {gb:7} B   (Δ +{:.2} / +{:.2} ms, +{} B, reducer path)",
+                gp - np,
+                gv - nq,
+                gb as i64 - nb as i64
+            );
+        }
+        println!();
     }
 
     /// End-to-end test: TestUairSimpleMultiplication.

@@ -214,6 +214,66 @@ where
     }
 }
 
+/// No-lookup control for [`BinLookup16Uair`]: identical 16-column layout
+/// and trivial constraint but **no lookup specs**. With this UAIR step 4b
+/// early-returns and the step-7 reducer is skipped, so an A/B against the
+/// lookup-bearing variant isolates the lookup machinery's cost.
+#[derive(Clone, Debug)]
+pub struct BinLookup16NoLookupUair<R>(PhantomData<R>);
+
+impl<R> Uair for BinLookup16NoLookupUair<R>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(16, 0, 0);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![], vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        let v = &up.binary_poly[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BinLookup16NoLookupUair<R>
+where
+    R: ConstSemiring + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let cols: Vec<DenseMultilinearExtension<BinaryPoly<32>>> = (0..16)
+            .map(|_| {
+                (0..row_count)
+                    .map(|_| BinaryPoly::<32>::from(rng.next_u32()))
+                    .collect::<DenseMultilinearExtension<BinaryPoly<32>>>()
+            })
+            .collect();
+        UairTrace {
+            binary_poly: cols.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// Multi-group variant of [`BinLookup16Uair`]: 16 witness binary_poly
 /// columns split across TWO lookup groups — 12 cols as `BitPoly{32,8}`
 /// (L=12) and 4 cols as `BitPoly{32,16}` (L=4). n_groups = 2, so step 7
