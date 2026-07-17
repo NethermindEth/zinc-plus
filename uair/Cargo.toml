@@ -17,6 +17,7 @@ num-traits = { workspace = true }
 rayon = { workspace = true, optional = true }
 zinc-poly = { workspace = true }
 zinc-utils = { workspace = true }
+zinc-transcript = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
