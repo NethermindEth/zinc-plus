@@ -1,3 +1,4 @@
+pub mod bin_multipoint_reducer;
 pub mod combined_poly_resolver;
 pub mod ideal_check;
 pub mod lookup;
