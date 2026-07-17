@@ -5,6 +5,9 @@ use crypto_primitives::{
 use num_traits::Zero;
 use std::fmt::Debug;
 use zinc_piop::{
+    bin_multipoint_reducer::{
+        BinClaim as ReducerBinClaim, BinMultipointReducer, Proof as BinReducerProof,
+    },
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::booleanity::{
@@ -12,6 +15,10 @@ use zinc_piop::{
         build_virtual_booleanity_mles, compute_bit_slices_flat,
         compute_shifted_bit_slice_evals_streaming, finalize_booleanity_prover,
         prepare_booleanity_group,
+    },
+    lookup::gkr_logup::{
+        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, combine_chunks,
+        compute_binary_poly_lifts, prove_group,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -27,7 +34,7 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
+    LookupTableType, Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
     degree_counter::count_max_degree,
 };
 use zinc_utils::{
@@ -180,7 +187,25 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     cpr_proof: CombinedPolyResolverProof<F>,
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+}
+
+/// After step 4b (GKR-LogUp lookup). Holds the same fields as
+/// [`ProverSumchecked`] plus the produced lookup proof and the per-group
+/// `r_inner` points that step 7's bin multipoint reducer folds in.
+#[allow(clippy::type_complexity)]
+#[derive(Clone, Debug)]
+pub struct ProverLookupProved<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
+    base: ProverBase<'a, Zt, U, F, D>,
+    field_cfg: F::Config,
+    projected_trace: ProjectedTrace<F>,
+    ic_proof: IdealCheckProof<F>,
+    projecting_element_f: F,
+    projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    cpr_proof: CombinedPolyResolverProof<F>,
+    cpr_eval_point: Vec<F>,
+    combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    lookup_proof: GkrLogupLookupProof<F>,
+    lookup_r_inners: Vec<Vec<F>>,
 }
 
 /// After step 5 (multipoint eval).
@@ -192,7 +217,8 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: GkrLogupLookupProof<F>,
+    lookup_r_inners: Vec<Vec<F>>,
 
     // New
     mp_proof: MultipointEvalProof<F>,
@@ -207,7 +233,8 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: GkrLogupLookupProof<F>,
+    lookup_r_inners: Vec<Vec<F>>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
 
@@ -235,7 +262,9 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
+    lookup_proof: GkrLogupLookupProof<F>,
+    bin_reducer_proof: Option<BinReducerProof<F>>,
+    bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
@@ -743,9 +772,6 @@ impl_with_type_bounds!(ProverEvalProjected
             cpr_proof.bit_slice_evals = bit_slice_evals;
         }
 
-        // Legacy stub field — currently always None.
-        let lookup_proof = None;
-
         Ok(ProverSumchecked {
             base: self.base,
             field_cfg: self.field_cfg,
@@ -756,12 +782,192 @@ impl_with_type_bounds!(ProverEvalProjected
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
-            lookup_proof,
         })
     }
 });
 
 impl_with_type_bounds!(ProverSumchecked
+{
+    /// Step 4b: GKR-LogUp lookup with chunks-in-clear poly-lift.
+    ///
+    /// For each lookup group declared in the UAIR signature
+    /// (currently restricted to **binary_poly parents** with
+    /// `LookupTableType::BitPoly { width, chunk_width: Some(cw) }`),
+    /// runs the GKR fractional sumcheck and produces per-group
+    /// chunk lifts plus a sub-claim binding each parent column's
+    /// polynomial-valued MLE at the GKR descent row-half `r_inner`.
+    ///
+    /// The per-group sub-claims are NOT discharged here; every
+    /// `(r_inner^(g), bin_lifts_at_r_inner^(g))` bin claim is folded —
+    /// together with the step-7 `(r_0, witness_lifted_evals)` bin claim —
+    /// into a SINGLE Zip+ open at the reduced point `r*` by the bin
+    /// multi-point reducer in step 7.
+    ///
+    /// No-op (returns an empty `lookup_proof`) when the UAIR
+    /// declares no lookup specs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step4b_lookup(
+        mut self,
+    ) -> Result<ProverLookupProved<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let lookup_specs = self.base.uair_signature.lookup_specs().to_vec();
+        let mut groups = Vec::new();
+        let mut group_meta = Vec::new();
+        let mut subclaims: Vec<GkrLogupGroupSubclaim<F>> = Vec::new();
+
+        if !lookup_specs.is_empty() {
+            // MVP: group all specs sharing the same BitPoly{width,chunk_width}
+            // table type.
+            use std::collections::BTreeMap;
+            let mut grouped: BTreeMap<LookupTableType, Vec<usize>> = BTreeMap::new();
+            for spec in &lookup_specs {
+                grouped
+                    .entry(spec.table_type.clone())
+                    .or_default()
+                    .push(spec.column_index);
+            }
+
+            // Witness-trace binary_poly columns are the prover's source of
+            // bit data (chunks are derived from the parent's bit pattern).
+            let witness_trace = self.base.trace.witness(&self.base.uair_signature);
+            // Public columns precede witness columns within each type group;
+            // map full-trace flat index → witness binary_poly index.
+            let pub_cols = self.base.uair_signature.public_cols();
+            let num_pub_bin = pub_cols.num_binary_poly_cols();
+
+            for (table_type, parent_indices) in grouped {
+                // Validate: all parent indices must be witness binary_poly.
+                let total = self.base.uair_signature.total_cols();
+                let num_total_bin = total.num_binary_poly_cols();
+                let mut parent_refs = Vec::with_capacity(parent_indices.len());
+                for &idx in &parent_indices {
+                    if idx >= num_total_bin || idx < num_pub_bin {
+                        return Err(ProtocolError::Lookup(
+                            zinc_piop::lookup::LookupError::NotImplemented,
+                        ));
+                    }
+                    let bin_idx = idx - num_pub_bin;
+                    parent_refs.push(&witness_trace.binary_poly[bin_idx]);
+                }
+
+                let instance = BinaryPolyLookupInstance::<'_, F, D> {
+                    parent_columns: parent_refs,
+                    parent_column_indices: parent_indices.clone(),
+                    table_type,
+                    projecting_element_f: &self.projecting_element_f,
+                    n_vars: self.base.num_vars,
+                };
+                let (mut group_proof, meta, sub) = prove_group::<F, D>(
+                    &mut self.base.pcs_transcript.fs_transcript,
+                    &instance,
+                    &self.field_cfg,
+                )
+                .map_err(|_| {
+                    ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+                })?;
+
+                // Per-witness-bin-col polynomial-valued evals at this group's
+                // r_inner, in witness-bin-col flat order. Parent cols reuse the
+                // full lift already computed inside `prove_group` (reassembled
+                // via `combine_chunks`); only truly-non-parent cols need a fresh
+                // `compute_binary_poly_lifts`. These bind ALL witness bin cols
+                // (parents cross-bound by chunk_lifts, others by the α-proj) at
+                // the reducer's single Zip+ open. NB: strictly witness bins —
+                // never the booleanity virtual/int/skip column set.
+                let num_wit_bin = self
+                    .base
+                    .uair_signature
+                    .total_cols()
+                    .num_binary_poly_cols()
+                    - num_pub_bin;
+                let cw = meta.chunk_width;
+                let w = cw * meta.num_chunks;
+                let zero = F::zero_with_cfg(&self.field_cfg);
+
+                // Mark which witness-bin columns are parents in this group.
+                let mut parent_for_wit: Vec<Option<usize>> = vec![None; num_wit_bin];
+                for (ell, &col_idx) in sub.parent_columns.iter().enumerate() {
+                    let wit_idx = col_idx - num_pub_bin;
+                    parent_for_wit[wit_idx] = Some(ell);
+                }
+
+                // Compute lifts only for non-parent witness bin cols.
+                let non_parent_wit: Vec<usize> = (0..num_wit_bin)
+                    .filter(|i| parent_for_wit[*i].is_none())
+                    .collect();
+                let non_parent_lifts: Vec<DynamicPolynomialF<F>> = if non_parent_wit
+                    .is_empty()
+                {
+                    Vec::new()
+                } else {
+                    let np_cols: Vec<&DenseMultilinearExtension<BinaryPoly<D>>> =
+                        non_parent_wit
+                            .iter()
+                            .map(|&i| &witness_trace.binary_poly[i])
+                            .collect();
+                    compute_binary_poly_lifts::<F, D>(
+                        &np_cols,
+                        &sub.r_inner,
+                        &self.field_cfg,
+                    )
+                };
+
+                let mut bin_lifts: Vec<DynamicPolynomialF<F>> =
+                    Vec::with_capacity(num_wit_bin);
+                let mut np_iter = non_parent_lifts.into_iter();
+                for wit_idx in 0..num_wit_bin {
+                    match parent_for_wit[wit_idx] {
+                        Some(ell) => bin_lifts.push(combine_chunks::<F>(
+                            &group_proof.chunk_lifts[ell],
+                            cw,
+                            w,
+                            &zero,
+                        )),
+                        None => bin_lifts.push(np_iter.next().expect("non-parent lift")),
+                    }
+                }
+                group_proof.bin_lifts_at_r_inner = bin_lifts;
+
+                groups.push(group_proof);
+                group_meta.push(meta);
+                subclaims.push(sub);
+            }
+
+            // Absorb chunk_lifts from each group's proof into the FS transcript
+            // so the reduced Zip+ opening draws challenges depending on the
+            // lookup payload. (`prove_group` only absorbs multiplicities + GKR
+            // roots/sumchecks; chunk_lifts are computed AFTER the GKR descent.)
+            let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+            for group_proof in &groups {
+                for lift_per_lookup in &group_proof.chunk_lifts {
+                    for c in lift_per_lookup {
+                        self.base
+                            .pcs_transcript
+                            .fs_transcript
+                            .absorb_random_field_slice(&c.coeffs, &mut buf);
+                    }
+                }
+            }
+        }
+
+        let lookup_r_inners: Vec<Vec<F>> =
+            subclaims.iter().map(|s| s.r_inner.clone()).collect();
+        Ok(ProverLookupProved {
+            base: self.base,
+            field_cfg: self.field_cfg,
+            projected_trace: self.projected_trace,
+            ic_proof: self.ic_proof,
+            projected_trace_f: self.projected_trace_f,
+            projecting_element_f: self.projecting_element_f,
+            cpr_proof: self.cpr_proof,
+            cpr_eval_point: self.cpr_eval_point,
+            combined_sumcheck: self.combined_sumcheck,
+            lookup_proof: GkrLogupLookupProof { groups, group_meta },
+            lookup_r_inners,
+        })
+    }
+});
+
+impl_with_type_bounds!(ProverLookupProved
 {
     /// Step 5: Multi-point evaluation sumcheck under ψ_α. Reduces all CPR
     /// claims at `r*` (up evals + row-shift down evals + bit-op virtual
@@ -822,6 +1028,7 @@ impl_with_type_bounds!(ProverSumchecked
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
+            lookup_r_inners: self.lookup_r_inners,
             mp_proof,
             r_0: mp_prover_state.eval_point,
         })
@@ -861,6 +1068,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
+            lookup_r_inners: self.lookup_r_inners,
             mp_proof: self.mp_proof,
             r_0: self.r_0,
             lifted_evals,
@@ -870,13 +1078,66 @@ impl_with_type_bounds!(ProverMultipointEvaled
 
 impl_with_type_bounds!(ProverLifted
 {
-    /// Step 7: PCS open at `r_0` (witness columns only).
+    /// Step 7: PCS open. The bin commitment open path branches on G,
+    /// the number of lookup groups:
+    ///   - G = 0 (no lookups)   → open bin at r_0 only.
+    ///   - G = 1 (single group) → open bin at r_inner^(0) AND at r_0,
+    ///     directly. The reducer is skipped because it would only fold
+    ///     2 claims, costing more (sumcheck + P-MLE build) than the
+    ///     extra Zip+ open it saves.
+    ///   - G ≥ 2                → multi-point reducer folds the G + 1
+    ///     bin claims into ONE Zip+ open at the reduced point r*,
+    ///     saving G - 1 Zip+ opens net.
+    ///
+    /// Arbitrary-poly and int are always opened at r_0.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<ProverPcsOpened<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
         let witness_trace = self.base.trace.witness(&self.base.uair_signature);
 
-        if let Some(hint_bin) = &self.base.hint_bin {
+        let pub_cols = self.base.uair_signature.public_cols();
+        let num_pub_bin = pub_cols.num_binary_poly_cols();
+        let total = self.base.uair_signature.total_cols();
+        let num_total_bin = total.num_binary_poly_cols();
+        let num_wit_bin = num_total_bin - num_pub_bin;
+
+        let n_groups = self.lookup_proof.groups.len();
+        let (bin_reducer_proof, bin_lifts_at_r_star) = if n_groups == 0
+            || self.base.hint_bin.is_none()
+        {
+            // No-lookup (or no-bin-batch) path: open bin at r_0 only.
+            if let Some(hint_bin) = &self.base.hint_bin {
+                let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    &mut self.base.pcs_transcript,
+                    self.base.pp_bin,
+                    &witness_trace.binary_poly,
+                    &self.r_0,
+                    hint_bin,
+                    &self.field_cfg,
+                )?;
+            }
+            (None, Vec::new())
+        } else if n_groups == 1 {
+            // G=1 fast path: open bin at r_inner^(0) and r_0 directly,
+            // skipping the reducer's sumcheck + P-MLE build (which for
+            // T=2 claims costs more than the one Zip+ open it would
+            // save). Verifier mirrors with two `verify_with_alphas`
+            // calls plus the existing chunk-↔-lift binding from step 4b.
+            let hint_bin = self
+                .base
+                .hint_bin
+                .as_ref()
+                .expect("checked above");
+            let r_inner = &self.lookup_r_inners[0];
+            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut self.base.pcs_transcript,
+                self.base.pp_bin,
+                &witness_trace.binary_poly,
+                r_inner,
+                hint_bin,
+                &self.field_cfg,
+            )?;
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut self.base.pcs_transcript,
                 self.base.pp_bin,
@@ -885,7 +1146,66 @@ impl_with_type_bounds!(ProverLifted
                 hint_bin,
                 &self.field_cfg,
             )?;
-        }
+            (None, Vec::new())
+        } else {
+            // Build claim list: G groups + 1 step-7 r_0 claim.
+            let mut claims: Vec<ReducerBinClaim<F>> =
+                Vec::with_capacity(self.lookup_proof.groups.len() + 1);
+            for (group, r_inner) in self
+                .lookup_proof
+                .groups
+                .iter()
+                .zip(self.lookup_r_inners.iter())
+            {
+                claims.push(ReducerBinClaim {
+                    point: r_inner.clone(),
+                    lifts: group.bin_lifts_at_r_inner.clone(),
+                });
+            }
+            // Step-7 r_0 claim: (r_0, witness_lifted_evals[0..num_wit_bin]).
+            let r0_lifts: Vec<DynamicPolynomialF<F>> =
+                self.lifted_evals[num_pub_bin..num_total_bin].to_vec();
+            claims.push(ReducerBinClaim {
+                point: self.r_0.clone(),
+                lifts: r0_lifts,
+            });
+
+            // Run reducer.
+            let (reducer_proof, reduced) = BinMultipointReducer::<F, D>::prove(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &witness_trace.binary_poly,
+                &claims,
+                self.base.num_vars,
+                &self.field_cfg,
+            )
+            .map_err(|_| {
+                ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+            })?;
+
+            // Polynomial-valued bin evals at r* — batched: eq(·, r*) is
+            // built once and the per-col bit walks parallelize across
+            // rayon threads.
+            let cols_ref: Vec<&DenseMultilinearExtension<BinaryPoly<D>>> =
+                witness_trace.binary_poly.iter().collect();
+            let bin_lifts_r_star: Vec<DynamicPolynomialF<F>> =
+                compute_binary_poly_lifts::<F, D>(&cols_ref, &reduced.point, &self.field_cfg);
+            assert_eq!(bin_lifts_r_star.len(), num_wit_bin);
+
+            // ONE Zip+ open at r*.
+            if let Some(hint_bin) = &self.base.hint_bin {
+                let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    &mut self.base.pcs_transcript,
+                    self.base.pp_bin,
+                    &witness_trace.binary_poly,
+                    &reduced.point,
+                    hint_bin,
+                    &self.field_cfg,
+                )?;
+            }
+
+            (Some(reducer_proof), bin_lifts_r_star)
+        };
+
         if let Some(hint_arb) = &self.base.hint_arb {
             let _ = ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut self.base.pcs_transcript,
@@ -915,6 +1235,8 @@ impl_with_type_bounds!(ProverLifted
             lookup_proof: self.lookup_proof,
             mp_proof: self.mp_proof,
             lifted_evals: self.lifted_evals,
+            bin_reducer_proof,
+            bin_lifts_at_r_star,
         })
     }
 });
@@ -961,6 +1283,8 @@ impl_with_type_bounds!(ProverPcsOpened
             zip: zip_proof,
             witness_lifted_evals,
             lookup_proof: self.lookup_proof,
+            bin_reducer_proof: self.bin_reducer_proof,
+            bin_lifts_at_r_star: self.bin_lifts_at_r_star,
         })
     }
 });
@@ -1061,6 +1385,7 @@ where
         ideal_checked
             .step3_eval_projection()?
             .step4_sumcheck()?
+            .step4b_lookup()?
             .step5_multipoint_eval()?
             .step6_lift_and_project()?
             .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?
@@ -1406,7 +1731,12 @@ where
         .map_err(ProtocolError::Booleanity)?;
         cpr_proof.bit_slice_evals = bit_slice_evals;
     }
-    let lookup_proof: Option<BatchedLookupProof<F>> = None;
+    let lookup_proof: GkrLogupLookupProof<F> = GkrLogupLookupProof {
+        groups: vec![],
+        group_meta: vec![],
+    };
+    let bin_reducer_proof: Option<BinReducerProof<F>> = None;
+    let bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>> = vec![];
 
     // ── Step 5: Multi-point evaluation sumcheck (extended sources) ──────
     let cpr_eval_point = cpr_prover_state.evaluation_point.clone();
@@ -1516,6 +1846,8 @@ where
         zip: zip_proof,
         witness_lifted_evals,
         lookup_proof,
+        bin_reducer_proof,
+        bin_lifts_at_r_star,
     })
 }
 
@@ -2158,7 +2490,12 @@ where
         .map_err(ProtocolError::Booleanity)?;
         cpr_proof.bit_slice_evals = bit_slice_evals;
     }
-    let lookup_proof: Option<BatchedLookupProof<F>> = None;
+    let lookup_proof: GkrLogupLookupProof<F> = GkrLogupLookupProof {
+        groups: vec![],
+        group_meta: vec![],
+    };
+    let bin_reducer_proof: Option<BinReducerProof<F>> = None;
+    let bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>> = vec![];
     if let Some(t) = timings.as_mut() {
         t.step4_sumcheck = _t_step4.elapsed();
     }
@@ -2399,6 +2736,8 @@ where
         zip: zip_proof,
         witness_lifted_evals,
         lookup_proof,
+        bin_reducer_proof,
+        bin_lifts_at_r_star,
     };
     if let Some(t) = timings.as_mut() {
         t.assembly = _t_assembly.elapsed();

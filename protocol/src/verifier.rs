@@ -5,6 +5,9 @@ use crypto_primitives::{
 use num_traits::Zero;
 use std::io::Cursor;
 use zinc_piop::{
+    bin_multipoint_reducer::{
+        BinClaim as ReducerBinClaim, BinMultipointReducer, Proof as BinReducerProof,
+    },
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
     lookup::booleanity::{
@@ -12,6 +15,7 @@ use zinc_piop::{
         compute_virtual_closing_overrides, finalize_booleanity_verifier,
         prepare_booleanity_verifier, verify_bit_decomposition_consistency,
     },
+    lookup::gkr_logup::{GkrLogupGroupSubclaim, GkrLogupLookupProof, verify_group},
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, ScalarMap, project_scalars, project_scalars_to_field,
@@ -103,7 +107,9 @@ pub struct VerifierTranscriptReconstructed<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
+    proof_bin_reducer: Option<BinReducerProof<F>>,
+    proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -127,7 +133,9 @@ pub struct VerifierPrimeProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
+    proof_bin_reducer: Option<BinReducerProof<F>>,
+    proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -151,7 +159,9 @@ pub struct VerifierIdealChecked<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
+    proof_bin_reducer: Option<BinReducerProof<F>>,
+    proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -177,7 +187,9 @@ pub struct VerifierEvalProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
+    proof_bin_reducer: Option<BinReducerProof<F>>,
+    proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -193,7 +205,10 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
+    proof_bin_reducer: Option<BinReducerProof<F>>,
+    proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    lookup_r_inners: Vec<Vec<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -209,7 +224,10 @@ pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOv
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
+    proof_bin_reducer: Option<BinReducerProof<F>>,
+    proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    lookup_r_inners: Vec<Vec<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -230,7 +248,10 @@ pub struct VerifierLiftedEvalsChecked<
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    proof_lookup_proof: Option<BatchedLookupProof<F>>,
+    proof_lookup_proof: GkrLogupLookupProof<F>,
+    proof_bin_reducer: Option<BinReducerProof<F>>,
+    proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    lookup_r_inners: Vec<Vec<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -315,6 +336,8 @@ where
             proof_multipoint_eval: proof.multipoint_eval,
             proof_witness_lifted_evals: proof.witness_lifted_evals,
             proof_lookup_proof: proof.lookup_proof,
+            proof_bin_reducer: proof.bin_reducer_proof,
+            proof_bin_lifts_at_r_star: proof.bin_lifts_at_r_star,
             _phantom: PhantomData,
         })
     }
@@ -352,6 +375,8 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_bin_reducer: self.proof_bin_reducer,
+            proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             _phantom: PhantomData,
         })
     }
@@ -407,6 +432,8 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_bin_reducer: self.proof_bin_reducer,
+            proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             _phantom: PhantomData,
         })
     }
@@ -452,6 +479,8 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_bin_reducer: self.proof_bin_reducer,
+            proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             _phantom: PhantomData,
         })
     }
@@ -684,8 +713,6 @@ where
         )
         .map_err(ProtocolError::Booleanity)?;
 
-        let _ = &self.proof_lookup_proof;
-
         Ok(VerifierSumchecked {
             base: self.base,
             field_cfg: self.field_cfg,
@@ -695,6 +722,9 @@ where
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_bin_reducer: self.proof_bin_reducer,
+            proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            lookup_r_inners: Vec::new(),
             _phantom: PhantomData,
         })
     }
@@ -708,6 +738,112 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
+    /// Step 4b: GKR-LogUp lookup verify with chunks-in-clear poly-lift.
+    ///
+    /// For each lookup group:
+    ///   1. Calls `verify_group` to verify the GKR + leaf check via the
+    ///      polynomial-valued chunk lifts → returns a sub-claim
+    ///      `(r_inner, combined_polynomial)`.
+    ///   2. Absorbs the chunk lifts into the FS transcript (mirrors the
+    ///      prover's step 4b).
+    ///   3. Binds each parent column: checks the chunk-derived
+    ///      `combined_polynomial[ell]` equals `bin_lifts_at_r_inner[wit_idx]`.
+    ///      The `bin_lifts_at_r_inner` themselves — for both parent and
+    ///      non-parent witness bin cols — are bound to the bin commitment
+    ///      by the step-7 bin multi-point reducer's single Zip+ open at r*.
+    ///
+    /// No-op when the proof carries no lookup groups.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step4b_lookup_verify<U: Uair>(
+        mut self,
+    ) -> Result<Self, ProtocolError<F, IdealOverF>> {
+        if self.proof_lookup_proof.groups.is_empty() {
+            return Ok(self);
+        }
+
+        let mut subclaims: Vec<GkrLogupGroupSubclaim<F>> = Vec::with_capacity(
+            self.proof_lookup_proof.groups.len(),
+        );
+        for (group_proof, meta) in self
+            .proof_lookup_proof
+            .groups
+            .iter()
+            .zip(self.proof_lookup_proof.group_meta.iter())
+        {
+            let sub = verify_group::<F>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                group_proof,
+                meta,
+                &self.projecting_element_f,
+                &self.field_cfg,
+            )
+            .map_err(|_| {
+                ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+            })?;
+            subclaims.push(sub);
+        }
+
+        // Absorb chunk_lifts (must mirror prover's order).
+        let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+        for group_proof in &self.proof_lookup_proof.groups {
+            for lift_per_lookup in &group_proof.chunk_lifts {
+                for c in lift_per_lookup {
+                    self.base
+                        .pcs_transcript
+                        .fs_transcript
+                        .absorb_random_field_slice(&c.coeffs, &mut buf);
+                }
+            }
+        }
+
+        // Parent-column binding: combined_polynomial[ell] (chunk-derived)
+        // must equal bin_lifts_at_r_inner[parent_wit_idx]. Non-parent
+        // bin_lifts entries are bound by the bin multi-point reducer
+        // + ONE Zip+ open at r* in step 7, so step 4b verifies only
+        // the chunk-↔-lift consistency here. The bin batch is strictly
+        // the committed witness binary_poly columns.
+        let pub_cols = self.base.uair_signature.public_cols();
+        let num_pub_bin = pub_cols.num_binary_poly_cols();
+        let total_cols = self.base.uair_signature.total_cols();
+        let num_total_bin = total_cols.num_binary_poly_cols();
+        let bin_batch_size = self.proof_commitments.0.batch_size;
+        if bin_batch_size != num_total_bin - num_pub_bin {
+            return Err(ProtocolError::Lookup(
+                zinc_piop::lookup::LookupError::NotImplemented,
+            ));
+        }
+
+        for (sub, group_proof) in
+            subclaims.iter().zip(self.proof_lookup_proof.groups.iter())
+        {
+            if group_proof.bin_lifts_at_r_inner.len() != bin_batch_size {
+                return Err(ProtocolError::Lookup(
+                    zinc_piop::lookup::LookupError::NotImplemented,
+                ));
+            }
+
+            // Parent-column binding: combined_polynomial[ell] == bin_lifts[wit_idx].
+            for (ell, &full_col_idx) in sub.parent_columns.iter().enumerate() {
+                if full_col_idx < num_pub_bin || full_col_idx >= num_total_bin {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                let wit_idx = full_col_idx - num_pub_bin;
+                if sub.combined_polynomial[ell] != group_proof.bin_lifts_at_r_inner[wit_idx] {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                    ));
+                }
+            }
+        }
+
+        // Save per-group r_inners for step 7's bin multi-point reducer.
+        self.lookup_r_inners = subclaims.into_iter().map(|s| s.r_inner).collect();
+
+        Ok(self)
+    }
+
     /// Step 5: Multi-point evaluation sumcheck (under ψ_α).
     ///
     /// CPR's `up_evals` (one per base trace col) are extended with
@@ -745,6 +881,9 @@ where
             proof_commitments: self.proof_commitments,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_bin_reducer: self.proof_bin_reducer,
+            proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            lookup_r_inners: self.lookup_r_inners,
             _phantom: PhantomData,
         })
     }
@@ -864,6 +1003,9 @@ where
             all_lifted_evals,
             proof_commitments: self.proof_commitments,
             proof_lookup_proof: self.proof_lookup_proof,
+            proof_bin_reducer: self.proof_bin_reducer,
+            proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            lookup_r_inners: self.lookup_r_inners,
             _phantom: PhantomData,
         })
     }
@@ -893,7 +1035,13 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
-    /// Step 7: PCS verification at `r_0` (witness columns only).
+    /// Step 7: PCS verification. The bin commitment verify path branches
+    /// on G (the number of lookup groups):
+    ///   - G = 0 → verify bin at r_0 only.
+    ///   - G = 1 → verify bin at r_inner^(0) AND r_0 directly (skip reducer).
+    ///   - G ≥ 2 → reducer folds G + 1 claims into ONE verify at r*.
+    /// Arbitrary-poly and int are always verified at r_0.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_pcs_verify<U: Uair, const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<VerifierPcsVerified<IdealOverF>, ProtocolError<F, IdealOverF>> {
@@ -908,6 +1056,7 @@ where
         let total = self.base.uair_signature.total_cols();
         let num_total_bin = total.num_binary_poly_cols();
         let num_total_arb = total.num_arbitrary_poly_cols();
+        let num_wit_bin = num_total_bin - num_pub_bin;
 
         let pcs_transcript = &mut self.base.pcs_transcript;
         let field_cfg = &self.field_cfg;
@@ -946,13 +1095,239 @@ where
             }};
         }
 
-        verify_pcs_batch!(
-            Zt::BinaryZt,
-            Zt::BinaryLc,
-            self.base.vp_bin,
-            0,
-            [num_pub_bin..num_total_bin]
-        );
+        // Bin part: branch on (reducer present, n_groups). Sanity-check
+        // proof shape consistency before dispatching.
+        let n_groups = self.proof_lookup_proof.groups.len();
+        let reducer_present = self.proof_bin_reducer.is_some();
+        let expected_reducer = n_groups >= 2;
+        if reducer_present != expected_reducer {
+            return Err(ProtocolError::Lookup(
+                zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+            ));
+        }
+        match (&self.proof_bin_reducer, n_groups) {
+            (None, 1) => {
+                // G=1 fast path: verify TWO Zip+ openings on bin (one
+                // at r_inner^(0), one at r_0) directly. The chunk-↔-lift
+                // parent binding from step 4b binds bin_lifts_at_r_inner;
+                // the alpha-projection over those + Zip+ verify here
+                // closes the chain to the actual committed cols.
+                if commitments.0.batch_size != num_wit_bin {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                if self.lookup_r_inners.len() != 1 {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                    ));
+                }
+                let group_proof = &self.proof_lookup_proof.groups[0];
+                if group_proof.bin_lifts_at_r_inner.len() != num_wit_bin {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                let r_inner = &self.lookup_r_inners[0];
+
+                // Open at r_inner^(0).
+                let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
+                    &mut pcs_transcript.fs_transcript,
+                    commitments.0.batch_size,
+                );
+                let mut eval_f = F::zero_with_cfg(field_cfg);
+                for (lift, alphas) in group_proof
+                    .bin_lifts_at_r_inner
+                    .iter()
+                    .zip(per_poly_alphas.iter())
+                {
+                    for (coeff, alpha) in lift.coeffs.iter().zip(alphas.iter()) {
+                        let mut term = F::from_with_cfg(alpha, field_cfg);
+                        term *= coeff;
+                        eval_f += &term;
+                    }
+                }
+                ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<
+                    F,
+                    CHECK_FOR_OVERFLOW,
+                >(
+                    pcs_transcript,
+                    self.base.vp_bin,
+                    &commitments.0,
+                    field_cfg,
+                    r_inner,
+                    &eval_f,
+                    &per_poly_alphas,
+                )
+                .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+
+                // Open at r_0.
+                let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
+                    &mut pcs_transcript.fs_transcript,
+                    commitments.0.batch_size,
+                );
+                let mut eval_f = F::zero_with_cfg(field_cfg);
+                for (bar_u, alphas) in all_lifted_evals[num_pub_bin..num_total_bin]
+                    .iter()
+                    .zip(per_poly_alphas.iter())
+                {
+                    for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                        let mut term = F::from_with_cfg(alpha, field_cfg);
+                        term *= coeff;
+                        eval_f += &term;
+                    }
+                }
+                ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<
+                    F,
+                    CHECK_FOR_OVERFLOW,
+                >(
+                    pcs_transcript,
+                    self.base.vp_bin,
+                    &commitments.0,
+                    field_cfg,
+                    r_0,
+                    &eval_f,
+                    &per_poly_alphas,
+                )
+                .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+            }
+            (Some(reducer_proof), _n) => {
+                if commitments.0.batch_size != num_wit_bin {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                if self.proof_bin_lifts_at_r_star.len() != num_wit_bin {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+                if self.lookup_r_inners.len() != self.proof_lookup_proof.groups.len() {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::NotImplemented,
+                    ));
+                }
+
+                // Build claims (G + 1).
+                let mut claims: Vec<ReducerBinClaim<F>> =
+                    Vec::with_capacity(self.lookup_r_inners.len() + 1);
+                for (group_proof, r_inner) in self
+                    .proof_lookup_proof
+                    .groups
+                    .iter()
+                    .zip(self.lookup_r_inners.iter())
+                {
+                    claims.push(ReducerBinClaim {
+                        point: r_inner.clone(),
+                        lifts: group_proof.bin_lifts_at_r_inner.clone(),
+                    });
+                }
+                // Step-7 r_0 claim: (r_0, all_lifted_evals[num_pub_bin..num_total_bin]).
+                let r0_lifts: Vec<DynamicPolynomialF<F>> =
+                    all_lifted_evals[num_pub_bin..num_total_bin].to_vec();
+                claims.push(ReducerBinClaim {
+                    point: r_0.clone(),
+                    lifts: r0_lifts,
+                });
+
+                // Run reducer.
+                let reduced = BinMultipointReducer::<F, D>::verify(
+                    &mut pcs_transcript.fs_transcript,
+                    reducer_proof,
+                    &claims,
+                    num_wit_bin,
+                    self.base.num_vars,
+                    field_cfg,
+                )
+                .map_err(|_| {
+                    ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+                })?;
+
+                // Cross-check P(r*) = Σ γ · bin_lifts_at_r_star.coeff
+                // (verifier-side re-aggregation using the reducer's
+                // gammas_flat).
+                let mut p_check = F::zero_with_cfg(field_cfg);
+                for (j, lift) in self.proof_bin_lifts_at_r_star.iter().enumerate() {
+                    for (l, coeff) in lift.coeffs.iter().enumerate() {
+                        let g = &reduced.gammas_flat[j * D + l];
+                        let mut term = g.clone();
+                        term *= coeff;
+                        p_check += &term;
+                    }
+                }
+                if p_check != reduced.p_eval {
+                    return Err(ProtocolError::Lookup(
+                        zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                    ));
+                }
+
+                // ONE Zip+ verify_with_alphas at r* with FRESHLY-sampled
+                // Chal-typed alphas + bin_lifts_at_r_star-derived eval.
+                let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
+                    &mut pcs_transcript.fs_transcript,
+                    commitments.0.batch_size,
+                );
+                let mut eval_f = F::zero_with_cfg(field_cfg);
+                for (lift, alphas) in
+                    self.proof_bin_lifts_at_r_star.iter().zip(per_poly_alphas.iter())
+                {
+                    for (coeff, alpha) in lift.coeffs.iter().zip(alphas.iter()) {
+                        let mut term = F::from_with_cfg(alpha, field_cfg);
+                        term *= coeff;
+                        eval_f += &term;
+                    }
+                }
+                ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<
+                    F,
+                    CHECK_FOR_OVERFLOW,
+                >(
+                    pcs_transcript,
+                    self.base.vp_bin,
+                    &commitments.0,
+                    field_cfg,
+                    &reduced.point,
+                    &eval_f,
+                    &per_poly_alphas,
+                )
+                .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+            }
+            _ => {
+                // (None, 0) — no-lookup path: verify bin at r_0 as before.
+                // The reducer_present check above guarantees we only
+                // reach here when n_groups == 0.
+                if commitments.0.batch_size > 0 {
+                    let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
+                        &mut pcs_transcript.fs_transcript,
+                        commitments.0.batch_size,
+                    );
+                    let mut eval_f = F::zero_with_cfg(field_cfg);
+                    for (bar_u, alphas) in all_lifted_evals[num_pub_bin..num_total_bin]
+                        .iter()
+                        .zip(per_poly_alphas.iter())
+                    {
+                        for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                            let mut term = F::from_with_cfg(alpha, field_cfg);
+                            term *= coeff;
+                            eval_f += &term;
+                        }
+                    }
+                    ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<
+                        F,
+                        CHECK_FOR_OVERFLOW,
+                    >(
+                        pcs_transcript,
+                        self.base.vp_bin,
+                        &commitments.0,
+                        field_cfg,
+                        r_0,
+                        &eval_f,
+                        &per_poly_alphas,
+                    )
+                    .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+                }
+            }
+        }
+
         verify_pcs_batch!(
             Zt::ArbitraryZt,
             Zt::ArbitraryLc,
@@ -1049,6 +1424,7 @@ where
         .step2_ideal_check(project_ideal)?
         .step3_eval_projection(project_scalar)?
         .step4_sumcheck_verify()?
+        .step4b_lookup_verify::<U>()?
         .step5_multipoint_eval::<U>()?
         .step6_lifted_evals::<U>()?
         .step7_pcs_verify::<U, CHECK_FOR_OVERFLOW>()?
