@@ -415,11 +415,12 @@ where
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
 
-        // Only check non-trivial ideals. For assert_zero constraints
-        // the ideal is the zero ideal and the combined polynomial
-        // value is zero by construction; the sumcheck that follows
-        // verifies consistency of the claimed evaluations with the
-        // actual trace.
+        // Only check non-trivial ideals here: `ideal_over_f_from_ref` must
+        // never see `IdealOrZero::Zero` (the SHA projection relies on that).
+        // Zero-ideal (`assert_zero`) claimed values are NOT zero by
+        // construction in the combined lane (see
+        // `CombinedPolyRowBuilder::assert_zero`); the protocol layer checks
+        // them against the projecting element once it is sampled (step 3).
         let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
             .ideals
             .iter()

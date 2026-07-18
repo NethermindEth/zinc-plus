@@ -532,6 +532,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+    #[error("assert_zero constraint {0} does not vanish at the projecting element")]
+    AssertZero(usize),
 }
 
 //
