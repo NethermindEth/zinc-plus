@@ -1080,14 +1080,13 @@ impl_with_type_bounds!(ProverLifted
 {
     /// Step 7: PCS open. The bin commitment open path branches on G,
     /// the number of lookup groups:
-    ///   - G = 0 (no lookups)   → open bin at r_0 only.
-    ///   - G = 1 (single group) → open bin at r_inner^(0) AND at r_0,
-    ///     directly. The reducer is skipped because it would only fold
-    ///     2 claims, costing more (sumcheck + P-MLE build) than the
-    ///     extra Zip+ open it saves.
-    ///   - G ≥ 2                → multi-point reducer folds the G + 1
-    ///     bin claims into ONE Zip+ open at the reduced point r*,
-    ///     saving G - 1 Zip+ opens net.
+    ///   - G = 0 (no lookups) → open bin at r_0 only.
+    ///   - G ≥ 1              → the multi-point reducer folds every
+    ///     per-group r_inner bin claim plus the step-7 r_0 claim into ONE
+    ///     Zip+ open at a reduced point r*. This beats direct opening even
+    ///     at G = 1 (which would need two opens): one reduced open plus a
+    ///     small degree-2 sumcheck is far cheaper than a second full
+    ///     Brakedown opening — especially on verify time and proof size.
     ///
     /// Arbitrary-poly and int are always opened at r_0.
     #[allow(clippy::arithmetic_side_effects)]
@@ -1118,36 +1117,13 @@ impl_with_type_bounds!(ProverLifted
                 )?;
             }
             (None, Vec::new())
-        } else if n_groups == 1 {
-            // G=1 fast path: open bin at r_inner^(0) and r_0 directly,
-            // skipping the reducer's sumcheck + P-MLE build (which for
-            // T=2 claims costs more than the one Zip+ open it would
-            // save). Verifier mirrors with two `verify_with_alphas`
-            // calls plus the existing chunk-↔-lift binding from step 4b.
-            let hint_bin = self
-                .base
-                .hint_bin
-                .as_ref()
-                .expect("checked above");
-            let r_inner = &self.lookup_r_inners[0];
-            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut self.base.pcs_transcript,
-                self.base.pp_bin,
-                &witness_trace.binary_poly,
-                r_inner,
-                hint_bin,
-                &self.field_cfg,
-            )?;
-            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut self.base.pcs_transcript,
-                self.base.pp_bin,
-                &witness_trace.binary_poly,
-                &self.r_0,
-                hint_bin,
-                &self.field_cfg,
-            )?;
-            (None, Vec::new())
         } else {
+            // Reducer path (G >= 1 groups): fold every per-group r_inner
+            // bin claim plus the step-7 r_0 claim into ONE Zip+ open at a
+            // reduced point r*. This also subsumes the former G=1 "two
+            // direct opens" fast path — one reduced open plus a small
+            // degree-2 sumcheck beats a second full Brakedown opening (in
+            // both prover time and proof size).
             // Build claim list: G groups + 1 step-7 r_0 claim.
             let mut claims: Vec<ReducerBinClaim<F>> =
                 Vec::with_capacity(self.lookup_proof.groups.len() + 1);

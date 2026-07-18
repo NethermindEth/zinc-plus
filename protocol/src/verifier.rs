@@ -1038,8 +1038,9 @@ where
     /// Step 7: PCS verification. The bin commitment verify path branches
     /// on G (the number of lookup groups):
     ///   - G = 0 → verify bin at r_0 only.
-    ///   - G = 1 → verify bin at r_inner^(0) AND r_0 directly (skip reducer).
-    ///   - G ≥ 2 → reducer folds G + 1 claims into ONE verify at r*.
+    ///   - G ≥ 1 → the reducer folds every per-group r_inner claim plus the
+    ///     r_0 claim into ONE verify at a reduced point r* (subsumes the
+    ///     former G = 1 two-open path — cheaper on verify time + size).
     /// Arbitrary-poly and int are always verified at r_0.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_pcs_verify<U: Uair, const CHECK_FOR_OVERFLOW: bool>(
@@ -1099,98 +1100,15 @@ where
         // proof shape consistency before dispatching.
         let n_groups = self.proof_lookup_proof.groups.len();
         let reducer_present = self.proof_bin_reducer.is_some();
-        let expected_reducer = n_groups >= 2;
+        // G >= 1 now always uses the reducer (one folded open); only the
+        // no-lookup G = 0 case opens the bin commitment directly at r_0.
+        let expected_reducer = n_groups >= 1;
         if reducer_present != expected_reducer {
             return Err(ProtocolError::Lookup(
                 zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
             ));
         }
         match (&self.proof_bin_reducer, n_groups) {
-            (None, 1) => {
-                // G=1 fast path: verify TWO Zip+ openings on bin (one
-                // at r_inner^(0), one at r_0) directly. The chunk-↔-lift
-                // parent binding from step 4b binds bin_lifts_at_r_inner;
-                // the alpha-projection over those + Zip+ verify here
-                // closes the chain to the actual committed cols.
-                if commitments.0.batch_size != num_wit_bin {
-                    return Err(ProtocolError::Lookup(
-                        zinc_piop::lookup::LookupError::NotImplemented,
-                    ));
-                }
-                if self.lookup_r_inners.len() != 1 {
-                    return Err(ProtocolError::Lookup(
-                        zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
-                    ));
-                }
-                let group_proof = &self.proof_lookup_proof.groups[0];
-                if group_proof.bin_lifts_at_r_inner.len() != num_wit_bin {
-                    return Err(ProtocolError::Lookup(
-                        zinc_piop::lookup::LookupError::NotImplemented,
-                    ));
-                }
-                let r_inner = &self.lookup_r_inners[0];
-
-                // Open at r_inner^(0).
-                let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    commitments.0.batch_size,
-                );
-                let mut eval_f = F::zero_with_cfg(field_cfg);
-                for (lift, alphas) in group_proof
-                    .bin_lifts_at_r_inner
-                    .iter()
-                    .zip(per_poly_alphas.iter())
-                {
-                    for (coeff, alpha) in lift.coeffs.iter().zip(alphas.iter()) {
-                        let mut term = F::from_with_cfg(alpha, field_cfg);
-                        term *= coeff;
-                        eval_f += &term;
-                    }
-                }
-                ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<
-                    F,
-                    CHECK_FOR_OVERFLOW,
-                >(
-                    pcs_transcript,
-                    self.base.vp_bin,
-                    &commitments.0,
-                    field_cfg,
-                    r_inner,
-                    &eval_f,
-                    &per_poly_alphas,
-                )
-                .map_err(|e| ProtocolError::PcsVerification(0, e))?;
-
-                // Open at r_0.
-                let per_poly_alphas = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    commitments.0.batch_size,
-                );
-                let mut eval_f = F::zero_with_cfg(field_cfg);
-                for (bar_u, alphas) in all_lifted_evals[num_pub_bin..num_total_bin]
-                    .iter()
-                    .zip(per_poly_alphas.iter())
-                {
-                    for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
-                        let mut term = F::from_with_cfg(alpha, field_cfg);
-                        term *= coeff;
-                        eval_f += &term;
-                    }
-                }
-                ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::verify_with_alphas::<
-                    F,
-                    CHECK_FOR_OVERFLOW,
-                >(
-                    pcs_transcript,
-                    self.base.vp_bin,
-                    &commitments.0,
-                    field_cfg,
-                    r_0,
-                    &eval_f,
-                    &per_poly_alphas,
-                )
-                .map_err(|e| ProtocolError::PcsVerification(0, e))?;
-            }
             (Some(reducer_proof), _n) => {
                 if commitments.0.batch_size != num_wit_bin {
                     return Err(ProtocolError::Lookup(
