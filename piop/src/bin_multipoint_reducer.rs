@@ -191,7 +191,7 @@ where
                         .expect("eq build")
                 })
                 .collect();
-        let m_evals_f: Vec<F> = cfg_into_iter!(0..n_hyper)
+        let m_evals: Vec<F::Inner> = cfg_into_iter!(0..n_hyper)
             .map(|x_idx| {
                 let mut s = zero.clone();
                 for (t, eq_t) in eq_tables.iter().enumerate() {
@@ -201,10 +201,9 @@ where
                     );
                     s = s + &(betas[t].clone() * &e_f);
                 }
-                s
+                s.into_inner()
             })
             .collect();
-        let m_evals: Vec<F::Inner> = m_evals_f.into_iter().map(F::into_inner).collect();
         let m_mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
             m_evals,

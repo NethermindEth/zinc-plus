@@ -802,14 +802,31 @@ where
                 })
                 .collect();
 
+            // Build the 4·L body MLEs in parallel over trees — each is an
+            // independent O(2^k) clone+convert, and this per-layer build was
+            // the dominant serial block on the witness-GKR path. The
+            // [eq, then per-ell pla/ql/pr/qr] ordering is preserved so the
+            // sumcheck's MLE indexing (and thus the FS transcript) is
+            // byte-identical.
+            let bodies: Vec<[DenseMultilinearExtension<F::Inner>; 4]> =
+                cfg_into_iter!(0..num_trees)
+                    .map(|ell| {
+                        let (_pl_vals, pr_vals, ql_vals, qr_vals) = per_tree[ell];
+                        [
+                            mk_mle(&pla_per_tree[ell]),
+                            mk_mle(ql_vals),
+                            mk_mle(pr_vals),
+                            mk_mle(qr_vals),
+                        ]
+                    })
+                    .collect();
             let mut mles = Vec::with_capacity(1 + 4 * num_trees);
             mles.push(eq_r);
-            for ell in 0..num_trees {
-                let (_pl_vals, pr_vals, ql_vals, qr_vals) = per_tree[ell];
-                mles.push(mk_mle(&pla_per_tree[ell]));
-                mles.push(mk_mle(ql_vals));
-                mles.push(mk_mle(pr_vals));
-                mles.push(mk_mle(qr_vals));
+            for [pla, ql, pr, qr] in bodies {
+                mles.push(pla);
+                mles.push(ql);
+                mles.push(pr);
+                mles.push(qr);
             }
 
             // Capture δ-powers by move; α is folded into pla and is no

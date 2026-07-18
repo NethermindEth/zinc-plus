@@ -163,8 +163,7 @@ where
     // Direct array tally on integer chunk indices — no hashmap. Saves
     // L·K·W hashmap lookups (~2M at typical sizes) and frees the
     // table-index hashmap allocation.
-    let agg_mults: Vec<Vec<F>> = chunks_idx
-        .iter()
+    let agg_mults: Vec<Vec<F>> = cfg_iter!(chunks_idx)
         .map(|lookup_chunks| {
             let mut counts = vec![0u64; table_len];
             for chunk in lookup_chunks {
