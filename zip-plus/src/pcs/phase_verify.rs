@@ -185,7 +185,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             transcript.fs_transcript.get_challenges(num_rows)
         };
 
-        let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+        // Mirror the prover's bound write before deriving spot-check columns.
+        let combined_row: Vec<Zt::CombR> = transcript.read_const_many_bound(row_len)?;
         let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
 
         // Check 2: <w, q_1> == <s, b>

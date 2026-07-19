@@ -171,6 +171,22 @@ impl PcsProverTranscript {
         self.write_const_many_iter(vs.iter(), vs.len())
     }
 
+    /// Like [`Self::write_const_many`], but also absorbs the serialized bytes
+    /// into the Fiat-Shamir transcript.
+    ///
+    /// Use this for prover messages that subsequent challenges must depend on.
+    pub fn write_const_many_bound<T: ConstTranscribable>(
+        &mut self,
+        vs: &[T],
+    ) -> Result<(), ZipError> {
+        let start = safe_cast!(self.stream.position(), u64, usize)?;
+        self.write_const_many(vs)?;
+        let end = safe_cast!(self.stream.position(), u64, usize)?;
+        self.fs_transcript
+            .absorb_slice(&self.stream.get_ref()[start..end]);
+        Ok(())
+    }
+
     // Note(alex):
     // Parallelizing this greatly degrades performance rather than improving it.
     // Maybe we should think of breakpoints for parallelization later.
@@ -300,6 +316,20 @@ impl PcsVerifierTranscript {
         })
     }
 
+    /// Reads values written by [`PcsProverTranscript::write_const_many_bound`]
+    /// and absorbs the same serialized bytes into the verifier transcript.
+    pub fn read_const_many_bound<T: ConstTranscribable>(
+        &mut self,
+        n: usize,
+    ) -> Result<Vec<T>, ZipError> {
+        let start = safe_cast!(self.stream.position(), u64, usize)?;
+        let values = self.read_const_many(n)?;
+        let end = safe_cast!(self.stream.position(), u64, usize)?;
+        self.fs_transcript
+            .absorb_slice(&self.stream.get_ref()[start..end]);
+        Ok(values)
+    }
+
     fn read_usize(&mut self) -> Result<usize, ZipError> {
         let value = self.read::<u64>()?;
         safe_cast!(value, u64, usize)
@@ -419,5 +449,32 @@ mod tests {
             original_hashes,
             "hashes vector"
         );
+    }
+
+    #[test]
+    fn bound_write_binds_subsequent_challenges() {
+        let comm = ZipPlusCommitment::default();
+        let mut a = PcsProverTranscript::new_from_commitment(&comm);
+        let mut b = PcsProverTranscript::new_from_commitment(&comm);
+
+        a.write_const_many_bound(&[1u64, 2, 3]).unwrap();
+        b.write_const_many_bound(&[1u64, 2, 4]).unwrap();
+
+        assert_ne!(
+            a.squeeze_challenge_idx(1 << 30),
+            b.squeeze_challenge_idx(1 << 30),
+            "subsequent challenges must depend on the bound message"
+        );
+
+        let mut prover = PcsProverTranscript::new_from_commitment(&comm);
+        prover.write_const_many_bound(&[7u64, 8, 9]).unwrap();
+        let prover_idx = prover.squeeze_challenge_idx(1 << 30);
+
+        let mut verifier = prover.into_verification_transcript();
+        verifier.fs_transcript.absorb_slice(&comm.root);
+        let values: Vec<u64> = verifier.read_const_many_bound(3).unwrap();
+
+        assert_eq!(values, vec![7, 8, 9]);
+        assert_eq!(verifier.squeeze_challenge_idx(1 << 30), prover_idx);
     }
 }

@@ -241,7 +241,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             combined
         };
 
-        transcript.write_const_many(&combined_row)?;
+        // Bind the prover's row before deriving the spot-check columns.
+        transcript.write_const_many_bound(&combined_row)?;
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
             Self::open_merkle_trees_for_column(transcript, commit_hint, column_idx)?;
