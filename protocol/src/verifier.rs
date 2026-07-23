@@ -1384,7 +1384,7 @@ where
 
         // Absorb all families' coefficients into the FS transcript in the same uniform
         // order as the prover
-        let mut transcription_buf: Vec<u8> = vec![0; C::Integer::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; C::Element::NUM_BYTES];
         for witness_lifted_i in &self.proof_witness_lifted_evals {
             for bar_u in witness_lifted_i {
                 self.base
