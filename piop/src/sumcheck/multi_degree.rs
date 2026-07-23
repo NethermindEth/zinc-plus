@@ -258,7 +258,7 @@ pub struct MultiDegreeSumcheck<C>(PhantomData<C>);
 
 impl<C> MultiDegreeSumcheck<C>
 where
-    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + Clone + Sync,
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
     C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
 {

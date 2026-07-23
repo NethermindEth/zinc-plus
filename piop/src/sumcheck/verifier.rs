@@ -33,7 +33,7 @@ pub struct VerifierState<C: SetConfig> {
     pub config: C,
 }
 
-impl<C: SetConfig + Clone> VerifierState<C> {
+impl<C: SetConfig> VerifierState<C> {
     /// Initialize the verifier state.
     pub fn new(nvars: usize, degree: usize, config: &C) -> Self {
         Self {

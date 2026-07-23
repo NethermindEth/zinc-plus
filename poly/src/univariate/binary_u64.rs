@@ -24,9 +24,7 @@ use zinc_utils::{
 
 #[derive(AsRef, Clone, Debug, Default, Display, Hash, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64);
-
-// we can fit up to degree 64, which is ok for now
+pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 64, which is ok for now
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     const _DEGREE_CHECK: () = {
@@ -318,7 +316,7 @@ where
 
 impl<C, const DEGREE_PLUS_ONE: usize> ProjectableToField<C> for BinaryU64Poly<DEGREE_PLUS_ONE>
 where
-    C: FieldConfig + Clone + Send + Sync + 'static,
+    C: FieldConfig + 'static,
 {
     fn prepare_projection(cfg: &C, sampled_value: &C::Element) -> impl Fn(&Self) -> C::Element {
         prepare_projection::<C, Self, _, DEGREE_PLUS_ONE>(cfg, sampled_value, |poly, i| {
