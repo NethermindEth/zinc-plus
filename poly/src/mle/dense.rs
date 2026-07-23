@@ -444,7 +444,7 @@ mod tests {
 
     fn get_dyn_config(hex_modulus: &str) -> MontyField<LIMBS> {
         let modulus =
-            Uint::from_str(&format!("0x{hex_modulus}")).unwrap("Invalid modulus hex string");
+            Uint::from_str(&format!("0x{hex_modulus}")).expect("Invalid modulus hex string");
         MontyField::new(&modulus).expect("Failed to create field config")
     }
 
