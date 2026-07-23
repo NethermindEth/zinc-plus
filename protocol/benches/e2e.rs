@@ -366,7 +366,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     bench_prove!("Prove (Combined)", false);
     bench_prove!("Prove (MLE-first)", true);
 
-    let proof: Proof<E> =
+    let proof: Proof<ZtFmod> =
         <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 
@@ -538,7 +538,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         };
     }
 
-    let proof: Proof<E> =
+    let proof: Proof<ZtFmod> =
         <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
             .expect("proof generation for verifier bench");
 

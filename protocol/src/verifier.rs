@@ -23,7 +23,7 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
-use zinc_utils::{add, projectable_to_field::ProjectableToField};
+use zinc_utils::{add, projectable_to_field::ProjectableToField, sub};
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsVerifierTranscript,
@@ -64,28 +64,28 @@ pub struct VerifierTranscriptReconstructed<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
 
-    // Proof leftovers
+    // Proof leftovers, still in wire form (canonical lifted integers)
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    proof_ideal_check: IdealCheckProof<C::Element>,
-    proof_cpr: CombinedPolyResolverProof<C::Element>,
-    proof_combined_sumcheck: MultiDegreeSumcheckProof<C::Element>,
-    proof_multipoint_eval: MultipointEvalProof<C::Element>,
+    proof_ideal_check: IdealCheckProof<Zt::Fmod>,
+    proof_cpr: CombinedPolyResolverProof<Zt::Fmod>,
+    proof_combined_sumcheck: MultiDegreeSumcheckProof<Zt::Fmod>,
+    proof_multipoint_eval: MultipointEvalProof<Zt::Fmod>,
     /// Per-constraint-family witness-only lifted MLE evals. Layout:
     /// `[0]` = Q-family ($q_0$), `[i]` = declared prime $i - 1$ for
     /// $i = 1, \ldots, n$. Length = `1 + n_fq`.
-    proof_witness_lifted_evals: Vec<Vec<DynamicPolynomial<C::Element>>>,
+    proof_witness_lifted_evals: Vec<Vec<DynamicPolynomial<Zt::Fmod>>>,
     /// Witness-only lifted MLE evals for $q''$ prime.
     /// `None` when there's no $F_q[X]$ constraints, in which case we assume
     /// $q'' := q_0$ and thus `proof_witness_lifted_evals[0]` is used for
     /// PCS verification.
-    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<C::Element>>>,
-    proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
-    proof_booleanity: Option<BooleanityProof<C::Element>>,
-    proof_ideal_checks_fq: Vec<IdealCheckProof<C::Element>>,
-    proof_cpr_fq: Vec<CombinedPolyResolverProof<C::Element>>,
-    proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<C::Element>>,
-    proof_multipoint_evals_fq: Vec<MultipointEvalProof<C::Element>>,
-    _phantom: PhantomData<(U, IdealOverF)>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
+    proof_lookup_proof: Option<BatchedLookupProof<Zt::Fmod>>,
+    proof_booleanity: Option<BooleanityProof<Zt::Fmod>>,
+    proof_ideal_checks_fq: Vec<IdealCheckProof<Zt::Fmod>>,
+    proof_cpr_fq: Vec<CombinedPolyResolverProof<Zt::Fmod>>,
+    proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<Zt::Fmod>>,
+    proof_multipoint_evals_fq: Vec<MultipointEvalProof<Zt::Fmod>>,
+    _phantom: PhantomData<(U, C, IdealOverF)>,
 }
 
 /// After step 1 (prime projection).
@@ -113,7 +113,7 @@ pub struct VerifierPrimeProjected<
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomial<C::Element>>>,
     /// Witness-only lifted MLE evals for $q''$ prime (see
     /// [`VerifierTranscriptReconstructed`] doc)
-    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<C::Element>>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<C::Element>>,
@@ -161,7 +161,7 @@ pub struct VerifierIdealChecked<
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomial<C::Element>>>,
     /// Witness-only lifted MLE evals for $q''$ prime (see
     /// [`VerifierTranscriptReconstructed`] doc)
-    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<C::Element>>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
     /// Per-prime CPR proofs (one per declared prime).
@@ -218,7 +218,7 @@ pub struct VerifierEvalProjected<
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomial<C::Element>>>,
     /// Witness-only lifted MLE evals for $q''$ prime (see
     /// [`VerifierTranscriptReconstructed`] doc)
-    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<C::Element>>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
     /// Per-prime CPR proofs (one per declared prime).
@@ -289,7 +289,7 @@ pub struct VerifierSumchecked<
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomial<C::Element>>>,
     /// Witness-only lifted MLE evals for $q''$ prime (see
     /// [`VerifierTranscriptReconstructed`] doc)
-    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<C::Element>>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -326,7 +326,7 @@ pub struct VerifierMultipointEvaled<
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomial<C::Element>>>,
     /// Witness-only lifted MLE evals for $q''$ prime (see
     /// [`VerifierTranscriptReconstructed`] doc)
-    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<C::Element>>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -387,7 +387,7 @@ where
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
-        mut proof: Proof<C::Element>,
+        mut proof: Proof<Zt::Fmod>,
         public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
     ) -> Result<
@@ -477,22 +477,80 @@ where
             .fs_transcript
             .get_random_field_cfg::<C, Zt::Fmod, Zt::PrimeTest>();
 
+        // Project the wire proof (canonical lifted integers) into the
+        // per-family fields, now that every constraint-family config is
+        // known ($q_0$ sampled above, declared primes from the signature).
+        // Rejects non-canonical encodings. The $q''$-family section stays
+        // in wire form until step 7 samples $q''$.
+        let all_field_cfgs = build_all_cfgs::<C>(&self.base.uair_signature, field_cfg.clone());
+        macro_rules! project {
+            ($cfg:expr, $section:expr) => {
+                $section.try_map(|int| project_canonical($cfg, int))
+            };
+        }
+        macro_rules! project_fq_vec {
+            ($section:expr) => {
+                $section
+                    .iter()
+                    .zip(&all_field_cfgs[1..])
+                    .map(|(p, cfg)| project!(cfg, p))
+                    .try_collect()
+            };
+        }
+        let n_families = all_field_cfgs.len();
+        if self.proof_witness_lifted_evals.len() != n_families {
+            return Err(ProtocolError::FamilyCountMismatch {
+                got: self.proof_witness_lifted_evals.len(),
+                expected: n_families,
+            });
+        }
+        for fq_len in [
+            self.proof_ideal_checks_fq.len(),
+            self.proof_cpr_fq.len(),
+            self.proof_combined_sumchecks_fq.len(),
+            self.proof_multipoint_evals_fq.len(),
+        ] {
+            if fq_len != sub!(n_families, 1) {
+                return Err(ProtocolError::FamilyCountMismatch {
+                    got: fq_len,
+                    expected: sub!(n_families, 1),
+                });
+            }
+        }
+        let proof_witness_lifted_evals = self
+            .proof_witness_lifted_evals
+            .iter()
+            .zip(&all_field_cfgs)
+            .map(|(polys, cfg)| {
+                polys
+                    .iter()
+                    .map(|poly| poly.try_map(|int| project_canonical(cfg, int)))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(VerifierPrimeProjected {
             base: self.base,
-            field_cfg,
             proof_commitments: self.proof_commitments,
-            proof_ideal_check: self.proof_ideal_check,
-            proof_cpr: self.proof_cpr,
-            proof_combined_sumcheck: self.proof_combined_sumcheck,
-            proof_multipoint_eval: self.proof_multipoint_eval,
-            proof_witness_lifted_evals: self.proof_witness_lifted_evals,
+            proof_ideal_check: project!(&field_cfg, self.proof_ideal_check)?,
+            proof_cpr: project!(&field_cfg, self.proof_cpr)?,
+            proof_combined_sumcheck: project!(&field_cfg, self.proof_combined_sumcheck)?,
+            proof_multipoint_eval: project!(&field_cfg, self.proof_multipoint_eval)?,
+            proof_witness_lifted_evals,
             proof_witness_lifted_evals_pp: self.proof_witness_lifted_evals_pp,
-            proof_lookup_proof: self.proof_lookup_proof,
-            proof_booleanity: self.proof_booleanity,
-            proof_ideal_checks_fq: self.proof_ideal_checks_fq,
-            proof_cpr_fq: self.proof_cpr_fq,
-            proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
-            proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
+            proof_lookup_proof: match &self.proof_lookup_proof {
+                Some(p) => Some(project!(&field_cfg, p)?),
+                None => None,
+            },
+            proof_booleanity: match &self.proof_booleanity {
+                Some(p) => Some(project!(&field_cfg, p)?),
+                None => None,
+            },
+            proof_ideal_checks_fq: project_fq_vec!(self.proof_ideal_checks_fq)?,
+            proof_cpr_fq: project_fq_vec!(self.proof_cpr_fq)?,
+            proof_combined_sumchecks_fq: project_fq_vec!(self.proof_combined_sumchecks_fq)?,
+            proof_multipoint_evals_fq: project_fq_vec!(self.proof_multipoint_evals_fq)?,
+            field_cfg,
             _phantom: PhantomData,
         })
     }
@@ -1254,6 +1312,19 @@ where
                 .fs_transcript
                 .get_random_field_cfg::<C, Zt::Fmod, Zt::PrimeTest>()
         };
+
+        // $q''$ is now known: project the last wire-form proof section,
+        // rejecting non-canonical encodings.
+        let proof_witness_lifted_evals_pp = self
+            .proof_witness_lifted_evals_pp
+            .as_ref()
+            .map(|polys| {
+                polys
+                    .iter()
+                    .map(|poly| poly.try_map(|int| project_canonical(&q_pp_cfg, int)))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         // r* = r0 mod q'' (the underlying integer of mp_subclaim.r0 is
         // the shared challenge in [0, q*); lift into q'' cfg).
         // Aliased to r0 when q'' = q0.
@@ -1393,7 +1464,7 @@ where
                     .absorb_field_element_slice(&bar_u.coeffs, &mut transcription_buf);
             }
         }
-        if let Some(ref lifted_evals_pp) = self.proof_witness_lifted_evals_pp {
+        if let Some(ref lifted_evals_pp) = proof_witness_lifted_evals_pp {
             for bar_u in lifted_evals_pp.iter() {
                 self.base
                     .pcs_transcript
@@ -1406,7 +1477,7 @@ where
         let lifted_evals_pp = if n_fq == 0 {
             self.proof_witness_lifted_evals[0].clone()
         } else {
-            let Some(lifted_evals_pp) = self.proof_witness_lifted_evals_pp else {
+            let Some(lifted_evals_pp) = proof_witness_lifted_evals_pp else {
                 return Err(ProtocolError::WitnessLiftedEvalsPpLengthMismatch {
                     got: 0,
                     expected: expected_pp_len,
@@ -1638,7 +1709,7 @@ where
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
-        proof: Proof<C::Element>,
+        proof: Proof<Zt::Fmod>,
         public_trace: &UairTrace<Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &C) -> DynamicPolynomial<C::Element>,

@@ -1,9 +1,25 @@
+use itertools::Itertools;
 use zinc_poly::univariate::dynamic::{DynamicPolyVec, DynamicPolynomial};
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F> {
     pub combined_mle_values: Vec<DynamicPolynomial<F>>,
+}
+
+impl<F> Proof<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(&self, f: impl FnMut(&F) -> Result<T, E> + Copy) -> Result<Proof<T>, E> {
+        Ok(Proof {
+            combined_mle_values: self
+                .combined_mle_values
+                .iter()
+                .map(|p| p.try_map(f))
+                .try_collect()?,
+        })
+    }
 }
 
 impl<F> GenTranscribable for Proof<F>

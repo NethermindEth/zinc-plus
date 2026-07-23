@@ -169,6 +169,7 @@ where
         + ProjectElementWithConfig<<TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + Sync,
     C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
     C::Integer: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod>,
 {
     setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_test_params, || {
@@ -200,6 +201,7 @@ where
         + ProjectElementWithConfig<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + Sync,
     C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
     C::Integer: FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod>,
 {
     setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_poly_test_params, || {
@@ -226,6 +228,7 @@ where
         + ProjectElementWithConfig<Zt::CombR>
         + Sync,
     C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
     C::Integer: FromRef<Zt::Fmod>,
     (): MulByScalar<Zt::CombR, Zt::Chal>,
 {

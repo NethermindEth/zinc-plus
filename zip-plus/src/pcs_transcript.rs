@@ -1,4 +1,5 @@
 use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
+use crypto_primitives::BaseFieldConfig;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
 use zinc_transcript::{
@@ -95,14 +96,20 @@ impl PcsProverTranscript {
     /// transcript, as raw (inner-representation) bytes.
     ///
     /// The field modulus is NOT written here.
-    pub fn write_field_elements<E>(&mut self, elems: &[E]) -> Result<(), ZipError>
+    /// Absorbs the elements into the Fiat-Shamir transcript (raw inner
+    /// representation) and writes their canonical lifted integers to the
+    /// proof stream. The wire never carries raw Montgomery residues.
+    pub fn write_field_elements<C>(&mut self, cfg: &C, elems: &[C::Element]) -> Result<(), ZipError>
     where
-        E: ConstTranscribable,
+        C: BaseFieldConfig,
+        C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
     {
-        let mut buf = vec![0; E::NUM_BYTES];
+        let mut buf = vec![0; C::Element::NUM_BYTES];
         self.fs_transcript
             .absorb_field_element_slice(elems, &mut buf);
-        self.write_const_many(elems)
+        let lifted: Vec<C::Integer> = elems.iter().map(|e| cfg.lift(e)).collect();
+        self.write_const_many(&lifted)
     }
 
     pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), ZipError> {
@@ -201,15 +208,32 @@ pub struct PcsVerifierTranscript {
 impl PcsVerifierTranscript {
     common_methods!();
 
-    /// Reads field elements from the proof stream and absorbs them into the
-    /// transcript, as raw (inner-representation) bytes. The mirror of
-    /// [`PcsProverTranscript::write_field_elements`].
-    pub fn read_field_elements<E>(&mut self, n: usize) -> Result<Vec<E>, ZipError>
+    /// Reads canonical lifted integers from the proof stream, strictly
+    /// validates them against the field modulus, projects them into the
+    /// field, and absorbs the resulting elements into the transcript. The
+    /// mirror of [`PcsProverTranscript::write_field_elements`].
+    ///
+    /// Rejects any integer `>= modulus`: every field value has exactly one
+    /// accepted encoding on the wire.
+    pub fn read_field_elements<C>(&mut self, cfg: &C, n: usize) -> Result<Vec<C::Element>, ZipError>
     where
-        E: ConstTranscribable,
+        C: BaseFieldConfig,
+        C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
     {
-        let elems: Vec<E> = self.read_const_many(n)?;
-        let mut buf = vec![0; E::NUM_BYTES];
+        let ints: Vec<C::Integer> = self.read_const_many(n)?;
+        let modulus = cfg.modulus();
+        let elems: Vec<C::Element> = ints
+            .iter()
+            .map(|int| {
+                if *int < modulus {
+                    Ok(cfg.project(int))
+                } else {
+                    Err(ZipError::NonCanonicalFieldElement)
+                }
+            })
+            .try_collect()?;
+        let mut buf = vec![0; C::Element::NUM_BYTES];
         self.fs_transcript
             .absorb_field_element_slice(&elems, &mut buf);
         Ok(elems)

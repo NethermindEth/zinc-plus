@@ -4,8 +4,8 @@
 
 use crypto_bigint::{Word, modular::ConstMontyParams};
 use crypto_primitives::{
-    BaseFieldConfig, ConstIntSemiring, FieldConfig, ProjectElementWithConfig, Semiring, Wrapper,
-    boolean::Boolean, crypto_bigint_boxed_uint::BoxedUint,
+    BaseFieldConfig, ConstBaseField, ConstIntSemiring, FieldConfig, ProjectElementWithConfig,
+    Semiring, boolean::Boolean, crypto_bigint_boxed_uint::BoxedUint,
     crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int,
     crypto_bigint_monty::MontyFieldElement, crypto_bigint_uint::Uint,
 };
@@ -561,20 +561,46 @@ impl Transcribable for BoxedUint {
     }
 }
 
-// Field elements are transcribed as their raw inner representations: the
-// field config is bound into the transcript separately, when the field is
-// sampled, so no modulus rides along with the elements.
-delegate_const_transcribable!(MontyFieldElement<const LIMBS: usize>(Uint<LIMBS>));
+// Field elements cross the wire as canonical lifted integers: the field
+// config is bound into the transcript separately, when the field is sampled,
+// and proof readers must deserialize integers and project them through that
+// config, rejecting non-canonical values (`>= modulus`). Accepting raw limbs
+// as Montgomery residues would let malformed proofs inject unreduced
+// residues that break arithmetic preconditions, raw-form equality, and
+// encoding uniqueness.
+//
+// `MontyFieldElement` therefore only supports *writing* here (its raw inner
+// form, used for transcript absorption, which both sides perform on
+// projected canonical elements).
+impl<const LIMBS: usize> GenTranscribable for MontyFieldElement<LIMBS> {
+    fn read_transcription_bytes_exact(_bytes: &[u8]) -> Self {
+        panic!("MontyFieldElement cannot be deserialized without a field config");
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        self.0.write_transcription_bytes_exact(buf)
+    }
+}
+
+impl<const LIMBS: usize> ConstTranscribable for MontyFieldElement<LIMBS> {
+    const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
+    const NUM_BITS: usize = Uint::<LIMBS>::NUM_BITS;
+}
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> GenTranscribable
     for ConstMontyField<Mod, LIMBS>
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
-        Self::new_unchecked(Uint::<LIMBS>::read_transcription_bytes_exact(bytes))
+        let int = Uint::<LIMBS>::read_transcription_bytes_exact(bytes);
+        assert!(
+            int < <Self as ConstBaseField>::MODULUS,
+            "non-canonical field element: lifted integer >= modulus"
+        );
+        Self::new(int)
     }
 
     fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
-        self.inner().write_transcription_bytes_exact(buf)
+        self.retrieve().write_transcription_bytes_exact(buf)
     }
 }
 

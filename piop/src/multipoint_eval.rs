@@ -81,6 +81,17 @@ pub struct Proof<F> {
     pub sumcheck_proof: MultiDegreeSumcheckProof<F>,
 }
 
+impl<F> Proof<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(&self, f: impl FnMut(&F) -> Result<T, E> + Copy) -> Result<Proof<T>, E> {
+        Ok(Proof {
+            sumcheck_proof: self.sumcheck_proof.try_map(f)?,
+        })
+    }
+}
+
 delegate_transcribable!(Proof<F> { sumcheck_proof: MultiDegreeSumcheckProof<F> }
     where F: ConstTranscribable);
 

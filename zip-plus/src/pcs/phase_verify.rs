@@ -109,6 +109,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + ProjectElementWithConfig<Zt::CombR>
             + ProjectElementWithConfig<Zt::Chal>,
         C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
     {
         let per_poly_alphas = Self::sample_alphas(&mut transcript.fs_transcript, comm.batch_size);
         Self::verify_with_alphas::<C, CHECK_FOR_OVERFLOW>(
@@ -144,6 +145,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + ProjectElementWithConfig<Zt::CombR>
             + ProjectElementWithConfig<Zt::Chal>,
         C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
     {
         let batch_size = comm.batch_size;
         validate_input::<Zt, Lc, _>(
@@ -163,7 +165,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(field_cfg, point_f, vp.num_rows)?;
         let zero_f = field_cfg.zero();
 
-        let b: Vec<C::Element> = transcript.read_field_elements(num_rows)?;
+        let b: Vec<C::Element> = transcript.read_field_elements(field_cfg, num_rows)?;
 
         // Check 1: <q_0, b> == eval_f
         let q_0_dot_b =
@@ -325,7 +327,7 @@ mod tests {
         FixedConfig, IntSemiring, ProjectElementWithConfig, SemiringConfig,
         crypto_bigint_int::Int,
         crypto_bigint_monty::{MontyField, MontyFieldElement},
-        crypto_bigint_uint::U64,
+        crypto_bigint_uint::{U64, Uint},
     };
     use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero, Zero};
@@ -442,14 +444,15 @@ mod tests {
     #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_with_tampered_proof() {
         fn tamper(mut proof: PcsVerifierTranscript) -> PcsVerifierTranscript {
-            let original_f0: F = proof.clone().read_field_elements(1).unwrap().remove(0);
-            // The b field elements are transcribed raw (no length prefix, no
-            // modulus); flip a byte in the first element's value.
+            let original_i0: Uint<K> = proof.clone().read_const_many(1).unwrap().remove(0);
+            // The b field elements are transcribed as canonical lifted
+            // integers (no length prefix, no modulus); flip a byte in the
+            // first element's value.
             proof.stream.get_mut()[0] ^= 0x01;
 
             // Sanity check that we didn't mess up the tampering
-            let tampered_f0: F = proof.clone().read_field_elements(1).unwrap().remove(0);
-            assert_ne!(original_f0, tampered_f0);
+            let tampered_i0: Uint<K> = proof.clone().read_const_many(1).unwrap().remove(0);
+            assert_ne!(original_i0, tampered_i0);
 
             proof
         }

@@ -14,6 +14,7 @@
 //! 3. Each group produces a subclaim at the shared point r = (r_1, ..., r_n)
 
 use crypto_primitives::{BaseFieldConfig, ProjectPrimitiveIntegersWithConfig, SetConfig};
+use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::marker::PhantomData;
@@ -123,6 +124,24 @@ pub struct MultiDegreeSumcheckProof<F> {
 }
 
 impl<F> MultiDegreeSumcheckProof<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(
+        &self,
+        f: impl FnMut(&F) -> Result<T, E> + Copy,
+    ) -> Result<MultiDegreeSumcheckProof<T>, E> {
+        Ok(MultiDegreeSumcheckProof {
+            group_messages: self
+                .group_messages
+                .iter()
+                .map(|msgs| msgs.iter().map(|m| m.try_map(f)).try_collect())
+                .try_collect()?,
+            claimed_sums: self.claimed_sums.iter().map(f).try_collect()?,
+            degrees: self.degrees.clone(),
+        })
+    }
+
     /// Needed by the verifier to check against expected
     /// sums before running the sumcheck.
     pub fn claimed_sums(&self) -> &[F] {

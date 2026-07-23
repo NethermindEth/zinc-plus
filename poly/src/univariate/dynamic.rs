@@ -1,10 +1,9 @@
-use std::fmt::Display;
-
 use crypto_primitives::{
     FieldConfig, ProjectElementWithConfig, RingConfig, SemiringConfig, SetConfig, boolean::Boolean,
 };
 use derive_more::From;
 use itertools::Itertools;
+use std::fmt::Display;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_utils::{add, mul, projectable_to_field::ProjectableToField, rem};
 
@@ -63,6 +62,18 @@ pub struct DynamicPolynomial<E> {
 
 impl<E> DynamicPolynomial<E> {
     pub const ZERO: Self = Self { coeffs: Vec::new() };
+
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, Er>(
+        &self,
+        f: impl FnMut(&E) -> Result<T, Er> + Copy,
+    ) -> Result<DynamicPolynomial<T>, Er> {
+        Ok(DynamicPolynomial {
+            coeffs: self.coeffs.iter().map(f).try_collect()?,
+        })
+    }
 
     /// Create a new polynomial with the given coefficients.
     #[inline(always)]

@@ -1,10 +1,10 @@
 //! Prover
 
-use std::slice;
-
 use crypto_primitives::{SemiringConfig, SetConfig};
+use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
+use std::slice;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtension};
 use zinc_transcript::{delegate_transcribable, traits::ConstTranscribable};
 use zinc_utils::{cfg_into_iter, cfg_iter_mut};
@@ -20,6 +20,18 @@ pub struct NatEvaluatedPolyWithoutConstant<F> {
 impl<F> NatEvaluatedPolyWithoutConstant<F> {
     pub fn new(tail_evaluations: Vec<F>) -> Self {
         Self { tail_evaluations }
+    }
+
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(
+        &self,
+        f: impl FnMut(&F) -> Result<T, E> + Copy,
+    ) -> Result<NatEvaluatedPolyWithoutConstant<T>, E> {
+        Ok(NatEvaluatedPolyWithoutConstant {
+            tail_evaluations: self.tail_evaluations.iter().map(f).try_collect()?,
+        })
     }
 }
 
@@ -46,6 +58,18 @@ pub struct ProverMsg<F>(pub NatEvaluatedPolyWithoutConstant<F>);
 
 delegate_transcribable!(ProverMsg<F>(NatEvaluatedPolyWithoutConstant<F>)
     where F: ConstTranscribable);
+
+impl<F> ProverMsg<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(
+        &self,
+        f: impl FnMut(&F) -> Result<T, E> + Copy,
+    ) -> Result<ProverMsg<T>, E> {
+        Ok(ProverMsg(self.0.try_map(f)?))
+    }
+}
 
 /// Sumcheck Prover State, generic over the field config `C`.
 pub struct ProverState<C: SetConfig> {

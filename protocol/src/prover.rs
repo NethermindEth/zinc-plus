@@ -1,11 +1,12 @@
 use super::*;
+use itertools::Itertools;
 use std::{
     borrow::Cow,
     fmt::{Debug, Display},
 };
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
-    ideal_check::IdealCheckProtocol,
+    ideal_check::{IdealCheckProtocol, Proof as IdealCheckProof},
     lookup::booleanity::{BooleanityChecker, BooleanityProof},
     multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs, Proof as MultipointEvalProof},
     projections::{
@@ -376,6 +377,7 @@ pub struct ProverLifted<
     const FD: usize,
 > {
     base: ProverCommitted<'a, Zt, U, C, D, FD>,
+    field_cfg: C,
     ic_proof: IdealCheckProof<C::Element>,
     ic_proof_fq: Vec<IdealCheckProof<C::Element>>,
     cpr_proof: CombinedPolyResolverProof<C::Element>,
@@ -424,6 +426,10 @@ pub struct ProverPcsOpened<
     const FD: usize,
 > {
     base: ProverCommitted<'a, Zt, U, C, D, FD>,
+    field_cfg: C,
+    /// PCS-only prime cfg sampled at step 7 start, needed to lift the
+    /// $q''$-family section into wire integers.
+    q_pp_cfg: C,
     ic_proof: IdealCheckProof<C::Element>,
     ic_proof_fq: Vec<IdealCheckProof<C::Element>>,
     cpr_proof: CombinedPolyResolverProof<C::Element>,
@@ -1529,6 +1535,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
 
         Ok(ProverLifted {
             base: self.base,
+            field_cfg: self.field_cfg,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
@@ -1614,6 +1621,8 @@ impl_with_type_bounds!(ProverLifted
 
         Ok(ProverPcsOpened {
             base: self.base,
+            field_cfg: self.field_cfg,
+            q_pp_cfg: self.q_pp_cfg,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
@@ -1632,30 +1641,74 @@ impl_with_type_bounds!(ProverLifted
 
 impl_with_type_bounds!(ProverPcsOpened
 {
-    /// Assemble the final proof from accumulated state.
-    pub fn finish(self) -> Result<Proof<C::Element>, ProtocolError<C::Element>> {
+    /// Assemble the final proof from accumulated state, lifting every field
+    /// element into its canonical integer
+    pub fn finish(self) -> Result<Proof<Zt::Fmod>, ProtocolError<C::Element>> {
         let zip_proof = self.base.pcs_transcript.stream.into_inner();
         let commitments = (
             self.base.commitment_bin,
             self.base.commitment_arb,
             self.base.commitment_int,
         );
+        let all_cfgs = build_all_cfgs::<C>(&self.base.uair_signature, self.field_cfg.clone());
+
+        // Helpers
+        macro_rules! lift {
+            ($cfg:expr, $section:expr) => {
+                $section.try_map(|e| Ok::<Zt::Fmod, ProtocolError<C::Element>>($cfg.lift(e)))
+            };
+        }
+        macro_rules! lift_fq_vec {
+            ($section:expr) => {
+                 $section
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| lift!(all_cfgs[add!(i, 1)], p))
+                    .try_collect()
+            };
+        }
+        let lift_polys = |cfg: &C,
+                          polys: &[DynamicPolynomial<C::Element>]|
+         -> Result<Vec<DynamicPolynomial<Zt::Fmod>>, ProtocolError<C::Element>> {
+            polys
+                .iter()
+                .map(|p| p.try_map(|e| Ok(cfg.lift(e))))
+                .collect()
+        };
+
+        let witness_lifted_evals = self
+            .lifted_evals
+            .iter()
+            .enumerate()
+            .map(|(i, polys)| lift_polys(&all_cfgs[i], polys))
+            .collect::<Result<Vec<_>, _>>()?;
+        let witness_lifted_evals_pp = self
+            .lifted_evals_pp
+            .as_ref()
+            .map(|polys| lift_polys(&self.q_pp_cfg, polys))
+            .transpose()?;
 
         Ok(Proof {
             commitments,
-            ideal_check: self.ic_proof,
-            cpr_proof: self.cpr_proof,
-            combined_sumcheck: self.combined_sumcheck,
-            multipoint_eval: self.mp_proof,
+            ideal_check: lift!(self.field_cfg, self.ic_proof)?,
+            cpr_proof: lift!(self.field_cfg, self.cpr_proof)?,
+            combined_sumcheck: lift!(self.field_cfg, self.combined_sumcheck)?,
+            multipoint_eval: lift!(self.field_cfg, self.mp_proof)?,
             zip: zip_proof,
-            witness_lifted_evals: self.lifted_evals,
-            lookup_proof: self.lookup_proof,
-            booleanity_proof: self.booleanity_proof,
-            ideal_checks_fq: self.ic_proof_fq,
-            cpr_proofs_fq: self.cpr_proofs_fq,
-            combined_sumchecks_fq: self.combined_sumchecks_fq,
-            multipoint_evals_fq: self.mp_proofs_fq,
-            witness_lifted_evals_pp: self.lifted_evals_pp,
+            witness_lifted_evals,
+            lookup_proof: match &self.lookup_proof {
+                Some(p) => Some(lift!(self.field_cfg, p)?),
+                None => None,
+            },
+            booleanity_proof: match &self.booleanity_proof {
+                Some(p) => Some(lift!(self.field_cfg, p)?),
+                None => None,
+            },
+            ideal_checks_fq: lift_fq_vec!(self.ic_proof_fq)?,
+            cpr_proofs_fq: lift_fq_vec!(self.cpr_proofs_fq)?,
+            combined_sumchecks_fq: lift_fq_vec!(self.combined_sumchecks_fq)?,
+            multipoint_evals_fq: lift_fq_vec!(self.mp_proofs_fq)?,
+            witness_lifted_evals_pp,
         })
     }
 });
@@ -1698,7 +1751,7 @@ where
         trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &C) -> DynamicPolynomial<C::Element> + Copy,
-    ) -> Result<Proof<C::Element>, ProtocolError<C::Element>> {
+    ) -> Result<Proof<Zt::Fmod>, ProtocolError<C::Element>> {
         let committed = Self::step0_fold(trace)?.step1_commit(pp, num_vars)?;
 
         let ideal_checked = if MLE_FIRST {

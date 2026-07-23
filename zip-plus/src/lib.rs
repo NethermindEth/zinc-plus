@@ -24,6 +24,8 @@ pub enum ZipError {
     Transcript(ErrorKind, String),
     #[error("Error during polynomial evaluation: {0}")]
     PolynomialEvaluationError(zinc_poly::EvaluationError),
+    #[error("Non-canonical field element: lifted integer >= modulus")]
+    NonCanonicalFieldElement,
     #[error("Error during inner product computation: {0}")]
     InnerProductError(zinc_utils::inner_product::InnerProductError),
 }

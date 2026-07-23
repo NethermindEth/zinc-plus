@@ -113,6 +113,20 @@ pub struct BooleanityProof<F> {
     pub bit_slice_evals: Vec<F>,
 }
 
+impl<F> BooleanityProof<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(
+        &self,
+        f: impl FnMut(&F) -> Result<T, E> + Copy,
+    ) -> Result<BooleanityProof<T>, E> {
+        Ok(BooleanityProof {
+            bit_slice_evals: self.bit_slice_evals.iter().map(f).try_collect()?,
+        })
+    }
+}
+
 delegate_transcribable!(BooleanityProof<F> { bit_slice_evals: Vec<F> }
     where F: ConstTranscribable);
 

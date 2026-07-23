@@ -95,6 +95,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + ProjectElementWithConfig<Zt::CombR>
             + Sync,
         C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
         (): MulByScalar<Zt::CombR, Zt::Chal>,
     {
         let point = point
@@ -125,6 +126,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     where
         C: BaseFieldConfig + ProjectElementWithConfig<Zt::CombR> + Sync,
         C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
         (): MulByScalar<Zt::CombR, Zt::Chal>,
     {
         let batch_size = polys.len();
@@ -197,7 +199,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             b
         };
 
-        transcript.write_field_elements(&b)?;
+        transcript.write_field_elements(field_cfg, &b)?;
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
         let eval = q_0.iter().zip(&b).fold(zero_f, |mut acc, (l, r)| {
             field_cfg.add_assign(&mut acc, &field_cfg.mul(l, r));
@@ -275,6 +277,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + ProjectElementWithConfig<Zt::CombR>
             + Sync,
         C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
         (): MulByScalar<Zt::CombR, Zt::Chal>,
     {
         Self::prove::<C, CHECK_FOR_OVERFLOW>(

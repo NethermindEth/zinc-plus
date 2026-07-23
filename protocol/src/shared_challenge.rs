@@ -29,7 +29,6 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 pub fn compute_q_star_idx<C>(prime_cfgs: &[C]) -> usize
 where
     C: BaseFieldConfig,
-    C::Integer: Ord,
 {
     prime_cfgs
         .iter()

@@ -1,9 +1,9 @@
+use crate::combined_poly_resolver::CombinedPolyResolverError;
 use crypto_primitives::SetElement;
+use itertools::Itertools;
 use std::fmt::Debug;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_utils::add;
-
-use crate::combined_poly_resolver::CombinedPolyResolverError;
 
 /// The proof type of the combined polynomial resolver subprotocol.
 ///
@@ -26,6 +26,19 @@ pub struct Proof<F> {
     /// The evaluations of the bit-op virtual columns (ROTR / SHR) at the
     /// shared point, in `UairSignature::bit_op_specs()` order.
     pub bit_op_evals: Vec<F>,
+}
+
+impl<F> Proof<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(&self, f: impl FnMut(&F) -> Result<T, E> + Copy) -> Result<Proof<T>, E> {
+        Ok(Proof {
+            up_evals: self.up_evals.iter().map(f).try_collect()?,
+            down_evals: self.down_evals.iter().map(f).try_collect()?,
+            bit_op_evals: self.bit_op_evals.iter().map(f).try_collect()?,
+        })
+    }
 }
 
 impl<F: ConstTranscribable> GenTranscribable for Proof<F> {

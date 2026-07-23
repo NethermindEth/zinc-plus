@@ -5,6 +5,7 @@
 //! `LookupColumnSpec`) live in `zinc-uair` and are re-exported from the
 //! parent module.
 
+use itertools::Itertools;
 use std::collections::BTreeMap;
 use thiserror::Error;
 use zinc_uair::LookupTableType;
@@ -33,6 +34,34 @@ pub struct BatchedDecompLogupProof<F> {
     pub chunk_inverse_witnesses: Vec<Vec<Vec<F>>>,
     /// Shared inverse table vector: `inverse_table[j] = 1 / (β − T[j])`.
     pub inverse_table: Vec<F>,
+}
+
+impl<F> BatchedDecompLogupProof<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(
+        &self,
+        f: impl FnMut(&F) -> Result<T, E> + Copy,
+    ) -> Result<BatchedDecompLogupProof<T>, E> {
+        Ok(BatchedDecompLogupProof {
+            aggregated_multiplicities: self
+                .aggregated_multiplicities
+                .iter()
+                .map(|v| v.iter().map(f).try_collect())
+                .try_collect()?,
+            chunk_inverse_witnesses: self
+                .chunk_inverse_witnesses
+                .iter()
+                .map(|vv| {
+                    vv.iter()
+                        .map(|v| v.iter().map(f).try_collect())
+                        .try_collect()
+                })
+                .try_collect()?,
+            inverse_table: self.inverse_table.iter().map(f).try_collect()?,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +117,25 @@ pub struct BatchedLookupProof<F> {
     pub group_proofs: Vec<BatchedDecompLogupProof<F>>,
     /// Per-group metadata needed by the verifier.
     pub group_meta: Vec<LookupGroupMeta>,
+}
+
+impl<F> BatchedLookupProof<F> {
+    /// Maps every field element through `f`, preserving structure — used to
+    /// lift elements into wire integers and to project wire integers back
+    /// into elements at the (de)serialization boundary.
+    pub fn try_map<T, E>(
+        &self,
+        f: impl FnMut(&F) -> Result<T, E> + Copy,
+    ) -> Result<BatchedLookupProof<T>, E> {
+        Ok(BatchedLookupProof {
+            group_proofs: self
+                .group_proofs
+                .iter()
+                .map(|p| p.try_map(f))
+                .try_collect()?,
+            group_meta: self.group_meta.clone(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

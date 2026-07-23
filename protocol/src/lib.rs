@@ -566,6 +566,10 @@ pub enum ProtocolError<F: SetElement> {
     Booleanity(#[from] BooleanityError<F>),
     #[error("booleanity proof missing from proof object")]
     BooleanityProofMissing,
+    #[error("non-canonical proof element: lifted integer >= family modulus")]
+    NonCanonicalElement,
+    #[error("proof family count mismatch: got {got}, expected {expected}")]
+    FamilyCountMismatch { got: usize, expected: usize },
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
@@ -619,7 +623,7 @@ fn absorb_public_columns<T: ConstTranscribable>(
 /// Binary columns exploit the 0/1 structure for conditional additions only.
 /// The `eq(point, *)` table is built once and reused across all columns.
 #[allow(clippy::arithmetic_side_effects)]
-fn compute_lifted_evals<C: BaseFieldConfig + Sync, const D: usize>(
+fn compute_lifted_evals<C: BaseFieldConfig, const D: usize>(
     point: &[C::Element],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
     projected_trace: &ProjectedTrace<C::Element>,
@@ -749,6 +753,21 @@ where
         .collect()
 }
 
+/// Projects a canonical lifted integer from the wire into the field
+/// configured by `cfg`, rejecting non-canonical encodings: every field
+/// value has exactly one accepted wire representation (`0 <= int < q`).
+fn project_canonical<C, F>(cfg: &C, int: &C::Integer) -> Result<C::Element, ProtocolError<F>>
+where
+    C: BaseFieldConfig,
+    F: SetElement,
+{
+    if *int < cfg.modulus() {
+        Ok(cfg.project(int))
+    } else {
+        Err(ProtocolError::NonCanonicalElement)
+    }
+}
+
 /// Build the list of per-family field configs in family order:
 /// `prime_cfgs[0]` is the $Q[X]$ family's sampled prime $q_0$,
 /// `prime_cfgs[1..=n]` are the declared $q_1, ..., q_n$ in
@@ -793,7 +812,7 @@ mod tests {
     use super::*;
     use crate::fold::FoldBinaryTrace4x;
     use crypto_primitives::{
-        FieldConfig, RingConfig, SemiringConfig,
+        FieldConfig, LiftElementWithConfig, RingConfig, SemiringConfig,
         crypto_bigint_int::Int,
         crypto_bigint_monty::{MontyField, MontyFieldElement},
         crypto_bigint_uint::{U64, Uint},
@@ -1031,7 +1050,7 @@ mod tests {
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F) -> IdealOrZero<DegreeOneIdeal<E>> + Copy,
         project_fq_ideal: impl Fn(&IdealOrZero<U::FqIdeal>, &F) -> IdealOrZero<DegreeOneIdeal<E>> + Copy,
-        tamper: impl Fn(&mut Proof<E>),
+        tamper: impl Fn(&mut Proof<ZtFmod>),
         check_verification: impl Fn(Result<(), ProtocolError<E>>),
     ) where
         Zt: ZincTypes<D, QUARTER_D, Fmod = ZtFmod, Int = ZtInt, Chal = i128, CombR = Int<M>>,
@@ -1404,9 +1423,10 @@ mod tests {
                 let one = cfg.one();
                 let lifted = &mut proof.witness_lifted_evals[1][0];
                 if lifted.coeffs.is_empty() {
-                    lifted.coeffs.push(one);
+                    lifted.coeffs.push(cfg.lift(&one));
                 } else {
-                    cfg.add_assign(&mut lifted.coeffs[0], &one);
+                    let v = cfg.project(&lifted.coeffs[0]);
+                    lifted.coeffs[0] = cfg.lift(&cfg.add(&v, &one));
                 }
             },
             |res| {
@@ -1441,7 +1461,8 @@ mod tests {
                 let sig = TestUairBitOpsFqFamily::<ZtInt, ZtFmod>::signature();
                 let cfg = F::new(&sig.primes()[0]).expect("declared prime");
                 let bit_op_eval = &mut proof.cpr_proofs_fq[0].bit_op_evals[0];
-                cfg.add_assign(bit_op_eval, &cfg.one());
+                let v = cfg.project(&*bit_op_eval);
+                *bit_op_eval = cfg.lift(&cfg.add(&v, &cfg.one()));
             },
             |res| {
                 assert!(
@@ -1797,8 +1818,10 @@ mod tests {
             .booleanity_proof
             .as_mut()
             .expect("BigLinearUair has binary-poly witnesses");
-        let s0: E = cfg.sub(&cfg.mul(&two, &bp.bit_slice_evals[0]), &one); // 2 b_0 - 1
-        let s1: E = cfg.sub(&cfg.mul(&two, &bp.bit_slice_evals[1]), &one); // 2 b_1 - 1
+        let b0: E = cfg.project(&bp.bit_slice_evals[0]);
+        let b1: E = cfg.project(&bp.bit_slice_evals[1]);
+        let s0: E = cfg.sub(&cfg.mul(&two, &b0), &one); // 2 b_0 - 1
+        let s1: E = cfg.sub(&cfg.mul(&two, &b1), &one); // 2 b_1 - 1
 
         let denom_inv: E = cfg
             .inv(&cfg.add(&one, &alpha_over_a_sq))
@@ -1821,8 +1844,8 @@ mod tests {
         );
         assert!(cfg.is_zero(&residue), "must preserve booleanity residue");
 
-        bp.bit_slice_evals[0] = cfg.add(&bp.bit_slice_evals[0], &delta_0);
-        bp.bit_slice_evals[1] = cfg.add(&bp.bit_slice_evals[1], &delta_1);
+        bp.bit_slice_evals[0] = cfg.lift(&cfg.add(&b0, &delta_0));
+        bp.bit_slice_evals[1] = cfg.lift(&cfg.add(&b1, &delta_1));
 
         let err = Piop::verify::<_, CHECKED>(
             &pp,

@@ -3,6 +3,7 @@ use rayon::prelude::*;
 
 use crate::projections::{ColumnMajorTrace, ProjectedScalars, RowMajorTrace};
 use crypto_primitives::{BaseFieldConfig, Semiring, SemiringConfig, SetElement};
+use itertools::Itertools;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero},
@@ -301,7 +302,7 @@ where
         .map(|col| {
             let coeffs: Vec<C::Element> = (0..max_num_coeffs)
                 .map(|d| eval_coeff_mle(col, d, 0))
-                .collect::<Result<_, _>>()?;
+                .try_collect()?;
             Ok(poly_cfg.new_trimmed(coeffs))
         })
         .collect::<Result<Vec<_>, EvaluationError>>()?;
@@ -313,7 +314,7 @@ where
             let col = &trace_matrix[spec.source_col()];
             let coeffs: Vec<C::Element> = (0..max_num_coeffs)
                 .map(|d| eval_coeff_mle(col, d, spec.shift_amount()))
-                .collect::<Result<_, _>>()?;
+                .try_collect()?;
             Ok(poly_cfg.new_trimmed(coeffs))
         })
         .collect::<Result<Vec<_>, EvaluationError>>()?;
