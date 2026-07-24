@@ -223,16 +223,10 @@ impl PcsVerifierTranscript {
     {
         let ints: Vec<C::Integer> = self.read_const_many(n)?;
         let modulus = cfg.modulus();
-        let elems: Vec<C::Element> = ints
-            .iter()
-            .map(|int| {
-                if *int < modulus {
-                    Ok(cfg.project(int))
-                } else {
-                    Err(ZipError::NonCanonicalFieldElement)
-                }
-            })
-            .try_collect()?;
+        if ints.iter().any(|int| *int >= modulus) {
+            return Err(ZipError::NonCanonicalFieldElement);
+        }
+        let elems = ints.iter().map(|int| cfg.project(int)).collect_vec();
         let mut buf = vec![0; C::Element::NUM_BYTES];
         self.fs_transcript
             .absorb_field_element_slice(&elems, &mut buf);

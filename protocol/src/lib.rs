@@ -817,6 +817,7 @@ mod tests {
         crypto_bigint_monty::{MontyField, MontyFieldElement},
         crypto_bigint_uint::{U64, Uint},
     };
+    use num_traits::{ConstOne, Zero};
     use rand::rng;
     use zinc_piop::{
         combined_poly_resolver::CombinedPolyResolverError, multipoint_eval::MultipointEvalError,
@@ -1587,11 +1588,9 @@ mod tests {
         );
     }
 
-    // Tampering the commitment root causes the verifier to sample different
-    // challenges. The ideal check fails first because the prover's
-    // combined_mle_values were computed under the original transcript.
+    // A wire integer >= the family modulus
     #[test]
-    fn test_big_linear_tamper_commitment() {
+    fn test_big_linear_tamper_non_canonical_wire_integer() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
             num_vars,
@@ -1602,7 +1601,42 @@ mod tests {
             ),
             default_project_ideal!(),
             default_project_fq_ideal!(),
-            |proof| proof.commitments.0.root = Default::default(),
+            |proof| proof.cpr_proof.up_evals[0] = ZtFmod::MAX,
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::NonCanonicalElement
+                ));
+            },
+        );
+    }
+
+    // A *canonical* perturbation of the ideal-check opening values passes
+    // the wire projection
+    #[test]
+    fn test_big_linear_tamper_ideal_check_values() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            default_project_fq_ideal!(),
+            |proof| {
+                let coeffs = &mut proof.ideal_check.combined_mle_values[0].coeffs;
+                if coeffs.is_empty() {
+                    coeffs.push(ZtFmod::from(1u64));
+                } else {
+                    if coeffs[0].is_zero() {
+                        coeffs[0] += ZtFmod::ONE;
+                    } else {
+                        coeffs[0] -= ZtFmod::ONE;
+                    }
+                }
+            },
             |res| {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
             },
