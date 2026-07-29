@@ -461,6 +461,7 @@ macro_rules! impl_with_type_bounds {
         where
             Zt: ZincTypes<D, FD>,
             Zt::Int: ProjectableToField<C>,
+            Zt::CombR: MulByScalar<Zt::Chal>,
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<C>,
             U: Uair<Prime = Zt::Fmod> + 'static,
             C: BaseFieldConfig<Integer = Zt::Fmod>
@@ -470,7 +471,6 @@ macro_rules! impl_with_type_bounds {
                 + ProjectElementWithConfig<Zt::Chal>
                 + 'static,
             C::Element: ConstTranscribable,
-            (): MulByScalar<Zt::CombR, Zt::Chal>,
         {
             $($code)*
         }
@@ -1721,6 +1721,7 @@ impl<Zt, U, C, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, C, D, FD>
 where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<C>,
+    Zt::CombR: MulByScalar<Zt::Chal>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<C>,
     C: BaseFieldConfig<Integer = Zt::Fmod>
         + ProjectPrimitiveIntegersWithConfig
@@ -1733,7 +1734,6 @@ where
         + 'static,
     C::Element: ConstTranscribable,
     C::Integer: Display,
-    (): MulByScalar<Zt::CombR, Zt::Chal>,
     U: Uair<Prime = Zt::Fmod> + 'static,
 {
     /// Zinc+ full PIOP prover.

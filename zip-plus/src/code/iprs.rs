@@ -55,12 +55,12 @@ where
     /// Encode without modular reduction, purely over the integers.
     fn encode_inner<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
-        In: Clone + Send + Sync,
-        (): MulByScalar<In, PnttInt, Out> + MulByScalar<Out, PnttInt>,
+        In: MulByScalar<PnttInt, Out> + Clone + Send + Sync,
         Out: CheckedAdd
             + for<'a> AddAssign<&'a Out>
             + for<'a> Add<&'a Out, Output = Out>
             + CheckedMul
+            + MulByScalar<PnttInt>
             + Sum
             + FromRef<In>
             + Clone
@@ -79,7 +79,8 @@ where
         macro_rules! mul_fn {
             () => {
                 |v: &_, tw: &PnttInt| {
-                    ().mul_by_scalar::<CHECK>(v.clone(), tw)
+                    v.clone()
+                        .mul_by_scalar::<CHECK>(tw)
                         .expect("Multiplication by twiddle should not overflow")
                 }
             };
@@ -141,10 +142,9 @@ impl<Zt: ZipTypes, Config, const REP: usize, const CHECK: bool> LinearCode<Zt>
 where
     Zt: ZipTypes,
     Config: PnttConfig,
-    (): MulByScalar<Zt::Eval, PnttInt, Zt::Cw>
-        + MulByScalar<Zt::Cw, PnttInt>
-        + MulByScalar<Zt::CombR, PnttInt>,
-    Zt::Cw: CheckedAdd,
+    Zt::Eval: MulByScalar<PnttInt, Zt::Cw>,
+    Zt::Cw: MulByScalar<PnttInt> + CheckedAdd,
+    Zt::CombR: MulByScalar<PnttInt>,
 {
     const REPETITION_FACTOR: usize = REP;
 
@@ -268,10 +268,9 @@ mod tests {
     fn do_encode<Zt, const REP: usize>(num_vars: usize)
     where
         Zt: ZipTypes,
-        (): MulByScalar<Zt::Eval, PnttInt, Zt::Cw>
-            + MulByScalar<Zt::Cw, PnttInt>
-            + MulByScalar<Zt::CombR, PnttInt>,
-        Zt::Cw: CheckedAdd,
+        Zt::Eval: MulByScalar<PnttInt, Zt::Cw>,
+        Zt::Cw: MulByScalar<PnttInt> + CheckedAdd,
+        Zt::CombR: MulByScalar<PnttInt>,
         StandardUniform: Distribution<Zt::Eval>,
     {
         let mut rng = ThreadRng::default();

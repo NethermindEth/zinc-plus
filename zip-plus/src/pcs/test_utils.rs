@@ -222,6 +222,7 @@ pub fn setup_full_protocol_inner<Zt, Lc, C, const N: usize>(
 )
 where
     Zt: ZipTypes,
+    Zt::CombR: MulByScalar<Zt::Chal>,
     Lc: LinearCode<Zt>,
     C: BaseFieldConfig
         + ProjectElementWithConfig<Zt::Pt>
@@ -230,7 +231,6 @@ where
     C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
     C::Integer: FromRef<Zt::Fmod>,
-    (): MulByScalar<Zt::CombR, Zt::Chal>,
 {
     let (pp, poly) = setup(num_vars);
     let (hint, comm) = ZipPlus::commit_single(&pp, &poly).unwrap();

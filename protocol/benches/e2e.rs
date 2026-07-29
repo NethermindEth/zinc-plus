@@ -163,6 +163,7 @@ impl<
     for GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, D, HALF_D, QUARTER_D>
 where
     Int: ConstIntSemiring
+        + MulByScalar<i64, CwR>
         + Named
         + ConstCoeffBitWidth
         + ConstTranscribable
@@ -172,6 +173,7 @@ where
         + Sync
         + 'static,
     CwR: Semiring
+        + MulByScalar<i64>
         + ConstCoeffBitWidth
         + ConstTranscribable
         + Named
@@ -183,6 +185,8 @@ where
     CombR: ConstIntRing
         + Polynomial<CombR>
         + Neg<Output = CombR>
+        + MulByScalar<i64>
+        + MulByScalar<Chal>
         + ConstTranscribable
         + Named
         + FromRef<i64>
@@ -192,10 +196,6 @@ where
         + FromRef<CombR>,
     Fmod: ConstIntSemiring + ConstTranscribable + Named + FromRef<Fmod>,
     PrimeTest: PrimalityTest<Fmod> + Debug + Send + Sync,
-    (): MulByScalar<Int, i64, CwR>
-        + MulByScalar<CwR, i64>
-        + MulByScalar<CombR, i64>
-        + MulByScalar<CombR, Chal>,
 {
     type Int = Int;
     type Chal = Chal;

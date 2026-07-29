@@ -41,7 +41,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
         + ProjectElementWithConfig<Zt::Chal>
         + ProjectElementWithConfig<Zt::Pt>,
     CfgInt: FromRef<Zt::Fmod>,
-    (): MulByScalar<Zt::CombR, Zt::Chal>,
+    Zt::CombR: MulByScalar<Zt::Chal>,
 {
     encode_rows::<Zt, Lc, 12>(group, make_linear_code);
     encode_rows::<Zt, Lc, 13>(group, make_linear_code);
@@ -237,7 +237,7 @@ pub fn prove<
     StandardUniform: Distribution<Zt::Eval>,
     Cfg: ProjectElementWithConfig<Zt::CombR> + ProjectElementWithConfig<Zt::Pt>,
     CfgInt: FromRef<Zt::Fmod>,
-    (): MulByScalar<Zt::CombR, Zt::Chal>,
+    Zt::CombR: MulByScalar<Zt::Chal>,
 {
     let mut rng = ThreadRng::default();
 
@@ -324,7 +324,7 @@ pub fn verify<
         + ProjectElementWithConfig<Zt::Chal>
         + ProjectElementWithConfig<Zt::Pt>,
     CfgInt: FromRef<Zt::Fmod>,
-    (): MulByScalar<Zt::CombR, Zt::Chal>,
+    Zt::CombR: MulByScalar<Zt::Chal>,
 {
     let mut rng = ThreadRng::default();
     let poly_size: usize = 1 << P;

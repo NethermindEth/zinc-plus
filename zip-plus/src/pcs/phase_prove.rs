@@ -96,7 +96,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + Sync,
         C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
-        (): MulByScalar<Zt::CombR, Zt::Chal>,
+        Zt::CombR: MulByScalar<Zt::Chal>,
     {
         let point = point
             .iter()
@@ -127,7 +127,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         C: BaseFieldConfig + ProjectElementWithConfig<Zt::CombR> + Sync,
         C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
-        (): MulByScalar<Zt::CombR, Zt::Chal>,
+        Zt::CombR: MulByScalar<Zt::Chal>,
     {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>(
@@ -232,8 +232,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                             .step_by(row_len)
                             .zip(coeffs.iter())
                         {
-                            let scaled: Zt::CombR = ()
-                                .mul_by_scalar::<CHECK_FOR_OVERFLOW>(eval.clone(), coeff)
+                            let scaled: Zt::CombR = eval
+                                .clone()
+                                .mul_by_scalar::<CHECK_FOR_OVERFLOW>(coeff)
                                 .expect("Cannot multiply evaluation by coefficient");
                             if CHECK_FOR_OVERFLOW {
                                 *acc = zinc_utils::add!(
@@ -278,7 +279,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + Sync,
         C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
-        (): MulByScalar<Zt::CombR, Zt::Chal>,
+        Zt::CombR: MulByScalar<Zt::Chal>,
     {
         Self::prove::<C, CHECK_FOR_OVERFLOW>(
             transcript,

@@ -5,13 +5,13 @@ use thiserror::Error;
 
 /// A trait for inner product algorithms implementations.
 ///
-/// `Ctx` is the context needed to perform the operations: `()` for
+/// `C` is the config needed to perform the operations: `()` for
 /// self-sufficient types, or a field config for dynamic field elements.
-pub trait InnerProduct<Ctx, Lhs: ?Sized, Rhs, Output> {
+pub trait InnerProduct<C, Lhs: ?Sized, Rhs, Output> {
     /// The main entry point for the inner product.
     /// `CHECK` determines whether the implementation should check for overflow.
     fn inner_product<const CHECK: bool>(
-        ctx: &Ctx,
+        cfg: &C,
         lhs: &Lhs,
         rhs: &[Rhs],
         zero: Output,
@@ -33,15 +33,14 @@ pub enum InnerProductError {
 #[derive(Clone, Debug)]
 pub struct MBSInnerProduct;
 
-impl<Ctx, Lhs, Rhs, Out> InnerProduct<Ctx, [Lhs], Rhs, Out> for MBSInnerProduct
+impl<C, Lhs, Rhs, Out> InnerProduct<C, [Lhs], Rhs, Out> for MBSInnerProduct
 where
-    Ctx: MulByScalar<Out, Rhs, Out>,
-    Out: FromRef<Lhs> + CheckedAdd,
+    Out: FromRef<Lhs> + CheckedAdd + MulByScalar<Rhs, Out>,
 {
     /// The mul-by-scalar inner product.
     #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
     fn inner_product<const CHECK: bool>(
-        ctx: &Ctx,
+        _cfg: &C,
         lhs: &[Lhs],
         rhs: &[Rhs],
         zero: Out,
@@ -55,8 +54,8 @@ where
 
         lhs.iter().zip(rhs).try_fold(zero, |acc, (l, r)| {
             let widened = Out::from_ref(l);
-            let product = ctx
-                .mul_by_scalar::<CHECK>(widened, r)
+            let product = widened
+                .mul_by_scalar::<CHECK>(r)
                 .ok_or(InnerProductError::Overflow)?;
             if CHECK {
                 acc.checked_add(&product).ok_or(InnerProductError::Overflow)
@@ -142,15 +141,14 @@ where
 #[derive(Clone, Debug)]
 pub struct ScalarProduct;
 
-impl<Ctx, Lhs, Rhs, Out> InnerProduct<Ctx, Lhs, Rhs, Out> for ScalarProduct
+impl<C, Lhs, Rhs, Out> InnerProduct<C, Lhs, Rhs, Out> for ScalarProduct
 where
-    Ctx: MulByScalar<Out, Rhs, Out>,
-    Out: FromRef<Lhs>,
+    Out: FromRef<Lhs> + MulByScalar<Rhs, Out>,
 {
     /// A scalar inner product. Assumes `Lhs` is a scalar type
     /// and always asserts that `point` has only one component.
     fn inner_product<const CHECK: bool>(
-        ctx: &Ctx,
+        _cfg: &C,
         lhs: &Lhs,
         point: &[Rhs],
         _zero: Out,
@@ -161,8 +159,8 @@ where
                 rhs: point.as_ref().len(),
             })
         } else {
-            Ok(ctx
-                .mul_by_scalar::<CHECK>(Out::from_ref(lhs), &point[0])
+            Ok(Out::from_ref(lhs)
+                .mul_by_scalar::<CHECK>(&point[0])
                 .ok_or(InnerProductError::Overflow)?)
         }
     }
@@ -173,13 +171,13 @@ where
 /// correspond to `true` elements of the boolean slice.
 pub struct BooleanInnerProductAdd;
 
-impl<Ctx, Rhs: Clone, Out: FromRef<Rhs> + CheckedAdd> InnerProduct<Ctx, [Boolean], Rhs, Out>
+impl<C, Rhs: Clone, Out: FromRef<Rhs> + CheckedAdd> InnerProduct<C, [Boolean], Rhs, Out>
     for BooleanInnerProductAdd
 {
     /// Boolean inner product.
     #[allow(clippy::arithmetic_side_effects)] // Used in unchecked mode
     fn inner_product<const CHECK: bool>(
-        _ctx: &Ctx,
+        _cfg: &C,
         lhs: &[Boolean],
         rhs: &[Rhs],
         zero: Out,

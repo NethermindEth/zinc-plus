@@ -8,17 +8,16 @@ use crate::{
     from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize>
-    MulByScalar<ConstMontyField<Mod, LIMBS>, ConstMontyField<Mod, LIMBS>> for ()
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> MulByScalar<ConstMontyField<Mod, LIMBS>>
+    for ConstMontyField<Mod, LIMBS>
 {
     #[allow(clippy::arithmetic_side_effects)] // False alert
     fn mul_by_scalar<const CHECK: bool>(
-        &self,
-        lhs: ConstMontyField<Mod, LIMBS>,
+        self,
         rhs: &ConstMontyField<Mod, LIMBS>,
     ) -> Option<ConstMontyField<Mod, LIMBS>> {
         // Field operations cannot overflow
-        Some(lhs * rhs)
+        Some(self * rhs)
     }
 }
 

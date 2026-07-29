@@ -255,8 +255,8 @@ impl<const DEGREE_PLUS_ONE: usize> DerefMut for BinaryRefPoly<DEGREE_PLUS_ONE> {
 #[derive(Clone, Debug)]
 pub struct BinaryRefPolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
-impl<Ctx, Rhs, Out, const DEGREE_PLUS_ONE: usize>
-    InnerProduct<Ctx, BinaryRefPoly<DEGREE_PLUS_ONE>, Rhs, Out>
+impl<C, Rhs, Out, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<C, BinaryRefPoly<DEGREE_PLUS_ONE>, Rhs, Out>
     for BinaryRefPolyInnerProduct<Rhs, DEGREE_PLUS_ONE>
 where
     Rhs: Clone,
@@ -264,12 +264,12 @@ where
 {
     #[inline(always)]
     fn inner_product<const CHECK: bool>(
-        ctx: &Ctx,
+        cfg: &C,
         lhs: &BinaryRefPoly<DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        BooleanInnerProductAdd::inner_product::<CHECK>(ctx, &lhs.0.coeffs, rhs, zero)
+        BooleanInnerProductAdd::inner_product::<CHECK>(cfg, &lhs.0.coeffs, rhs, zero)
     }
 }
 
@@ -286,18 +286,17 @@ where
 
 // This could've been more generic, but keeping implementation consistent with
 // `BinaryU64Poly`.
-impl<const DEGREE_PLUS_ONE: usize>
-    MulByScalar<BinaryRefPoly<DEGREE_PLUS_ONE>, i64, DensePolynomial<i64, DEGREE_PLUS_ONE>> for ()
+impl<const DEGREE_PLUS_ONE: usize> MulByScalar<i64, DensePolynomial<i64, DEGREE_PLUS_ONE>>
+    for BinaryRefPoly<DEGREE_PLUS_ONE>
 {
     fn mul_by_scalar<const CHECK: bool>(
-        &self,
-        lhs: BinaryRefPoly<DEGREE_PLUS_ONE>,
+        self,
         rhs: &i64,
     ) -> Option<DensePolynomial<i64, DEGREE_PLUS_ONE>> {
         let mut coeffs: [i64; DEGREE_PLUS_ONE] = [0_i64; DEGREE_PLUS_ONE];
 
         coeffs.iter_mut().enumerate().for_each(|(i, out)| {
-            if *lhs.0.coeffs[i].inner() {
+            if *self.0.coeffs[i].inner() {
                 *out = *rhs;
             }
         });

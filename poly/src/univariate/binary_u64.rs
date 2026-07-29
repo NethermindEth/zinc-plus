@@ -274,8 +274,8 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
 #[derive(Clone, Debug)]
 pub struct BinaryU64PolyInnerProduct<R, const DEGREE_PLUS_ONE: usize>(PhantomData<R>);
 
-impl<Ctx, Rhs, Out, const DEGREE_PLUS_ONE: usize>
-    InnerProduct<Ctx, BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
+impl<C, Rhs, Out, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<C, BinaryU64Poly<DEGREE_PLUS_ONE>, Rhs, Out>
     for BinaryU64PolyInnerProduct<Rhs, DEGREE_PLUS_ONE>
 where
     Rhs: Clone,
@@ -284,7 +284,7 @@ where
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // By design
     fn inner_product<const CHECK: bool>(
-        _ctx: &Ctx,
+        _cfg: &C,
         lhs: &BinaryU64Poly<DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
@@ -325,15 +325,14 @@ where
     }
 }
 
-impl<const DEGREE_PLUS_ONE: usize>
-    MulByScalar<BinaryU64Poly<DEGREE_PLUS_ONE>, i64, DensePolynomial<i64, DEGREE_PLUS_ONE>> for ()
+impl<const DEGREE_PLUS_ONE: usize> MulByScalar<i64, DensePolynomial<i64, DEGREE_PLUS_ONE>>
+    for BinaryU64Poly<DEGREE_PLUS_ONE>
 {
     fn mul_by_scalar<const CHECK: bool>(
-        &self,
-        lhs: BinaryU64Poly<DEGREE_PLUS_ONE>,
+        self,
         rhs: &i64,
     ) -> Option<DensePolynomial<i64, DEGREE_PLUS_ONE>> {
-        Some(widen_simd::<DEGREE_PLUS_ONE>(&lhs, *rhs))
+        Some(widen_simd::<DEGREE_PLUS_ONE>(&self, *rhs))
     }
 }
 
@@ -615,7 +614,7 @@ mod tests {
             for scalar in [1, 42, -7, 100, -100, i64::MAX, i64::MIN] {
                 let result_simd_ref = widen_ref(&poly, scalar);
                 let result_simd = widen_simd(&poly, scalar);
-                let result_ref = ().mul_by_scalar::<CHECKED>(poly_ref.clone(), &scalar).unwrap();
+                let result_ref = poly_ref.clone().mul_by_scalar::<CHECKED>(&scalar).unwrap();
 
                 assert_eq!(
                     result_simd_ref.coeffs, result_simd.coeffs,
@@ -644,7 +643,10 @@ mod tests {
         for scalar in [1, 42, -7, 100, -100] {
             let result_simd_ref = widen_ref(&poly32, scalar);
             let result_simd = widen_simd(&poly32, scalar);
-            let result_ref = ().mul_by_scalar::<CHECKED>(poly32_ref.clone(), &scalar).unwrap();
+            let result_ref = poly32_ref
+                .clone()
+                .mul_by_scalar::<CHECKED>(&scalar)
+                .unwrap();
             assert_eq!(
                 result_simd_ref.coeffs, result_simd.coeffs,
                 "Mismatch for degree 32 with scalar {}",

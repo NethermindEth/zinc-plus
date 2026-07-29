@@ -7,35 +7,28 @@ use crypto_primitives::{
 };
 use num_traits::{CheckedMul, ConstZero};
 
-// TODO: Rework the approach
-
-/// Multiplication of an element by a scalar of a (possibly) different type,
-/// performed by the `()` context on self-sufficient types: primitives,
-/// [`Int`], and structures lifted over them.
+/// Multiplication of an element by a scalar of a (possibly) different type.
+/// This multiplication can widen the result.
 ///
-/// This is the fixed-world widening-mul toolkit: `Rhs` is embedded into the
-/// `Lhs`/`Out` ring as part of the multiplication, and `CHECK` selects
-/// overflow-checked semantics. Dynamic (config-carried) field elements never
-/// go through this trait — a foreign-typed scalar crosses into the config
-/// world via `cfg.project` once, at the boundary, after which all config
-/// arithmetic is homogeneous (`SemiringConfig::mul`/`checked_mul`).
-pub trait MulByScalar<Lhs, Rhs, Out = Lhs>: Sized {
-    /// Multiplies `lhs` by a scalar from the right (usually - a coefficient to
+/// Note that this is for static semirings only, dynamic fields don't go
+/// through this route.
+pub trait MulByScalar<Rhs, Out = Self>: Sized {
+    /// Multiplies `self` by a scalar from the right (usually - a coefficient to
     /// obtain a linear combination).
     /// Returns `None` if the multiplication would overflow.
-    fn mul_by_scalar<const CHECK: bool>(&self, lhs: Lhs, rhs: &Rhs) -> Option<Out>;
+    fn mul_by_scalar<const CHECK: bool>(self, rhs: &Rhs) -> Option<Out>;
 }
 
 macro_rules! impl_mul_by_scalar_for_primitives {
     ($($t:ty),*) => {
         $(
-            impl MulByScalar<$t, $t> for () {
+            impl MulByScalar<$t> for $t {
                 #[allow(clippy::arithmetic_side_effects)] // By design
-                fn mul_by_scalar<const CHECK: bool>(&self, lhs: $t, rhs: &$t) -> Option<$t> {
+                fn mul_by_scalar<const CHECK: bool>(self, rhs: &$t) -> Option<$t> {
                     if CHECK {
-                        lhs.checked_mul(*rhs)
+                        self.checked_mul(*rhs)
                     } else {
-                        Some(lhs * *rhs)
+                        Some(self * *rhs)
                     }
                 }
             }
@@ -45,21 +38,17 @@ macro_rules! impl_mul_by_scalar_for_primitives {
 
 impl_mul_by_scalar_for_primitives!(i8, i16, i32, i64, i128);
 
-impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<Int<LIMBS>, Int<LIMBS2>> for () {
+impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<Int<LIMBS2>> for Int<LIMBS> {
     #[allow(clippy::arithmetic_side_effects)] // By design
-    fn mul_by_scalar<const CHECK: bool>(
-        &self,
-        lhs: Int<LIMBS>,
-        rhs: &Int<LIMBS2>,
-    ) -> Option<Int<LIMBS>> {
+    fn mul_by_scalar<const CHECK: bool>(self, rhs: &Int<LIMBS2>) -> Option<Int<LIMBS>> {
         if LIMBS < LIMBS2 {
             return None; // Cannot multiply if the left operand has fewer limbs than the right
         }
         if CHECK {
-            lhs.checked_mul(&rhs.resize())
+            self.checked_mul(&rhs.resize())
         } else {
             // Make use of an optimized wrapping_mul in the crypto-bigint library.
-            Some(widening_wrapping_mul(lhs, rhs))
+            Some(widening_wrapping_mul(self, rhs))
         }
     }
 }
@@ -67,18 +56,18 @@ impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<Int<LIMBS>, Int<LIMBS2
 macro_rules! impl_mul_int_by_primitive_scalar {
     ($(($t:ty, $rhs_limbs:expr)),*) => {
         $(
-            impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<Int<LIMBS>, $t, Int<LIMBS2>> for () {
+            impl<const LIMBS: usize, const LIMBS2: usize> MulByScalar<$t, Int<LIMBS2>> for Int<LIMBS> {
                 #[allow(clippy::arithmetic_side_effects)] // By design
-                fn mul_by_scalar<const CHECK: bool>(&self, lhs: Int<LIMBS>, rhs: &$t) -> Option<Int<LIMBS2>> {
+                fn mul_by_scalar<const CHECK: bool>(self, rhs: &$t) -> Option<Int<LIMBS2>> {
                     const {
                         assert!(LIMBS <= LIMBS2, "Cannot multiply if the left operand has more limbs than the output");
                     }
                     if CHECK {
                         let rhs: Int<LIMBS2> = Int::from_ref(rhs);
-                        rhs.checked_mul(&lhs.resize())
+                        rhs.checked_mul(&self.resize())
                     } else {
                         let rhs_short: Int<{ $rhs_limbs }> = Int::from(*rhs);
-                        Some(widening_wrapping_mul(lhs.resize::<LIMBS2>(), &rhs_short))
+                        Some(widening_wrapping_mul(self.resize::<LIMBS2>(), &rhs_short))
                     }
                 }
             }
@@ -95,41 +84,41 @@ impl_mul_int_by_primitive_scalar!(
 );
 
 /// Multiplication by a [`Boolean`] scalar: selects `lhs` or zero.
-impl<T> MulByScalar<T, Boolean> for ()
+impl<T> MulByScalar<Boolean> for T
 where
     T: Clone + ConstZero + From<Boolean>,
 {
-    fn mul_by_scalar<const CHECK: bool>(&self, lhs: T, rhs: &Boolean) -> Option<T> {
-        Some(if *rhs.inner() { lhs } else { T::ZERO })
+    fn mul_by_scalar<const CHECK: bool>(self, rhs: &Boolean) -> Option<T> {
+        Some(if *rhs.inner() { self } else { T::ZERO })
     }
 }
 
-impl MulByScalar<i32, i64, i128> for () {
+impl MulByScalar<i64, i128> for i32 {
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // Not possible to overflow since we are widening the result to i128
-    fn mul_by_scalar<const CHECK: bool>(&self, lhs: i32, rhs: &i64) -> Option<i128> {
-        Some(i128::from(lhs) * i128::from(*rhs))
+    fn mul_by_scalar<const CHECK: bool>(self, rhs: &i64) -> Option<i128> {
+        Some(i128::from(self) * i128::from(*rhs))
     }
 }
 
-impl MulByScalar<i128, i64, i128> for () {
+impl MulByScalar<i64, i128> for i128 {
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // By design
-    fn mul_by_scalar<const CHECK: bool>(&self, lhs: i128, rhs: &i64) -> Option<i128> {
+    fn mul_by_scalar<const CHECK: bool>(self, rhs: &i64) -> Option<i128> {
         let rhs = i128::from(*rhs);
         if CHECK {
-            lhs.checked_mul(rhs)
+            self.checked_mul(rhs)
         } else {
-            Some(lhs * rhs)
+            Some(self * rhs)
         }
     }
 }
 
-impl MulByScalar<i64, i64, i128> for () {
+impl MulByScalar<i64, i128> for i64 {
     #[inline(always)]
     #[allow(clippy::arithmetic_side_effects)] // Not possible to overflow since we are widening the result to i128
-    fn mul_by_scalar<const CHECK: bool>(&self, lhs: i64, rhs: &i64) -> Option<i128> {
-        Some(i128::from(lhs) * i128::from(*rhs))
+    fn mul_by_scalar<const CHECK: bool>(self, rhs: &i64) -> Option<i128> {
+        Some(i128::from(self) * i128::from(*rhs))
     }
 }
 

@@ -729,27 +729,24 @@ impl<const DEGREE_PLUS_ONE: usize> FromRef<i64> for DensePolynomial<i128, DEGREE
     }
 }
 
-impl<R, S, Out, const DEGREE_PLUS_ONE: usize>
-    MulByScalar<DensePolynomial<R, DEGREE_PLUS_ONE>, S, DensePolynomial<Out, DEGREE_PLUS_ONE>>
-    for ()
+impl<R, S, Out, const DEGREE_PLUS_ONE: usize> MulByScalar<S, DensePolynomial<Out, DEGREE_PLUS_ONE>>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
 where
-    (): MulByScalar<R, S, Out>,
-    R: Semiring,
+    R: Semiring + MulByScalar<S, Out>,
     Out: Semiring + Copy,
 {
     fn mul_by_scalar<const CHECK: bool>(
-        &self,
-        lhs: DensePolynomial<R, DEGREE_PLUS_ONE>,
+        self,
         rhs: &S,
     ) -> Option<DensePolynomial<Out, DEGREE_PLUS_ONE>> {
         let mut coeffs = [Out::default(); DEGREE_PLUS_ONE];
 
         coeffs
             .iter_mut()
-            .zip(lhs.coeffs.iter())
+            .zip(self.coeffs)
             .filter(|(_, coeff)| !coeff.is_zero())
             .try_for_each(|(out, x)| {
-                *out = self.mul_by_scalar::<CHECK>(x.clone(), rhs)?;
+                *out = x.mul_by_scalar::<CHECK>(rhs)?;
                 Some(())
             })?;
 
@@ -847,20 +844,20 @@ pub struct DensePolyInnerProduct<
     const DEGREE_PLUS_ONE: usize,
 >(PhantomData<(I, Ctx, R, Rhs, Out)>);
 
-impl<Ctx, R, Rhs, Out, I, const DEGREE_PLUS_ONE: usize>
-    InnerProduct<Ctx, DensePolynomial<R, DEGREE_PLUS_ONE>, Rhs, Out>
-    for DensePolyInnerProduct<Ctx, R, Rhs, Out, I, DEGREE_PLUS_ONE>
+impl<C, R, Rhs, Out, I, const DEGREE_PLUS_ONE: usize>
+    InnerProduct<C, DensePolynomial<R, DEGREE_PLUS_ONE>, Rhs, Out>
+    for DensePolyInnerProduct<C, R, Rhs, Out, I, DEGREE_PLUS_ONE>
 where
-    I: InnerProduct<Ctx, [R], Rhs, Out>,
+    I: InnerProduct<C, [R], Rhs, Out>,
 {
     #[inline(always)]
     fn inner_product<const CHECK: bool>(
-        ctx: &Ctx,
+        cfg: &C,
         lhs: &DensePolynomial<R, DEGREE_PLUS_ONE>,
         rhs: &[Rhs],
         zero: Out,
     ) -> Result<Out, InnerProductError> {
-        I::inner_product::<CHECK>(ctx, &lhs.coeffs, rhs, zero)
+        I::inner_product::<CHECK>(cfg, &lhs.coeffs, rhs, zero)
     }
 }
 

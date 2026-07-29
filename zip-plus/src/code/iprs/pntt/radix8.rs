@@ -201,7 +201,7 @@ mod tests {
                 &input,
                 params,
                 |v| *v,
-                |a, b| ().mul_by_scalar::<CHECKED>(*a, b).unwrap(),
+                |a, b| (*a).mul_by_scalar::<CHECKED>(b).unwrap(),
                 |a: PnttInt, b: &PnttInt| a.checked_add(*b).unwrap(),
             );
 
@@ -249,8 +249,8 @@ mod tests {
                 &input,
                 params,
                 |v| v.clone(),
-                |a: &Int<4>, b| ().mul_by_scalar::<CHECKED>(*a, b).unwrap(),
-                |a: &Int<4>, b| ().mul_by_scalar::<CHECKED>(*a, b).unwrap(),
+                |a: &Int<4>, b| (*a).mul_by_scalar::<CHECKED>(b).unwrap(),
+                |a: &Int<4>, b| (*a).mul_by_scalar::<CHECKED>(b).unwrap(),
                 |a: Int<4>, b: &Int<4>| a.checked_add(b).unwrap(),
             );
 
