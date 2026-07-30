@@ -1,6 +1,7 @@
 //! UAIR description tools.
 
 pub mod collect_scalars;
+pub mod composed_read;
 pub mod constraint_counter;
 pub mod degree_counter;
 pub mod do_nothing_builder;
@@ -19,6 +20,7 @@ use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, 
 
 use crate::ideal::{Ideal, IdealCheck};
 
+pub use composed_read::ComposedReadSpec;
 pub use lookup_types::{LookupColumnSpec, LookupTableType};
 
 /// The abstract interface to constraint building logic.
@@ -399,6 +401,10 @@ pub struct UairSignature {
     /// cols (one XOR per row pair); per-bit closing overrides bind
     /// them to the spec residual.
     virtual_binary_poly_cols: Vec<VirtualBinaryPolySpec>,
+    /// Composed reads (pointer queries): `result_col(x) = value_col`
+    /// at the cube position spelled by `bit_cols` at `x`. See
+    /// `documentation/pointer-query-design.md`.
+    composed_read_specs: Vec<ComposedReadSpec>,
 }
 
 impl UairSignature {
@@ -481,6 +487,7 @@ impl UairSignature {
             shifted_bit_slice_specs: Vec::new(),
             virtual_booleanity_cols: Vec::new(),
             virtual_binary_poly_cols: Vec::new(),
+            composed_read_specs: Vec::new(),
         }
     }
 
@@ -702,6 +709,45 @@ impl UairSignature {
 
     pub fn lookup_specs(&self) -> &[LookupColumnSpec] {
         &self.lookup_specs
+    }
+
+    /// Declare composed reads (pointer queries): each spec asserts
+    /// `result_col(x) = value_col` at the cube position the `bit_cols`
+    /// spell at `x`. All indices are flat (binary_poly ||
+    /// arbitrary_poly || int) and must point at *witness int* columns;
+    /// `bit_cols.len()` is checked against the trace's `num_vars` at
+    /// proving time. Out-of-range or non-int indices panic so the
+    /// misuse is caught at signature construction.
+    pub fn with_composed_reads(mut self, reads: Vec<ComposedReadSpec>) -> Self {
+        let int_start = add!(
+            self.total_cols.num_binary_poly_cols(),
+            self.total_cols.num_arbitrary_poly_cols()
+        );
+        let int_witness_start = add!(int_start, self.public_cols.num_int_cols());
+        let num_cols = self.total_cols.cols();
+        for spec in &reads {
+            for (name, col) in [("value_col", spec.value_col), ("result_col", spec.result_col)]
+                .into_iter()
+                .chain(spec.bit_cols.iter().map(|&b| ("bit_col", b)))
+            {
+                assert!(
+                    col < num_cols,
+                    "ComposedReadSpec {name} {col} out of range (total_cols = {num_cols}). \
+                     Flat indexing: binary_poly || arbitrary_poly || int."
+                );
+                assert!(
+                    col >= int_witness_start,
+                    "ComposedReadSpec {name} {col} must be a witness int column \
+                     (witness int columns start at flat index {int_witness_start})."
+                );
+            }
+        }
+        self.composed_read_specs = reads;
+        self
+    }
+
+    pub fn composed_read_specs(&self) -> &[ComposedReadSpec] {
+        &self.composed_read_specs
     }
 
     fn compute_down_layout(
