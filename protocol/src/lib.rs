@@ -599,6 +599,10 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     AssertZero(usize),
     #[error("pointer query failed: {0}")]
     PointerQuery(#[from] zinc_piop::pointer_query::PointerQueryError<F>),
+    #[error("composed reads are declared but the proof carries no pointer query")]
+    PointerQueryMissing,
+    #[error("pointer-query lifted evaluations have the wrong shape")]
+    PointerQueryLiftedShape,
 }
 
 //
@@ -1268,8 +1272,9 @@ mod tests {
     }
 
     /// The teeth: the same UAIR with one result entry forged off its
-    /// dereference must be rejected. A verifier that accepts this trace
-    /// is not checking the pointer query at all.
+    /// dereference must be rejected — by the pointer query itself, not
+    /// by an accident elsewhere. A verifier that accepts this trace is
+    /// not checking the pointer query at all.
     #[test]
     fn test_e2e_pointer_hop_forged_result_rejected() {
         let num_vars = POINTER_HOP_NUM_VARS;
@@ -1282,7 +1287,58 @@ mod tests {
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
-            |res| assert!(res.is_err(), "forged dereference must be rejected"),
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::PointerQuery(_))),
+                    "forged dereference must be rejected by the pointer query, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Tampering the bridge evaluations must be rejected: they tie
+    /// sumcheck A's endpoint to sumcheck B's claimed sum.
+    #[test]
+    fn test_e2e_pointer_hop_tampered_u_eval_rejected() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, PointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let pq = proof
+                    .pointer_query_proof
+                    .as_mut()
+                    .expect("pointer hop carries a pointer-query proof");
+                let bumped = pq.u_evals_at_r_a[0].clone() + pq.u_evals_at_r_a[0].clone();
+                pq.u_evals_at_r_a[0] = bumped;
+            },
+            |res| assert!(res.is_err(), "tampered u-eval must be rejected"),
+        );
+    }
+
+    /// Tampering a lifted evaluation at r_A must be rejected: either
+    /// the pointer-query endpoint or the extra int opening catches it.
+    #[test]
+    fn test_e2e_pointer_hop_tampered_lifted_rejected() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, PointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let bar_u = &mut proof.pq_int_lifted_at_r_a[0];
+                bar_u.coeffs[0] = bar_u.coeffs[0].clone() + bar_u.coeffs[0].clone();
+            },
+            |res| assert!(res.is_err(), "tampered lifted eval must be rejected"),
         );
     }
 

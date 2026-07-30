@@ -5,6 +5,7 @@ use crypto_primitives::{
 use num_traits::Zero;
 use std::io::Cursor;
 use zinc_piop::{
+    pointer_query::{PointerQueryPoints, PointerQueryProof, verify_pointer_queries},
     bin_multipoint_reducer::{
         BinClaim as ReducerBinClaim, BinMultipointReducer, Proof as BinReducerProof,
     },
@@ -110,6 +111,9 @@ pub struct VerifierTranscriptReconstructed<
     proof_lookup_proof: GkrLogupLookupProof<F>,
     proof_bin_reducer: Option<BinReducerProof<F>>,
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    proof_pointer_query: Option<PointerQueryProof<F>>,
+    proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -136,6 +140,9 @@ pub struct VerifierPrimeProjected<
     proof_lookup_proof: GkrLogupLookupProof<F>,
     proof_bin_reducer: Option<BinReducerProof<F>>,
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    proof_pointer_query: Option<PointerQueryProof<F>>,
+    proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -162,6 +169,9 @@ pub struct VerifierIdealChecked<
     proof_lookup_proof: GkrLogupLookupProof<F>,
     proof_bin_reducer: Option<BinReducerProof<F>>,
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    proof_pointer_query: Option<PointerQueryProof<F>>,
+    proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -190,6 +200,9 @@ pub struct VerifierEvalProjected<
     proof_lookup_proof: GkrLogupLookupProof<F>,
     proof_bin_reducer: Option<BinReducerProof<F>>,
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    proof_pointer_query: Option<PointerQueryProof<F>>,
+    proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -208,7 +221,11 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
     proof_lookup_proof: GkrLogupLookupProof<F>,
     proof_bin_reducer: Option<BinReducerProof<F>>,
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    proof_pointer_query: Option<PointerQueryProof<F>>,
+    proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     lookup_r_inners: Vec<Vec<F>>,
+    pq_points: Option<PointerQueryPoints<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -227,7 +244,11 @@ pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOv
     proof_lookup_proof: GkrLogupLookupProof<F>,
     proof_bin_reducer: Option<BinReducerProof<F>>,
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    proof_pointer_query: Option<PointerQueryProof<F>>,
+    proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     lookup_r_inners: Vec<Vec<F>>,
+    pq_points: Option<PointerQueryPoints<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -251,7 +272,11 @@ pub struct VerifierLiftedEvalsChecked<
     proof_lookup_proof: GkrLogupLookupProof<F>,
     proof_bin_reducer: Option<BinReducerProof<F>>,
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    proof_pointer_query: Option<PointerQueryProof<F>>,
+    proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     lookup_r_inners: Vec<Vec<F>>,
+    pq_points: Option<PointerQueryPoints<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -338,6 +363,9 @@ where
             proof_lookup_proof: proof.lookup_proof,
             proof_bin_reducer: proof.bin_reducer_proof,
             proof_bin_lifts_at_r_star: proof.bin_lifts_at_r_star,
+            proof_pointer_query: proof.pointer_query_proof,
+            proof_pq_int_lifted_at_r_a: proof.pq_int_lifted_at_r_a,
+            proof_pq_int_lifted_at_r_b: proof.pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
     }
@@ -377,6 +405,9 @@ where
             proof_lookup_proof: self.proof_lookup_proof,
             proof_bin_reducer: self.proof_bin_reducer,
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            proof_pointer_query: self.proof_pointer_query,
+            proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
+            proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
     }
@@ -434,6 +465,9 @@ where
             proof_lookup_proof: self.proof_lookup_proof,
             proof_bin_reducer: self.proof_bin_reducer,
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            proof_pointer_query: self.proof_pointer_query,
+            proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
+            proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
     }
@@ -521,6 +555,9 @@ where
             proof_lookup_proof: self.proof_lookup_proof,
             proof_bin_reducer: self.proof_bin_reducer,
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            proof_pointer_query: self.proof_pointer_query,
+            proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
+            proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
     }
@@ -764,7 +801,11 @@ where
             proof_lookup_proof: self.proof_lookup_proof,
             proof_bin_reducer: self.proof_bin_reducer,
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            proof_pointer_query: self.proof_pointer_query,
+            proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
+            proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             lookup_r_inners: Vec::new(),
+            pq_points: None,
             _phantom: PhantomData,
         })
     }
@@ -884,6 +925,76 @@ where
         Ok(self)
     }
 
+    /// Step 4c: pointer-query (composed reads) verify. Mirrors the
+    /// prover's two chained sumchecks. The endpoint claims are read
+    /// off the proof's lifted evaluations at `r_A` / `r_B` (via ψ_α)
+    /// and discharged against the int commitment in step 7. See
+    /// `documentation/pointer-query-design.md`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn step4c_pointer_query_verify(
+        mut self,
+    ) -> Result<Self, ProtocolError<F, IdealOverF>> {
+        let specs = self.base.uair_signature.composed_read_specs().to_vec();
+        if specs.is_empty() {
+            return Ok(self);
+        }
+        let Some(proof) = self.proof_pointer_query.as_ref() else {
+            return Err(ProtocolError::PointerQueryMissing);
+        };
+
+        let sig = &self.base.uair_signature;
+        let total = sig.total_cols();
+        let int_witness_start = add!(
+            add!(
+                total.num_binary_poly_cols(),
+                total.num_arbitrary_poly_cols()
+            ),
+            sig.public_cols().num_int_cols()
+        );
+        let num_wit_int = sig.witness_cols().num_int_cols();
+        if self.proof_pq_int_lifted_at_r_a.len() != num_wit_int
+            || self.proof_pq_int_lifted_at_r_b.len() != num_wit_int
+        {
+            return Err(ProtocolError::PointerQueryLiftedShape);
+        }
+
+        // ψ_α scalars of the lifted evaluations at r_A / r_B.
+        let pe = self.projecting_element_f.clone();
+        let scalar = |bar_u: &DynamicPolynomialF<F>| {
+            bar_u
+                .evaluate_at_point(&pe)
+                .map_err(ProtocolError::LiftedEvalProjection)
+        };
+        let mut v_evals = Vec::with_capacity(specs.len());
+        let mut b_evals = Vec::with_capacity(specs.len());
+        let mut result_up = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            v_evals.push(scalar(
+                &self.proof_pq_int_lifted_at_r_a[spec.value_col - int_witness_start],
+            )?);
+            let bits: Vec<F> = spec
+                .bit_cols
+                .iter()
+                .map(|&c| scalar(&self.proof_pq_int_lifted_at_r_b[c - int_witness_start]))
+                .collect::<Result<_, _>>()?;
+            b_evals.push(bits);
+            result_up.push(self.cpr_subclaim.up_evals[spec.result_col].clone());
+        }
+
+        let points = verify_pointer_queries::<F>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            &specs,
+            &result_up,
+            &v_evals,
+            &b_evals,
+            proof,
+            &self.cpr_subclaim.evaluation_point,
+            &self.field_cfg,
+        )?;
+        self.pq_points = Some(points);
+        Ok(self)
+    }
+
     /// Step 5: Multi-point evaluation sumcheck (under ψ_α).
     ///
     /// CPR's `up_evals` (one per base trace col) are extended with
@@ -923,7 +1034,11 @@ where
             proof_lookup_proof: self.proof_lookup_proof,
             proof_bin_reducer: self.proof_bin_reducer,
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            proof_pointer_query: self.proof_pointer_query,
+            proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
+            proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             lookup_r_inners: self.lookup_r_inners,
+            pq_points: self.pq_points,
             _phantom: PhantomData,
         })
     }
@@ -1036,6 +1151,21 @@ where
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
+        // Pointer query: mirror the prover's absorption of the lifted
+        // evaluations at r_A then r_B.
+        if self.proof_pointer_query.is_some() {
+            for bar_u in self
+                .proof_pq_int_lifted_at_r_a
+                .iter()
+                .chain(&self.proof_pq_int_lifted_at_r_b)
+            {
+                self.base
+                    .pcs_transcript
+                    .fs_transcript
+                    .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+            }
+        }
+
         Ok(VerifierLiftedEvalsChecked {
             base: self.base,
             field_cfg: self.field_cfg,
@@ -1045,7 +1175,11 @@ where
             proof_lookup_proof: self.proof_lookup_proof,
             proof_bin_reducer: self.proof_bin_reducer,
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
+            proof_pointer_query: self.proof_pointer_query,
+            proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
+            proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             lookup_r_inners: self.lookup_r_inners,
+            pq_points: self.pq_points,
             _phantom: PhantomData,
         })
     }
@@ -1301,6 +1435,41 @@ where
             [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
         );
 
+        // Pointer query: the two extra int-batch openings at r_A / r_B,
+        // against the proof's lifted evaluations at those points.
+        if let Some(points) = &self.pq_points {
+            for (point, lifted) in [
+                (&points.r_a, &self.proof_pq_int_lifted_at_r_a),
+                (&points.r_b, &self.proof_pq_int_lifted_at_r_b),
+            ] {
+                if lifted.len() != commitments.2.batch_size {
+                    return Err(ProtocolError::PointerQueryLiftedShape);
+                }
+                let per_poly_alphas = ZipPlus::<Zt::IntZt, Zt::IntLc>::sample_alphas(
+                    &mut pcs_transcript.fs_transcript,
+                    commitments.2.batch_size,
+                );
+                let mut eval_f = F::zero_with_cfg(field_cfg);
+                for (bar_u, alphas) in lifted.iter().zip(per_poly_alphas.iter()) {
+                    for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                        let mut term = F::from_with_cfg(alpha, field_cfg);
+                        term *= coeff;
+                        eval_f += &term;
+                    }
+                }
+                ZipPlus::<Zt::IntZt, Zt::IntLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+                    pcs_transcript,
+                    self.base.vp_int,
+                    &commitments.2,
+                    field_cfg,
+                    point,
+                    &eval_f,
+                    &per_poly_alphas,
+                )
+                .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+            }
+        }
+
         Ok(VerifierPcsVerified {
             _phantom: PhantomData,
         })
@@ -1383,6 +1552,7 @@ where
         .step3_eval_projection(project_scalar)?
         .step4_sumcheck_verify()?
         .step4b_lookup_verify::<U>()?
+        .step4c_pointer_query_verify()?
         .step5_multipoint_eval::<U>()?
         .step6_lifted_evals::<U>()?
         .step7_pcs_verify::<U, CHECK_FOR_OVERFLOW>()?

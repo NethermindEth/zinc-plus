@@ -1,7 +1,12 @@
 # Pointer query (composed reads) — design
 
-Branch: `mariari/pointer-query` (off `main-beta-lookup`). Status: design + staged
-implementation, teeth first.
+Branch: `mariari/pointer-query` (off `main-beta-lookup`). Status: **Stage 1
+IMPLEMENTED + e2e-validated** — spec (`ComposedReadSpec`), subprotocol
+(`piop/src/pointer_query.rs`), and protocol wiring (`step4c` + two int
+openings) all landed; `PointerHopUair` proves e2e, the forged-dereference
+twin rejects from `ProtocolError::PointerQuery`, bridge- and lifted-eval
+tampers reject, and the full protocol suite stays green. Teeth were grown
+first; stages 2-3 (int reducer, region read) remain the menu below.
 
 Goal: a **declarable composed-read check** for the integer path — the verifier-side
 "pointer query step" of the FOL paper (Lemma 4.2's `C_i(C_j(X))` obligation): given
