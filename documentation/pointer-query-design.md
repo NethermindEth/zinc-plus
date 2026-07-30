@@ -52,26 +52,24 @@ programs at seven steps today).
 
 Write `eqt(b(x), y) = prod_nu (b_nu(x)*y_nu + (1-b_nu(x))*(1-y_nu))`. On boolean
 `b`, `eqt(b(x), ·)` is the indicator of the cube point `b(x)`, so the obligation
-is equivalent (after batching rows with `eq(tau, x)`) to:
+is equivalent (after batching rows with `eq(r*, x)`) to:
 
 ```text
-S := sum_x eq(tau,x) * R(x)  =  sum_x eq(tau,x) * sum_y eqt(b(x),y) * V(y)
+R~(r*)  =  sum_x eq(r*,x) * sum_y eqt(b(x),y) * V(y)
 ```
 
-for a transcript-drawn `tau`. Three pieces:
+where `r*` is the step-4 shared sumcheck point — already transcript-bound, and
+`R~(r*)` is already in the proof as an ordinary resolver up-eval, discharged by
+the existing mp-eval → step-7 cascade. So the R side costs **nothing at all** —
+no step-4 group, no new bytes — and the component is purely the read side:
 
-- **Left side — a step-4 group.** `sum_x eq(tau,x)*R(x) = S` rides the existing
-  `MultiDegreeSumcheck` as one more group (the booleanity model:
-  `prepare_/finalize_` pair, degree 2, claimed sum `S`). Its endpoint eval
-  `R~(r*)` cascades through mp-eval and the step-7 opening like every other
-  up-eval. **Zero new proof bytes for `R`.**
-- **Right side, phase A — a `y`-sumcheck.** Define `u(y) := sum_x eq(tau,x) *
-  eqt(b(x),y)`; on boolean bits this is the eq-mass pushed through the pointer
-  map, prover-computable in `O(2^mu)` and never committed. Sumcheck A proves
-  `S = sum_y u~(y) * V~(y)` (degree 2, `mu` rounds), ending at `r_A` with claims
-  `u~(r_A)` and `V~(r_A)`.
-- **Right side, phase B — an `x`-sumcheck.** `u~(r_A)` is discharged by proving
-  `u~(r_A) = sum_x eq(tau,x) * prod_nu (b_nu(x)*(r_A)_nu +
+- **Phase A — a `y`-sumcheck.** Define `u(y) := sum_x eq(r*,x) * eqt(b(x),y)`;
+  on boolean bits this is the eq-mass pushed through the pointer map,
+  prover-computable in `O(2^mu)` and never committed. Sumcheck A proves
+  `R~(r*) = sum_y u~(y) * V~(y)` (degree 2, `mu` rounds), ending at `r_A` with
+  claims `u~(r_A)` and `V~(r_A)`.
+- **Phase B — an `x`-sumcheck.** `u~(r_A)` is discharged by proving
+  `u~(r_A) = sum_x eq(r*,x) * prod_nu (b_nu(x)*(r_A)_nu +
   (1-b_nu(x))*(1-(r_A)_nu))` — a product of `mu+1` multilinears, so degree
   `mu+1`, `mu` rounds — ending at `r_B` with claims `b~_nu(r_B)`. The identity
   `u~(r_A) = MLE_y[u](r_A)` holds exactly because `eqt(b(x),·)` is multilinear
@@ -80,8 +78,8 @@ for a transcript-drawn `tau`. Three pieces:
   downstream frontend's constraint-level emulation unrolls into `len` committed
   columns per read — the component moves it into one sumcheck.)
 
-Multiple reads batch with a transcript challenge `alpha`: one shared `tau`, one
-group (`sum_j alpha^j eq*R_j`), one A (`sum_j alpha^j u~_j V~_j`), one B.
+Multiple reads batch with a transcript challenge `alpha` drawn at step-4c entry:
+sumcheck A proves `sum_j alpha^j R~_j(r*)`, one A, one B.
 
 **Endpoint discharge (stage 1):** `V~_j(r_A)` and `b~_(j,nu)(r_B)` are int-batch
 column evals at fresh points; two additional `prove_f`/`sample_alphas`+
@@ -90,19 +88,21 @@ against the existing int commitment. No new commitment anywhere.
 
 ## Transcript order
 
-Within the standard phase chain (prover step names in parentheses):
+Within the standard phase chain:
 
-1. After step-4 prep, before the shared rounds: absorb the read specs' claimed
-   sum `S`, draw `tau`, `alpha` (`prepare_pointer_query_group`).
-2. Shared step-4 rounds run; `finalize_` emits nothing extra (the `R~(r*)` evals
-   are ordinary up-evals).
-3. `step4c_pointer_query`: sumcheck A (draws its round challenges), then
-   sumcheck B (its rounds). Claims absorbed as produced.
-4. Steps 5–7 unchanged; then the two extra int openings at `r_A`, `r_B`
-   (mirrored in the verifier before `finish`).
+1. Steps 0–4b run unchanged; step 4's shared rounds fix `r*` and the resolver
+   absorbs the up-evals (including every `R~_j(r*)`).
+2. `step4c_pointer_query`: draw and absorb `alpha`; sumcheck A runs its rounds;
+   the bridge evaluations `u~_j(r_A)` are absorbed; sumcheck B runs its rounds.
+3. Step 5 unchanged. Step 6 additionally lifts the witness-int columns at `r_A`
+   and `r_B` and absorbs those evaluations after the `r_0` ones.
+4. Step 7 additionally opens the int batch at `r_A` then `r_B` (each opening
+   draws its own alphas), mirrored exactly in the verifier.
 
-`tau`/`alpha` are drawn after all commitments (step 0) and after the ideal-check
-binding point, so a malicious prover cannot grind columns against them.
+`alpha` and both sumchecks' round challenges are drawn after all commitments
+(step 0) and after `r*`, so a malicious prover cannot grind columns against
+them; the lifted evaluations at `r_A`/`r_B` are bound by the openings, not by
+their absorption position.
 
 ## Padding
 
@@ -146,10 +146,10 @@ result_row}`.)
 
 ## Staging
 
-1. **Stage 1 (this branch):** spec + validation; the three-piece protocol;
+1. **Stage 1 (this branch):** spec + validation; the two-sumcheck protocol;
    stage-1 discharge via two extra int openings; e2e positive test on a
-   hop-style UAIR + tamper-reject suite (forged result entry, forged bit,
-   forged claimed sum, forged `V~(r_A)`, truncated proof). Teeth first: the
+   hop-style UAIR + tamper-reject suite (forged result entry, forged bridge
+   evaluation, forged lifted evaluation). Teeth first: the
    tamper tests are written against the design before the prover exists.
 2. **Stage 2:** int-batch multipoint reducer (fold `r_0`/`r_A`/`r_B` to one
    opening), the symmetric move to `BinMultipointReducer`.
