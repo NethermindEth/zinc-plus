@@ -10,6 +10,9 @@ use zinc_piop::{
     },
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    pointer_query::{
+        PointerQueryPoints, PointerQueryProof, prove_pointer_queries,
+    },
     lookup::booleanity::{
         build_shifted_bit_slice_mles, build_virtual_binary_poly_mles,
         build_virtual_booleanity_mles, compute_bit_slices_flat,
@@ -206,6 +209,8 @@ pub struct ProverLookupProved<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
+    pointer_query_proof: Option<PointerQueryProof<F>>,
+    pq_points: Option<PointerQueryPoints<F>>,
 }
 
 /// After step 5 (multipoint eval).
@@ -219,6 +224,8 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
+    pointer_query_proof: Option<PointerQueryProof<F>>,
+    pq_points: Option<PointerQueryPoints<F>>,
 
     // New
     mp_proof: MultipointEvalProof<F>,
@@ -235,11 +242,17 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
+    pointer_query_proof: Option<PointerQueryProof<F>>,
+    pq_points: Option<PointerQueryPoints<F>>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
 
     // New
     lifted_evals: Vec<DynamicPolynomialF<F>>,
+    /// Witness-int lifted evaluations at the pointer-query points
+    /// `r_A` / `r_B` (empty when no composed reads are declared).
+    pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
 impl<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize>
@@ -267,6 +280,9 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
+    pointer_query_proof: Option<PointerQueryProof<F>>,
+    pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
 //
@@ -963,12 +979,70 @@ impl_with_type_bounds!(ProverSumchecked
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: GkrLogupLookupProof { groups, group_meta },
             lookup_r_inners,
+            pointer_query_proof: None,
+            pq_points: None,
         })
     }
 });
 
 impl_with_type_bounds!(ProverLookupProved
 {
+    /// Step 4c: the pointer query (composed reads). Two chained
+    /// sumchecks anchored at the step-4 point; the endpoint claims are
+    /// discharged in step 7 by two extra int-batch openings. See
+    /// `documentation/pointer-query-design.md`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn step4c_pointer_query(
+        mut self,
+    ) -> Result<ProverLookupProved<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let specs = self.base.uair_signature.composed_read_specs().to_vec();
+        if specs.is_empty() {
+            return Ok(self);
+        }
+
+        let total = self.base.uair_signature.total_cols();
+        let int_flat_offset = add!(
+            total.num_binary_poly_cols(),
+            total.num_arbitrary_poly_cols()
+        );
+        let int_cols_f = &self.projected_trace_f[int_flat_offset..];
+
+        // Addresses read off the projected bit columns: each bit cell
+        // is exactly zero or one for an honest trace.
+        let one = F::one_with_cfg(&self.field_cfg);
+        let rows = 1usize << self.base.num_vars;
+        let addrs: Vec<Vec<usize>> = specs
+            .iter()
+            .map(|spec| {
+                (0..rows)
+                    .map(|x| {
+                        spec.bit_cols.iter().enumerate().fold(0usize, |acc, (nu, &col)| {
+                            let bit = F::new_unchecked_with_cfg(
+                                int_cols_f[col - int_flat_offset].evaluations[x].clone(),
+                                &self.field_cfg,
+                            );
+                            if bit == one { acc | (1usize << nu) } else { acc }
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let (proof, points) = prove_pointer_queries::<F>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            &specs,
+            int_flat_offset,
+            int_cols_f,
+            &addrs,
+            &self.cpr_eval_point,
+            &self.field_cfg,
+        )?;
+
+        self.pointer_query_proof = Some(proof);
+        self.pq_points = Some(points);
+        Ok(self)
+    }
+
     /// Step 5: Multi-point evaluation sumcheck under ψ_α. Reduces all CPR
     /// claims at `r*` (up evals + row-shift down evals + bit-op virtual
     /// down evals) to a single point `r_0`.
@@ -1029,6 +1103,8 @@ impl_with_type_bounds!(ProverLookupProved
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
             lookup_r_inners: self.lookup_r_inners,
+            pointer_query_proof: self.pointer_query_proof,
+            pq_points: self.pq_points,
             mp_proof,
             r_0: mp_prover_state.eval_point,
         })
@@ -1061,6 +1137,42 @@ impl_with_type_bounds!(ProverMultipointEvaled
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
+        // Pointer query: witness-int lifted evaluations at r_A / r_B,
+        // absorbed after the r_0 evals, opened in step 7.
+        let (pq_int_lifted_at_r_a, pq_int_lifted_at_r_b) = match &self.pq_points {
+            None => (Vec::new(), Vec::new()),
+            Some(points) => {
+                let sig = &self.base.uair_signature;
+                let witness_int_offset = add!(
+                    add!(
+                        sig.total_cols().num_binary_poly_cols(),
+                        sig.total_cols().num_arbitrary_poly_cols()
+                    ),
+                    sig.public_cols().num_int_cols()
+                );
+                let mut both = Vec::with_capacity(2);
+                for point in [&points.r_a, &points.r_b] {
+                    let lifted = compute_lifted_evals::<F, D>(
+                        point,
+                        &self.base.trace.binary_poly,
+                        &self.projected_trace,
+                        &self.field_cfg,
+                    );
+                    let witness_int: Vec<_> = lifted[witness_int_offset..].to_vec();
+                    for bar_u in &witness_int {
+                        self.base
+                            .pcs_transcript
+                            .fs_transcript
+                            .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+                    }
+                    both.push(witness_int);
+                }
+                let r_b_lifted = both.pop().expect("two point sets were pushed");
+                let r_a_lifted = both.pop().expect("two point sets were pushed");
+                (r_a_lifted, r_b_lifted)
+            }
+        };
+
         Ok(ProverLifted {
             base: self.base,
             field_cfg: self.field_cfg,
@@ -1069,9 +1181,13 @@ impl_with_type_bounds!(ProverMultipointEvaled
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
             lookup_r_inners: self.lookup_r_inners,
+            pointer_query_proof: self.pointer_query_proof,
+            pq_points: self.pq_points,
             mp_proof: self.mp_proof,
             r_0: self.r_0,
             lifted_evals,
+            pq_int_lifted_at_r_a,
+            pq_int_lifted_at_r_b,
         })
     }
 });
@@ -1203,6 +1319,27 @@ impl_with_type_bounds!(ProverLifted
             )?;
         }
 
+        // Pointer query: discharge the endpoint claims with two more
+        // int-batch openings, at r_A and r_B (stage 1 of the design;
+        // an int multipoint reducer is the symmetric future fold).
+        if let Some(points) = &self.pq_points {
+            let hint_int = self
+                .base
+                .hint_int
+                .as_ref()
+                .expect("composed reads require witness int columns");
+            for point in [&points.r_a, &points.r_b] {
+                let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    &mut self.base.pcs_transcript,
+                    self.base.pp_int,
+                    &witness_trace.int,
+                    point,
+                    hint_int,
+                    &self.field_cfg,
+                )?;
+            }
+        }
+
         Ok(ProverPcsOpened {
             base: self.base,
             ic_proof: self.ic_proof,
@@ -1213,6 +1350,9 @@ impl_with_type_bounds!(ProverLifted
             lifted_evals: self.lifted_evals,
             bin_reducer_proof,
             bin_lifts_at_r_star,
+            pointer_query_proof: self.pointer_query_proof,
+            pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
+            pq_int_lifted_at_r_b: self.pq_int_lifted_at_r_b,
         })
     }
 });
@@ -1261,6 +1401,9 @@ impl_with_type_bounds!(ProverPcsOpened
             lookup_proof: self.lookup_proof,
             bin_reducer_proof: self.bin_reducer_proof,
             bin_lifts_at_r_star: self.bin_lifts_at_r_star,
+            pointer_query_proof: self.pointer_query_proof,
+            pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
+            pq_int_lifted_at_r_b: self.pq_int_lifted_at_r_b,
         })
     }
 });
@@ -1362,6 +1505,7 @@ where
             .step3_eval_projection()?
             .step4_sumcheck()?
             .step4b_lookup()?
+            .step4c_pointer_query()?
             .step5_multipoint_eval()?
             .step6_lift_and_project()?
             .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?
@@ -1824,6 +1968,9 @@ where
         lookup_proof,
         bin_reducer_proof,
         bin_lifts_at_r_star,
+        pointer_query_proof: None,
+        pq_int_lifted_at_r_a: Vec::new(),
+        pq_int_lifted_at_r_b: Vec::new(),
     })
 }
 
@@ -2714,6 +2861,9 @@ where
         lookup_proof,
         bin_reducer_proof,
         bin_lifts_at_r_star,
+        pointer_query_proof: None,
+        pq_int_lifted_at_r_a: Vec::new(),
+        pq_int_lifted_at_r_b: Vec::new(),
     };
     if let Some(t) = timings.as_mut() {
         t.assembly = _t_assembly.elapsed();

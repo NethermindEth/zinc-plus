@@ -33,6 +33,7 @@ use zinc_piop::{
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
     lookup::{LookupError, gkr_logup::GkrLogupLookupProof},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
+    pointer_query::PointerQueryProof,
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
 };
@@ -103,6 +104,15 @@ pub struct Proof<F: PrimeField> {
     /// computing the alpha-projected eval for the single bin Zip+
     /// open at `r*`.
     pub bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    /// Pointer-query (composed read) proof — `Some` iff the UAIR
+    /// declares composed reads. See
+    /// `documentation/pointer-query-design.md`.
+    pub pointer_query_proof: Option<PointerQueryProof<F>>,
+    /// Witness-int lifted evaluations at the pointer query's `r_A` /
+    /// `r_B` points, discharged by the two extra int-batch openings.
+    /// Empty when `pointer_query_proof` is `None`.
+    pub pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    pub pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -147,6 +157,21 @@ where
             }
             v => panic!("invalid bin_reducer_proof presence flag: {v}"),
         };
+
+        // [pq_present: u8] [pointer_query_proof? + lifted evals at r_A/r_B]
+        let pq_present = bytes[0];
+        let bytes = &bytes[1..];
+        let (pointer_query_proof, pq_int_lifted_at_r_a, pq_int_lifted_at_r_b, bytes) =
+            match pq_present {
+                0 => (None, Vec::new(), Vec::new(), bytes),
+                1 => {
+                    let (pq, rest) = PointerQueryProof::<F>::read_transcription_bytes_subset(bytes);
+                    let (la, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+                    let (lb, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+                    (Some(pq), la.0, lb.0, rest)
+                }
+                v => panic!("invalid pointer_query_proof presence flag: {v}"),
+            };
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -160,6 +185,9 @@ where
             lookup_proof,
             bin_reducer_proof,
             bin_lifts_at_r_star,
+            pointer_query_proof,
+            pq_int_lifted_at_r_a,
+            pq_int_lifted_at_r_b,
         }
     }
 
@@ -196,19 +224,40 @@ where
         let buf = self.lookup_proof.write_transcription_bytes_subset(buf);
 
         // [reducer_present: u8] then optional reducer_proof + bin_lifts.
-        match &self.bin_reducer_proof {
+        let buf = match &self.bin_reducer_proof {
             None => {
                 assert!(
                     self.bin_lifts_at_r_star.is_empty(),
                     "bin_lifts_at_r_star must be empty when reducer is absent"
                 );
                 buf[0] = 0;
+                &mut buf[1..]
             }
             Some(rp) => {
                 buf[0] = 1;
                 let buf = &mut buf[1..];
                 let buf = rp.write_transcription_bytes_subset(buf);
                 DynamicPolyVecF::reinterpret(&self.bin_lifts_at_r_star)
+                    .write_transcription_bytes_subset(buf)
+            }
+        };
+
+        // [pq_present: u8] then optional pointer-query proof + lifted evals.
+        match &self.pointer_query_proof {
+            None => {
+                assert!(
+                    self.pq_int_lifted_at_r_a.is_empty() && self.pq_int_lifted_at_r_b.is_empty(),
+                    "pq lifted evals must be empty when the pointer query is absent"
+                );
+                buf[0] = 0;
+            }
+            Some(pq) => {
+                buf[0] = 1;
+                let buf = &mut buf[1..];
+                let buf = pq.write_transcription_bytes_subset(buf);
+                let buf = DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_a)
+                    .write_transcription_bytes_subset(buf);
+                DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_b)
                     .write_transcription_bytes_subset(buf);
             }
         }
@@ -248,6 +297,20 @@ where
                         + rp.get_num_bytes()
                         + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
                         + bv.get_num_bytes()
+                }
+            }
+            + 1 // pq_present flag
+            + match &self.pointer_query_proof {
+                None => 0,
+                Some(pq) => {
+                    let la = DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_a);
+                    let lb = DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_b);
+                    PointerQueryProof::<F>::LENGTH_NUM_BYTES
+                        + pq.get_num_bytes()
+                        + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + la.get_num_bytes()
+                        + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + lb.get_num_bytes()
                 }
             }
     }
@@ -534,6 +597,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     PcsVerification(usize, ZipError),
     #[error("assert_zero constraint {0} does not vanish at the projecting element")]
     AssertZero(usize),
+    #[error("pointer query failed: {0}")]
+    PointerQuery(#[from] zinc_piop::pointer_query::PointerQueryError<F>),
 }
 
 //
