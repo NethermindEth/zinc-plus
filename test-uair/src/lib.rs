@@ -31,8 +31,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout,
-    ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
+    BitOp, BitOpSpec, ComposedReadSpec, ConstraintBuilder, LookupColumnSpec, LookupTableType,
+    PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -1292,5 +1292,162 @@ mod tests {
             .into_iter()
             .collect())
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PointerHopUair — composed reads (pointer query)
+// ---------------------------------------------------------------------------
+
+/// The number of address bits (= trace num_vars) the pointer-hop UAIRs
+/// are declared for; `signature()` is static, so the bit-column count
+/// must be fixed here and tests must prove at this size.
+pub const POINTER_HOP_NUM_VARS: usize = 8;
+
+/// A value-addressed read at fixture scale: int columns
+/// `[V, b_0..b_7, R]`. Every row's `R` entry must equal `V` at the cube
+/// position the bits spell at that row. The bits ride the booleanity
+/// sumcheck (`with_int_witness_bit_cols`); the read itself is declared
+/// as a `ComposedReadSpec` and carries the soundness work — the
+/// general constraint is trivially satisfied.
+/// See `documentation/pointer-query-design.md`.
+#[derive(Clone, Debug)]
+pub struct PointerHopUair<R>(PhantomData<R>);
+
+fn pointer_hop_signature() -> UairSignature {
+    let mu = POINTER_HOP_NUM_VARS;
+    let total = TotalColumnLayout::new(0, 0, mu + 2);
+    let bit_cols: Vec<usize> = (1..=mu).collect();
+    UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![], vec![])
+        .with_int_witness_bit_cols(bit_cols.clone())
+        .with_composed_reads(vec![ComposedReadSpec {
+            value_col: 0,
+            bit_cols,
+            result_col: mu + 1,
+        }])
+}
+
+/// The honest pointer-hop trace: random small values, random addresses,
+/// `R[x] = V[addr(x)]`, bit columns spelling `addr` low bit first.
+/// When `broken` is set, one result entry is bumped off its dereference.
+fn pointer_hop_trace<R, Rng>(num_vars: usize, rng: &mut Rng, broken: bool) -> UairTrace<'static, R, R, 32>
+where
+    R: ConstSemiring + From<i32> + 'static,
+    Rng: rand::RngCore + ?Sized,
+{
+    assert_eq!(
+        num_vars, POINTER_HOP_NUM_VARS,
+        "PointerHopUair is declared for {POINTER_HOP_NUM_VARS} vars"
+    );
+    let rows = 1usize << num_vars;
+    let values: Vec<i32> = (0..rows).map(|_| (rng.next_u32() % 97) as i32).collect();
+    let addrs: Vec<usize> = (0..rows).map(|_| (rng.next_u32() as usize) % rows).collect();
+    let mut results: Vec<i32> = addrs.iter().map(|&a| values[a]).collect();
+    if broken {
+        results[3] += 1;
+    }
+    let mut cols: Vec<Vec<i32>> = Vec::with_capacity(num_vars + 2);
+    cols.push(values);
+    for nu in 0..num_vars {
+        cols.push(addrs.iter().map(|&a| ((a >> nu) & 1) as i32).collect());
+    }
+    cols.push(results);
+    UairTrace {
+        int: cols
+            .into_iter()
+            .map(|col| col.into_iter().map(R::from).collect())
+            .collect::<Vec<_>>()
+            .into(),
+        ..Default::default()
+    }
+}
+
+impl<R> Uair for PointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        pointer_hop_signature()
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially-satisfied constraint (the composed read carries the
+        // soundness work; the bits are booleanity's).
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for PointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        pointer_hop_trace::<R, Rng>(num_vars, rng, false)
+    }
+}
+
+/// PointerHopUair with one forged result entry: `R[3]` is bumped off
+/// its dereference. The composed-read check must reject this trace;
+/// a verifier that accepts it is not checking the pointer query.
+#[derive(Clone, Debug)]
+pub struct BrokenPointerHopUair<R>(PhantomData<R>);
+
+impl<R> Uair for BrokenPointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        pointer_hop_signature()
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BrokenPointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        pointer_hop_trace::<R, Rng>(num_vars, rng, true)
     }
 }

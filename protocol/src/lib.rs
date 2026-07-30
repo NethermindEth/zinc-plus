@@ -852,9 +852,10 @@ mod tests {
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
         BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair,
-        BitOpRotUair, EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair,
-        Sha256Ideal, ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts,
-        TestUairNoMultiplication, TestUairSimpleMultiplication,
+        BitOpRotUair, BrokenPointerHopUair, EC_FP_INT_LIMBS, GenerateRandomTrace,
+        POINTER_HOP_NUM_VARS, PointerHopUair, Sha256CompressionSliceUair, Sha256Ideal,
+        ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         ideal::{DegreeOneIdeal, rotation::RotationIdeal},
@@ -1179,6 +1180,44 @@ mod tests {
             default_project_ideal!(),
             |_| {},
             |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test of the composed-read (pointer query) path: int
+    /// columns [V, b_0..b_7, R], one declared read, honest trace. See
+    /// documentation/pointer-query-design.md.
+    #[test]
+    fn test_e2e_pointer_hop() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, PointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: the same UAIR with one result entry forged off its
+    /// dereference must be rejected. A verifier that accepts this trace
+    /// is not checking the pointer query at all.
+    #[test]
+    fn test_e2e_pointer_hop_forged_result_rejected() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, BrokenPointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| assert!(res.is_err(), "forged dereference must be rejected"),
         );
     }
 
