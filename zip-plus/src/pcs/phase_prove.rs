@@ -7,7 +7,7 @@ use crate::{
     },
     pcs_transcript::PcsProverTranscript,
 };
-use crypto_primitives::{BaseFieldConfig, ProjectElementWithConfig};
+use crypto_primitives::ProjectElementWithConfig;
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -15,8 +15,8 @@ use rayon::prelude::*;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{
-    UNCHECKED, cfg_chunks, cfg_iter, cfg_iter_mut,
-    inner_product::{FieldInnerProduct, InnerProduct},
+    cfg_chunks, cfg_iter, cfg_iter_mut,
+    inner_product::{InnerProduct, PreparedFieldInnerProduct},
     mul_by_scalar::MulByScalar,
 };
 
@@ -90,10 +90,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         field_cfg: &C,
     ) -> Result<C::Element, ZipError>
     where
-        C: BaseFieldConfig
-            + ProjectElementWithConfig<Zt::Pt>
-            + ProjectElementWithConfig<Zt::CombR>
-            + Sync,
+        C: PreparedFieldInnerProduct<Zt::CombR> + ProjectElementWithConfig<Zt::Pt> + Sync,
         C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
         Zt::CombR: MulByScalar<Zt::Chal>,
@@ -124,7 +121,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         field_cfg: &C,
     ) -> Result<C::Element, ZipError>
     where
-        C: BaseFieldConfig + ProjectElementWithConfig<Zt::CombR> + Sync,
+        C: PreparedFieldInnerProduct<Zt::CombR> + Sync,
         C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
         Zt::CombR: MulByScalar<Zt::Chal>,
@@ -142,9 +139,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
 
-        // TODO Lift q0, q1 back to int and take following dot products on ints instead
-        // of MBSInnerProduct in field (see comboned row) We prove evaluations
-        // over the field, so integers need to be mapped to field elements first
         let (q_0, q_1) = point_to_tensor(field_cfg, point, num_rows)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
@@ -172,20 +166,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .try_collect()?;
 
         let zero_f = field_cfg.zero();
+        let row_inner_product = field_cfg.prepare_field_inner_product(&q_1);
 
         // Compute per-polynomial row dot products, then sum across polynomials.
         let b = {
             let per_poly_b: Vec<Vec<C::Element>> = cfg_iter!(polys_as_comb_r)
                 .map(|poly_comb_r| {
                     cfg_chunks!(poly_comb_r, row_len)
-                        .map(|row| {
-                            FieldInnerProduct::inner_product::<UNCHECKED>(
-                                field_cfg,
-                                &q_1,
-                                row,
-                                zero_f.clone(),
-                            )
-                        })
+                        .map(&row_inner_product)
                         .collect::<Result<Vec<C::Element>, _>>()
                 })
                 .collect::<Result<_, _>>()?;
@@ -273,10 +261,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         field_cfg: &C,
     ) -> Result<C::Element, ZipError>
     where
-        C: BaseFieldConfig
-            + ProjectElementWithConfig<Zt::Pt>
-            + ProjectElementWithConfig<Zt::CombR>
-            + Sync,
+        C: PreparedFieldInnerProduct<Zt::CombR> + ProjectElementWithConfig<Zt::Pt> + Sync,
         C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
         Zt::CombR: MulByScalar<Zt::Chal>,

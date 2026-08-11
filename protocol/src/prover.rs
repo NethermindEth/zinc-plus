@@ -24,8 +24,8 @@ use zinc_uair::{
     degree_counter::count_max_degree,
 };
 use zinc_utils::{
-    add, cfg_iter, cfg_join, mul_by_scalar::MulByScalar, powers,
-    projectable_to_field::ProjectableToField,
+    add, cfg_iter, cfg_join, inner_product::PreparedFieldInnerProduct, mul_by_scalar::MulByScalar,
+    powers, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
@@ -1572,7 +1572,10 @@ impl_with_type_bounds!(ProverLifted
     /// [`step7_pcs_verify`](crate::ZincPlusPiop::step7_pcs_verify).
     pub fn step8_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
-    ) -> Result<ProverPcsOpened<'a, Zt, U, C, D, FD>, ProtocolError<C::Element>> {
+    ) -> Result<ProverPcsOpened<'a, Zt, U, C, D, FD>, ProtocolError<C::Element>>
+    where
+        C: PreparedFieldInnerProduct<Zt::CombR>,
+    {
         let witness_trace = &self.base.folded_witness_trace;
         let q_pp_cfg = &self.q_pp_cfg;
         let r_star = &self.r_star;
@@ -1728,6 +1731,7 @@ where
         + ProjectElementWithConfig<Zt::Int>
         + ProjectElementWithConfig<Zt::CombR>
         + ProjectElementWithConfig<Zt::Chal>
+        + PreparedFieldInnerProduct<Zt::CombR>
         + Clone
         + Send
         + Sync

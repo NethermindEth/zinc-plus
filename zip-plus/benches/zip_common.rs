@@ -11,7 +11,6 @@ use crypto_primitives::{
     crypto_bigint_uint::{U64, Uint},
 };
 use itertools::Itertools;
-use num_traits::One;
 use rand::{distr::StandardUniform, prelude::*};
 use std::{
     hint::black_box,
@@ -19,7 +18,10 @@ use std::{
 };
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named};
+use zinc_utils::{
+    from_ref::FromRef, inner_product::PreparedFieldInnerProduct, mul_by_scalar::MulByScalar,
+    named::Named,
+};
 use zip_plus::{
     code::LinearCode,
     merkle::MerkleTree,
@@ -39,9 +41,11 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
     Cfg: ProjectElementWithConfig<Zt::CombR>
         + ProjectElementWithConfig<Zt::Chal>
-        + ProjectElementWithConfig<Zt::Pt>,
+        + ProjectElementWithConfig<Zt::Pt>
+        + PreparedFieldInnerProduct<Zt::CombR>,
     CfgInt: FromRef<Zt::Fmod>,
     Zt::CombR: MulByScalar<Zt::Chal>,
+    Zt::Pt: From<u64>,
 {
     encode_rows::<Zt, Lc, 12>(group, make_linear_code);
     encode_rows::<Zt, Lc, 13>(group, make_linear_code);
@@ -235,9 +239,12 @@ pub fn prove<
     make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    Cfg: ProjectElementWithConfig<Zt::CombR> + ProjectElementWithConfig<Zt::Pt>,
+    Cfg: ProjectElementWithConfig<Zt::CombR>
+        + ProjectElementWithConfig<Zt::Pt>
+        + PreparedFieldInnerProduct<Zt::CombR>,
     CfgInt: FromRef<Zt::Fmod>,
     Zt::CombR: MulByScalar<Zt::Chal>,
+    Zt::Pt: From<u64>,
 {
     let mut rng = ThreadRng::default();
 
@@ -260,7 +267,7 @@ pub fn prove<
         .fs_transcript
         .get_random_field_cfg::<Cfg, Zt::Fmod, Zt::PrimeTest>();
 
-    let point = vec![Zt::Pt::one(); P];
+    let point = (2_u64..).take(P).map(Zt::Pt::from).collect_vec();
 
     macro_rules! do_prove {
         ($t:expr) => {
@@ -322,9 +329,11 @@ pub fn verify<
     StandardUniform: Distribution<Zt::Eval>,
     Cfg: ProjectElementWithConfig<Zt::CombR>
         + ProjectElementWithConfig<Zt::Chal>
-        + ProjectElementWithConfig<Zt::Pt>,
+        + ProjectElementWithConfig<Zt::Pt>
+        + PreparedFieldInnerProduct<Zt::CombR>,
     CfgInt: FromRef<Zt::Fmod>,
     Zt::CombR: MulByScalar<Zt::Chal>,
+    Zt::Pt: From<u64>,
 {
     let mut rng = ThreadRng::default();
     let poly_size: usize = 1 << P;
@@ -345,7 +354,7 @@ pub fn verify<
     let field_cfg = transcript
         .fs_transcript
         .get_random_field_cfg::<Cfg, Zt::Fmod, Zt::PrimeTest>();
-    let point = vec![Zt::Pt::one(); P];
+    let point = (2_u64..).take(P).map(Zt::Pt::from).collect_vec();
 
     let eval_f = ZipPlus::prove::<Cfg, CHECK_FOR_OVERFLOWS>(
         &mut transcript,
