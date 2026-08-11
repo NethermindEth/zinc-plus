@@ -38,7 +38,6 @@ impl<C: SetConfig, R> RFProverState<C, R> {
 impl<C, R> RFSumcheck<C, R>
 where
     C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
-    C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
     R: SetElement + ProjectableToField<C>,
 {

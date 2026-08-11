@@ -278,7 +278,6 @@ pub struct MultiDegreeSumcheck<C>(PhantomData<C>);
 impl<C> MultiDegreeSumcheck<C>
 where
     C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
-    C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
 {
     /// Multi-degree sumcheck prover.
@@ -351,14 +350,14 @@ where
         }
 
         let num_families = families.len();
-        let mut buf = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        let mut buf = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
 
         // Metadata: absorb (num_vars, num_families) under `q_star_cfg` so the
         // transcript layout is canonical across families.
         let nvars_field = q_star_cfg.project(&(num_vars as u64));
         let nfamilies_field = q_star_cfg.project(&(num_families as u64));
-        transcript.absorb_field_element(&nvars_field, &mut buf);
-        transcript.absorb_field_element(&nfamilies_field, &mut buf);
+        transcript.absorb_field_element(q_star_cfg, &nvars_field, &mut buf);
+        transcript.absorb_field_element(q_star_cfg, &nfamilies_field, &mut buf);
 
         // Per-family state, one `Vec` per family.
         let mut per_family_group_messages: Vec<Vec<Vec<SumcheckProverMsg<C::Element>>>> =
@@ -375,7 +374,7 @@ where
         for (groups, cfg) in families {
             let num_groups = groups.len();
             let ngroups_field = q_star_cfg.project(&(num_groups as u64));
-            transcript.absorb_field_element(&ngroups_field, &mut buf);
+            transcript.absorb_field_element(q_star_cfg, &ngroups_field, &mut buf);
 
             let group_messages: Vec<Vec<SumcheckProverMsg<C::Element>>> = (0..num_groups)
                 .map(|_| Vec::with_capacity(num_vars))
@@ -387,7 +386,7 @@ where
 
             for group in groups {
                 let degree_field = q_star_cfg.project(&(group.degree as u64));
-                transcript.absorb_field_element(&degree_field, &mut buf);
+                transcript.absorb_field_element(q_star_cfg, &degree_field, &mut buf);
 
                 prover_states.push(SumcheckProverState::new(group.poly, num_vars, group.degree));
                 comb_fns.push(group.comb_fn);
@@ -433,7 +432,7 @@ where
                         .collect();
 
                 for msg in &round_msgs {
-                    transcript.absorb_field_element_slice(&msg.0.tail_evaluations, &mut buf);
+                    transcript.absorb_field_element_slice(cfg, &msg.0.tail_evaluations, &mut buf);
                 }
 
                 for (j, msg) in round_msgs.into_iter().enumerate() {
@@ -443,7 +442,7 @@ where
 
             // 2. Sample one shared integer challenge in [0, q*) via q_star_cfg.
             let shared_chal_q_star: C::Element = transcript.get_field_challenge(q_star_cfg);
-            transcript.absorb_field_element(&shared_chal_q_star, &mut buf);
+            transcript.absorb_field_element(q_star_cfg, &shared_chal_q_star, &mut buf);
             let shared_chal_int = q_star_cfg.lift(&shared_chal_q_star);
 
             // 3. Per family: lift the shared integer into its field and feed each group.
@@ -544,13 +543,13 @@ where
         assert!(!proofs.is_empty(), "need at least one family");
 
         let num_families = proofs.len();
-        let mut buf = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        let mut buf = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
 
         // Metadata: (num_vars, num_families) under q_star_cfg.
         let nvars_field = q_star_cfg.project(&(num_vars as u64));
         let nfamilies_field = q_star_cfg.project(&(num_families as u64));
-        transcript.absorb_field_element(&nvars_field, &mut buf);
-        transcript.absorb_field_element(&nfamilies_field, &mut buf);
+        transcript.absorb_field_element(q_star_cfg, &nvars_field, &mut buf);
+        transcript.absorb_field_element(q_star_cfg, &nfamilies_field, &mut buf);
 
         let mut per_family_verifier_states: Vec<Vec<VerifierState<C>>> =
             Vec::with_capacity(num_families);
@@ -558,13 +557,13 @@ where
             let num_groups = proof.degrees.len();
             assert!(num_groups != 0, "every family needs at least one group");
             let ngroups_field = q_star_cfg.project(&(num_groups as u64));
-            transcript.absorb_field_element(&ngroups_field, &mut buf);
+            transcript.absorb_field_element(q_star_cfg, &ngroups_field, &mut buf);
 
             let states: Vec<VerifierState<C>> = (0..num_groups)
                 .map(|j| {
                     let degree = proof.degrees[j];
                     let degree_field = q_star_cfg.project(&(degree as u64));
-                    transcript.absorb_field_element(&degree_field, &mut buf);
+                    transcript.absorb_field_element(q_star_cfg, &degree_field, &mut buf);
                     VerifierState::new(num_vars, degree, *cfg)
                 })
                 .collect();
@@ -592,15 +591,19 @@ where
         for i in 0..num_vars {
             // Absorb all families' messages in family-major order to match
             // the prover.
-            for (proof, _) in proofs {
+            for (proof, cfg) in proofs {
                 proof.group_messages.iter().for_each(|msg| {
-                    transcript.absorb_field_element_slice(&msg[i].0.tail_evaluations, &mut buf)
+                    transcript.absorb_field_element_slice(
+                        *cfg,
+                        &msg[i].0.tail_evaluations,
+                        &mut buf,
+                    )
                 });
             }
 
             // One shared integer challenge per round under q_star_cfg.
             let shared_chal_q_star: C::Element = transcript.get_field_challenge(q_star_cfg);
-            transcript.absorb_field_element(&shared_chal_q_star, &mut buf);
+            transcript.absorb_field_element(q_star_cfg, &shared_chal_q_star, &mut buf);
             let shared_chal_int = q_star_cfg.lift(&shared_chal_q_star);
 
             for (b, (proof, cfg)) in proofs.iter().enumerate() {

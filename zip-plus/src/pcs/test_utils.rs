@@ -168,9 +168,7 @@ where
         + ProjectElementWithConfig<<TestZipTypes<N, K, M> as ZipTypes>::Pt>
         + ProjectElementWithConfig<<TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + Sync,
-    C::Element: ConstTranscribable,
-    C::Integer: ConstTranscribable,
-    C::Integer: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod>,
+    C::Integer: ConstTranscribable + FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod>,
 {
     setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
@@ -200,9 +198,8 @@ where
         + ProjectElementWithConfig<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Pt>
         + ProjectElementWithConfig<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + Sync,
-    C::Element: ConstTranscribable,
-    C::Integer: ConstTranscribable,
-    C::Integer: FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod>,
+    C::Integer: ConstTranscribable
+        + FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod>,
 {
     setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
@@ -228,7 +225,6 @@ where
         + ProjectElementWithConfig<Zt::Pt>
         + ProjectElementWithConfig<Zt::CombR>
         + Sync,
-    C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
     C::Integer: FromRef<Zt::Fmod>,
 {

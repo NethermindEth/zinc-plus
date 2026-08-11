@@ -83,7 +83,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     ) -> Result<Proof<C::Element>, IdealCheckError<C::Element>>
     where
         C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
-        C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
     {
         // Classify constraints to drive dispatch below:
         // * Linear non-zero-ideal goes through the column-major MLE-first path
@@ -167,9 +167,9 @@ impl<U: Uair> IdealCheckProtocol<U> {
             }
         }
 
-        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
         combined_mle_values.iter().for_each(|cv| {
-            transcript.absorb_field_element_slice(&cv.coeffs, &mut transcription_buf);
+            transcript.absorb_field_element_slice(field_cfg, &cv.coeffs, &mut transcription_buf);
         });
 
         Ok(Proof {
@@ -210,7 +210,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     ) -> Result<Proof<C::Element>, IdealCheckError<C::Element>>
     where
         C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
-        C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
     {
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
@@ -249,10 +249,10 @@ impl<U: Uair> IdealCheckProtocol<U> {
             }
         };
 
-        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
 
         combined_mle_values.iter().for_each(|v| {
-            transcript.absorb_field_element_slice(&v.coeffs, &mut transcription_buf);
+            transcript.absorb_field_element_slice(field_cfg, &v.coeffs, &mut transcription_buf);
         });
 
         Ok(Proof {
@@ -295,17 +295,21 @@ impl<U: Uair> IdealCheckProtocol<U> {
     ) -> Result<VerifierSubclaim<C::Element>, IdealCheckError<C::Element>>
     where
         C: BaseFieldConfig,
-        C::Element: ConstTranscribable,
+        C::Integer: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialConfig<'cfg, C>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
         IdealOverFFromFqRef: Fn(&IdealOrZero<U::FqIdeal>) -> IdealOverF,
     {
-        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
 
         for mle_value in &combined_mle_values {
-            transcript.absorb_field_element_slice(&mle_value.coeffs, &mut transcription_buf);
+            transcript.absorb_field_element_slice(
+                field_cfg,
+                &mle_value.coeffs,
+                &mut transcription_buf,
+            );
         }
 
         let ideal_collector = collect_ideals::<U>(num_constraints);

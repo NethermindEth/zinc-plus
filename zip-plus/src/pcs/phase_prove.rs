@@ -94,7 +94,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + ProjectElementWithConfig<Zt::Pt>
             + ProjectElementWithConfig<Zt::CombR>
             + Sync,
-        C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
         Zt::CombR: MulByScalar<Zt::Chal>,
     {
@@ -125,7 +124,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<C::Element, ZipError>
     where
         C: BaseFieldConfig + ProjectElementWithConfig<Zt::CombR> + Sync,
-        C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
         Zt::CombR: MulByScalar<Zt::Chal>,
     {
@@ -277,7 +275,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + ProjectElementWithConfig<Zt::Pt>
             + ProjectElementWithConfig<Zt::CombR>
             + Sync,
-        C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
         Zt::CombR: MulByScalar<Zt::Chal>,
     {

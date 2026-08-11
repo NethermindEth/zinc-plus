@@ -102,13 +102,11 @@ impl PcsProverTranscript {
     pub fn write_field_elements<C>(&mut self, cfg: &C, elems: &[C::Element]) -> Result<(), ZipError>
     where
         C: BaseFieldConfig,
-        C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
     {
-        let mut buf = vec![0; C::Element::NUM_BYTES];
-        self.fs_transcript
-            .absorb_field_element_slice(elems, &mut buf);
+        let mut buf = vec![0; C::Integer::NUM_BYTES];
         let lifted: Vec<C::Integer> = elems.iter().map(|e| cfg.lift(e)).collect();
+        self.fs_transcript.absorb_int_slice(&lifted, &mut buf);
         self.write_const_many(&lifted)
     }
 
@@ -218,7 +216,6 @@ impl PcsVerifierTranscript {
     pub fn read_field_elements<C>(&mut self, cfg: &C, n: usize) -> Result<Vec<C::Element>, ZipError>
     where
         C: BaseFieldConfig,
-        C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
     {
         let ints: Vec<C::Integer> = self.read_const_many(n)?;
@@ -227,9 +224,8 @@ impl PcsVerifierTranscript {
             return Err(ZipError::NonCanonicalFieldElement);
         }
         let elems = ints.iter().map(|int| cfg.project(int)).collect_vec();
-        let mut buf = vec![0; C::Element::NUM_BYTES];
-        self.fs_transcript
-            .absorb_field_element_slice(&elems, &mut buf);
+        let mut buf = vec![0; C::Integer::NUM_BYTES];
+        self.fs_transcript.absorb_int_slice(&ints, &mut buf);
         Ok(elems)
     }
 

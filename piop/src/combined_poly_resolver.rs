@@ -64,7 +64,6 @@ pub struct CombinedPolyResolver<C: SetConfig>(PhantomData<C>);
 impl<C> CombinedPolyResolver<C>
 where
     C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
-    C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
 {
     /// Build the CPR sumcheck group for use in the multi-degree sumcheck.
@@ -328,10 +327,10 @@ where
         down_evals.extend_from_slice(&evals[up_end..bit_op_start]);
         down_evals.extend_from_slice(&evals[bit_op_end..]);
 
-        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
-        transcript.absorb_field_element_slice(&up_evals, &mut transcription_buf);
-        transcript.absorb_field_element_slice(&down_evals, &mut transcription_buf);
-        transcript.absorb_field_element_slice(&bit_op_evals, &mut transcription_buf);
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_field_element_slice(field_cfg, &up_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(field_cfg, &down_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(field_cfg, &bit_op_evals, &mut transcription_buf);
         Ok((
             CprProof {
                 up_evals,
@@ -526,10 +525,14 @@ where
             });
         }
 
-        let mut transcription_buf: Vec<u8> = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
-        transcript.absorb_field_element_slice(&proof.up_evals, &mut transcription_buf);
-        transcript.absorb_field_element_slice(&proof.down_evals, &mut transcription_buf);
-        transcript.absorb_field_element_slice(&proof.bit_op_evals, &mut transcription_buf);
+        let mut transcription_buf: Vec<u8> = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
+        transcript.absorb_field_element_slice(field_cfg, &proof.up_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(field_cfg, &proof.down_evals, &mut transcription_buf);
+        transcript.absorb_field_element_slice(
+            field_cfg,
+            &proof.bit_op_evals,
+            &mut transcription_buf,
+        );
 
         Ok(VerifierSubclaim {
             up_evals: proof.up_evals,

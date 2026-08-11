@@ -30,7 +30,6 @@ pub fn bench_simple_product<C, const LIMBS: usize>(
     witness_size: usize,
 ) where
     C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
-    C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable + ConstIntSemiring + FromRef<C::Integer>,
     MillerRabin: PrimalityTest<C::Integer>,
 {

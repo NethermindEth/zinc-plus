@@ -461,7 +461,6 @@ impl<'a, Zt, U, C, IdealOverF, const D: usize, const FD: usize>
 where
     Zt: ZincTypes<D, FD>,
     C: BaseFieldConfig<Integer = Zt::Fmod> + Clone + Send + Sync + 'static,
-    C::Element: ConstTranscribable,
     U: Uair,
     IdealOverF: Ideal,
 {
@@ -571,7 +570,6 @@ where
         + Send
         + Sync
         + 'static,
-    C::Element: ConstTranscribable,
     U: Uair + 'static,
     IdealOverF: Ideal + for<'cfg> IdealCheck<DynamicPolynomialConfig<'cfg, C>>,
 {
@@ -701,7 +699,6 @@ where
         + Send
         + Sync
         + 'static,
-    C::Element: ConstTranscribable,
     U: Uair<Prime = Zt::Fmod> + 'static,
     IdealOverF: Ideal,
 {
@@ -796,7 +793,6 @@ where
         + Send
         + Sync
         + 'static,
-    C::Element: ConstTranscribable,
     U: Uair<Prime = Zt::Fmod> + 'static,
     IdealOverF: Ideal,
 {
@@ -1048,7 +1044,6 @@ where
         + Send
         + Sync
         + 'static,
-    C::Element: ConstTranscribable,
     IdealOverF: Ideal,
 {
     /// Step 5: Multi-point evaluation sumcheck.
@@ -1202,7 +1197,6 @@ where
         + Send
         + Sync
         + 'static,
-    C::Element: ConstTranscribable,
     IdealOverF: Ideal,
 {
     /// Step 6: Per-family lifted-eval consistency check.
@@ -1455,13 +1449,17 @@ where
 
         // Absorb all families' coefficients into the FS transcript in the same uniform
         // order as the prover
-        let mut transcription_buf: Vec<u8> = vec![0; C::Element::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; C::Integer::NUM_BYTES];
         for witness_lifted_i in &self.proof_witness_lifted_evals {
             for bar_u in witness_lifted_i {
                 self.base
                     .pcs_transcript
                     .fs_transcript
-                    .absorb_field_element_slice(&bar_u.coeffs, &mut transcription_buf);
+                    .absorb_field_element_slice(
+                        &self.field_cfg,
+                        &bar_u.coeffs,
+                        &mut transcription_buf,
+                    );
             }
         }
         if let Some(ref lifted_evals_pp) = proof_witness_lifted_evals_pp {
@@ -1469,7 +1467,7 @@ where
                 self.base
                     .pcs_transcript
                     .fs_transcript
-                    .absorb_field_element_slice(&bar_u.coeffs, &mut transcription_buf);
+                    .absorb_field_element_slice(&q_pp_cfg, &bar_u.coeffs, &mut transcription_buf);
             }
         }
 
@@ -1510,7 +1508,6 @@ where
         + Send
         + Sync
         + 'static,
-    C::Element: ConstTranscribable,
     IdealOverF: Ideal,
 {
     /// Step 7: PCS verification at $r^\star := r_0 \bmod q''$,
@@ -1693,7 +1690,6 @@ where
         + Send
         + Sync
         + 'static,
-    C::Element: ConstTranscribable,
     U: Uair<Prime = Zt::Fmod> + 'static,
 {
     /// Zinc+ full PIOP verifier.

@@ -4,8 +4,8 @@
 
 use crypto_bigint::{Word, modular::ConstMontyParams};
 use crypto_primitives::{
-    BaseFieldConfig, ConstBaseField, ConstIntSemiring, FieldConfig, ProjectElementWithConfig,
-    Semiring, boolean::Boolean, crypto_bigint_boxed_uint::BoxedUint,
+    BaseFieldConfig, ConstBaseField, ConstIntSemiring, FieldConfig, LiftElementWithConfig,
+    ProjectElementWithConfig, Semiring, boolean::Boolean, crypto_bigint_boxed_uint::BoxedUint,
     crypto_bigint_const_monty::ConstMontyField, crypto_bigint_int::Int,
     crypto_bigint_monty::MontyFieldElement, crypto_bigint_uint::Uint,
 };
@@ -393,22 +393,22 @@ pub trait Transcript {
     ///
     /// The field modulus is NOT absorbed here: it is bound into the transcript
     /// separately, when the field is sampled.
-    fn absorb_field_element<E>(&mut self, v: &E, buf: &mut [u8])
+    fn absorb_field_element<C, I>(&mut self, cfg: &C, v: &C::Element, buf: &mut [u8])
     where
-        E: Transcribable,
+        C: FieldConfig + LiftElementWithConfig<I>,
+        I: Semiring + Transcribable,
     {
-        self.absorb_inner(&[0x3]);
-        v.write_transcription_bytes_exact(buf);
-        self.absorb_inner(buf);
-        self.absorb_inner(&[0x5]);
+        self.absorb_int(&cfg.lift(v), buf);
     }
 
     /// Absorbs a slice of field element into the transcript.
-    fn absorb_field_element_slice<E>(&mut self, v: &[E], buf: &mut [u8])
+    fn absorb_field_element_slice<C, I>(&mut self, cfg: &C, v: &[C::Element], buf: &mut [u8])
     where
-        E: Transcribable,
+        C: FieldConfig + LiftElementWithConfig<I>,
+        I: Semiring + Transcribable,
     {
-        v.iter().for_each(|x| self.absorb_field_element(x, buf));
+        v.iter()
+            .for_each(|x| self.absorb_field_element(cfg, x, buf));
     }
 
     /// Absorbs an integer into the transcript.
@@ -420,6 +420,14 @@ pub trait Transcript {
         v.write_transcription_bytes_exact(buf);
         self.absorb_inner(buf);
         self.absorb_inner(&[0x3])
+    }
+
+    /// Absorbs a slice of integer into the transcript.
+    fn absorb_int_slice<S>(&mut self, v: &[S], buf: &mut [u8])
+    where
+        S: Semiring + Transcribable,
+    {
+        v.iter().for_each(|x| self.absorb_int(x, buf));
     }
 }
 
@@ -580,11 +588,6 @@ impl<const LIMBS: usize> GenTranscribable for MontyFieldElement<LIMBS> {
     fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
         self.0.write_transcription_bytes_exact(buf)
     }
-}
-
-impl<const LIMBS: usize> ConstTranscribable for MontyFieldElement<LIMBS> {
-    const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
-    const NUM_BITS: usize = Uint::<LIMBS>::NUM_BITS;
 }
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> GenTranscribable

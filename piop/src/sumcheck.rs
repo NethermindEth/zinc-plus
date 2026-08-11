@@ -101,7 +101,6 @@ impl<F: ConstTranscribable> Transcribable for SumcheckProof<F> {
 impl<C> MLSumcheck<C>
 where
     C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
-    C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
 {
     /// Sumcheck prover main entry point.
@@ -165,12 +164,12 @@ where
             panic!("Attempt to prove a constant")
         }
 
-        let mut buf = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        let mut buf = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
         let nvars_field = config.project(&(nvars as u64));
         let degree_field = config.project(&(degree as u64));
 
-        transcript.absorb_field_element(&nvars_field, &mut buf);
-        transcript.absorb_field_element(&degree_field, &mut buf);
+        transcript.absorb_field_element(config, &nvars_field, &mut buf);
+        transcript.absorb_field_element(config, &degree_field, &mut buf);
 
         let mut prover_state = ProverState::new(mles, nvars, degree);
         let mut verifier_msg = None;
@@ -178,10 +177,10 @@ where
 
         for _ in 0..nvars {
             let prover_msg = prover_state.prove_round(&verifier_msg, &comb_fn, config);
-            transcript.absorb_field_element_slice(&prover_msg.0.tail_evaluations, &mut buf);
+            transcript.absorb_field_element_slice(config, &prover_msg.0.tail_evaluations, &mut buf);
             prover_msgs.push(prover_msg);
             let next_verifier_msg = transcript.get_field_challenge(config);
-            transcript.absorb_field_element(&next_verifier_msg, &mut buf);
+            transcript.absorb_field_element(config, &next_verifier_msg, &mut buf);
 
             verifier_msg = Some(next_verifier_msg);
         }
@@ -264,7 +263,7 @@ where
             panic!("Attempt to verify a sumcheck claim for 0 variables")
         }
 
-        let mut buf = vec![0; <C::Element as ConstTranscribable>::NUM_BYTES];
+        let mut buf = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
 
         let (nvars_field, degree_field) = {
             (
@@ -272,8 +271,8 @@ where
                 config.project(&(degree as u64)),
             )
         };
-        transcript.absorb_field_element(&nvars_field, &mut buf);
-        transcript.absorb_field_element(&degree_field, &mut buf);
+        transcript.absorb_field_element(config, &nvars_field, &mut buf);
+        transcript.absorb_field_element(config, &degree_field, &mut buf);
 
         if proof.messages.len() != num_vars {
             return Err(SumCheckError::InvalidProofLength {
@@ -286,9 +285,9 @@ where
 
         for i in 0..num_vars {
             let prover_msg = &proof.messages[i];
-            transcript.absorb_field_element_slice(&prover_msg.0.tail_evaluations, &mut buf);
+            transcript.absorb_field_element_slice(config, &prover_msg.0.tail_evaluations, &mut buf);
             let verifier_msg = verifier_state.verify_round(prover_msg, transcript);
-            transcript.absorb_field_element(&verifier_msg, &mut buf);
+            transcript.absorb_field_element(config, &verifier_msg, &mut buf);
         }
 
         verifier_state.check_and_generate_subclaim(proof.claimed_sum.clone())

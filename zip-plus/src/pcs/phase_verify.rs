@@ -108,7 +108,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         C: BaseFieldConfig
             + ProjectElementWithConfig<Zt::CombR>
             + ProjectElementWithConfig<Zt::Chal>,
-        C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
     {
         let per_poly_alphas = Self::sample_alphas(&mut transcript.fs_transcript, comm.batch_size);
@@ -144,7 +143,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         C: BaseFieldConfig
             + ProjectElementWithConfig<Zt::CombR>
             + ProjectElementWithConfig<Zt::Chal>,
-        C::Element: ConstTranscribable,
         C::Integer: ConstTranscribable,
     {
         let batch_size = comm.batch_size;
@@ -324,7 +322,7 @@ mod tests {
         pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
     };
     use crypto_primitives::{
-        FixedConfig, IntSemiring, ProjectElementWithConfig, SemiringConfig,
+        FixedConfig, IntSemiring, ProjectElementWithConfig, SemiringConfig, WithAssociatedInteger,
         crypto_bigint_int::Int,
         crypto_bigint_monty::{MontyField, MontyFieldElement},
         crypto_bigint_uint::{U64, Uint},
@@ -783,7 +781,7 @@ mod tests {
         // To trigger "Proximity failure", corrupt a column value (past b +
         // combined_row).
         let row_len = pp.linear_code.row_len();
-        let b_section_size = pp.num_rows * F::NUM_BYTES;
+        let b_section_size = pp.num_rows * <Cfg as WithAssociatedInteger>::Integer::NUM_BYTES;
         let bytes_per_comb_r = M * size_of::<crypto_bigint::Word>();
         let combined_row_size = row_len * bytes_per_comb_r;
         let column_values_start = b_section_size + combined_row_size;
@@ -850,7 +848,7 @@ mod tests {
 
         // The transcript starts with the raw b field elements. Flip a byte
         // inside the first b element's value to corrupt eval consistency.
-        let flip_at = F::NUM_BYTES / 4;
+        let flip_at = <Cfg as WithAssociatedInteger>::Integer::NUM_BYTES / 4;
 
         let mut verifier_transcript = prover_transcript.into_verification_transcript();
         verifier_transcript.fs_transcript.absorb_slice(&comm.root);
@@ -1149,7 +1147,7 @@ mod tests {
         let point_f: Vec<F> = point.iter().map(|v| field_cfg.project(v)).collect();
 
         // Offset past b section to reach combined_row (CombR = Int<M>).
-        let b_section_size = pp.num_rows * F::NUM_BYTES;
+        let b_section_size = pp.num_rows * <Cfg as WithAssociatedInteger>::Integer::NUM_BYTES;
         let bytes_to_corrupt = M * size_of::<crypto_bigint::Word>();
 
         let mut verifier_transcript = prover_transcript.into_verification_transcript();
