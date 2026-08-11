@@ -81,7 +81,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
 
     // Prepare a transcript with the seed absorbed once.
     let mut base_transcript = Blake3Transcript::new();
-    base_transcript.absorb_slice(b"bench");
+    base_transcript.absorb_bytes(b"bench");
 
     // --- Bench prover (single-family shape) ---
     group.bench_function(BenchmarkId::new("Prover", &params), |bench| {
@@ -113,7 +113,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     // --- Bench verifier ---
     // First produce a valid proof.
     let mut prover_transcript = Blake3Transcript::new();
-    prover_transcript.absorb_slice(b"bench");
+    prover_transcript.absorb_bytes(b"bench");
     let mut prover_outputs = MultipointEval::<F>::prove_as_subprotocol(
         &mut prover_transcript,
         vec![MultipointEvalFamilyInputs {

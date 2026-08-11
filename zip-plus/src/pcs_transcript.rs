@@ -1,7 +1,10 @@
 use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
 use crypto_primitives::BaseFieldConfig;
 use itertools::Itertools;
-use std::io::{Cursor, ErrorKind, Read, Write};
+use std::{
+    borrow::Borrow,
+    io::{Cursor, ErrorKind, Read, Write},
+};
 use zinc_transcript::{
     Blake3Transcript,
     traits::{ConstTranscribable, Transcribable, Transcript},
@@ -66,7 +69,7 @@ impl PcsProverTranscript {
         };
 
         for comm in comms {
-            result.fs_transcript.absorb_slice(&comm.root);
+            result.fs_transcript.absorb_bytes(&comm.root);
         }
 
         result
@@ -104,10 +107,7 @@ impl PcsProverTranscript {
         C: BaseFieldConfig,
         C::Integer: ConstTranscribable,
     {
-        let mut buf = vec![0; C::Integer::NUM_BYTES];
-        let lifted: Vec<C::Integer> = elems.iter().map(|e| cfg.lift(e)).collect();
-        self.fs_transcript.absorb_int_slice(&lifted, &mut buf);
-        self.write_const_many(&lifted)
+        self.write_const_many_iter(elems.iter().map(|e| cfg.lift(e)), elems.len())
     }
 
     pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), ZipError> {
@@ -141,7 +141,7 @@ impl PcsProverTranscript {
     // Parallelizing this greatly degrades performance rather than improving it.
     // Maybe we should think of breakpoints for parallelization later.
     pub fn write_const_many<T: ConstTranscribable>(&mut self, vs: &[T]) -> Result<(), ZipError> {
-        self.write_const_many_iter(vs.iter(), vs.len())
+        self.write_const_many_iter::<T, _>(vs, vs.len())
     }
 
     // Note(alex):
@@ -150,7 +150,8 @@ impl PcsProverTranscript {
     pub fn write_const_many_iter<'a, T, I>(&mut self, vs: I, vs_len: usize) -> Result<(), ZipError>
     where
         T: ConstTranscribable + 'a,
-        I: IntoIterator<Item = &'a T>,
+        I: IntoIterator,
+        I::Item: Borrow<T>,
     {
         let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
         let data_len = mul!(vs_len, T::NUM_BYTES);
@@ -162,10 +163,10 @@ impl PcsProverTranscript {
             inner.resize(next_pos, 0_u8);
         }
 
-        inner[prev_pos..next_pos]
-            .chunks_mut(T::NUM_BYTES)
-            .zip(vs)
-            .for_each(|(chunk, v)| v.write_transcription_bytes_exact(chunk));
+        for (chunk, v) in inner[prev_pos..next_pos].chunks_mut(T::NUM_BYTES).zip(vs) {
+            v.borrow().write_transcription_bytes_exact(chunk);
+            self.fs_transcript.absorb_bytes(chunk);
+        }
 
         self.stream.set_position(next_pos as u64);
         Ok(())
@@ -224,8 +225,6 @@ impl PcsVerifierTranscript {
             return Err(ZipError::NonCanonicalFieldElement);
         }
         let elems = ints.iter().map(|int| cfg.project(int)).collect_vec();
-        let mut buf = vec![0; C::Integer::NUM_BYTES];
-        self.fs_transcript.absorb_int_slice(&ints, &mut buf);
         Ok(elems)
     }
 
@@ -250,7 +249,10 @@ impl PcsVerifierTranscript {
         read_stream_slice(&mut self.stream, mul!(n, T::NUM_BYTES), |slice| {
             Ok(slice
                 .chunks(T::NUM_BYTES)
-                .map(T::read_transcription_bytes_exact)
+                .map(|bs| {
+                    self.fs_transcript.absorb_bytes(bs);
+                    T::read_transcription_bytes_exact(bs)
+                })
                 .collect_vec())
         })
     }
@@ -282,7 +284,7 @@ impl PcsVerifierTranscript {
 fn read_stream_slice<T>(
     stream: &mut Cursor<Vec<u8>>,
     length: usize,
-    action: impl Fn(&[u8]) -> Result<T, ZipError>,
+    mut action: impl FnMut(&[u8]) -> Result<T, ZipError>,
 ) -> Result<T, ZipError> {
     let prev_pos = safe_cast!(stream.position(), u64, usize)?;
     let next_pos = add!(prev_pos, length);
@@ -326,7 +328,7 @@ mod tests {
                 .$write_fn(&$original_value)
                 .expect(&format!("Failed to write {}", $assert_msg));
             let mut transcript: PcsVerifierTranscript = transcript.into_verification_transcript();
-            transcript.fs_transcript.absorb_slice(&comm.root);
+            transcript.fs_transcript.absorb_bytes(&comm.root);
             let read_value = transcript
                 .$read_fn()
                 .expect(&format!("Failed to read {}", $assert_msg));
@@ -348,7 +350,7 @@ mod tests {
                 .$write_fn(&$original_values)
                 .expect(&format!("Failed to write {}", $assert_msg));
             let mut transcript: PcsVerifierTranscript = transcript.into_verification_transcript();
-            transcript.fs_transcript.absorb_slice(&comm.root);
+            transcript.fs_transcript.absorb_bytes(&comm.root);
             let read_values = transcript
                 .$read_fn($original_values.len())
                 .expect(&format!("Failed to read {}", $assert_msg));

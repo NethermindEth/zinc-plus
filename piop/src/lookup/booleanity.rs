@@ -921,7 +921,7 @@ mod tests {
 
     fn make_transcript() -> Blake3Transcript {
         let mut t = Blake3Transcript::default();
-        t.absorb_slice(b"booleanity test");
+        t.absorb_bytes(b"booleanity test");
         t
     }
 

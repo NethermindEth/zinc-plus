@@ -609,7 +609,7 @@ fn absorb_public_columns<T: ConstTranscribable>(
     for col in cols {
         for entry in col.iter() {
             entry.write_transcription_bytes_exact(&mut buf);
-            transcript.absorb_slice(&buf);
+            transcript.absorb_bytes(&buf);
         }
     }
 }

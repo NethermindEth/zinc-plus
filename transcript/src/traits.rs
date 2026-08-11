@@ -382,10 +382,10 @@ pub trait Transcript {
     fn absorb_inner(&mut self, v: &[u8]);
 
     /// Absorbs a byte slice into the transcript.
-    fn absorb_slice(&mut self, buf: &[u8]) {
-        self.absorb_inner(&[0x6]);
+    fn absorb_bytes(&mut self, buf: &[u8]) {
+        self.absorb_inner(&[0x06]);
         self.absorb_inner(buf);
-        self.absorb_inner(&[0x7]);
+        self.absorb_inner(&[0x07]);
     }
 
     /// Absorbs a field element (its raw inner representation) into the
@@ -416,10 +416,8 @@ pub trait Transcript {
     where
         S: Semiring + Transcribable,
     {
-        self.absorb_inner(&[0x1]);
         v.write_transcription_bytes_exact(buf);
-        self.absorb_inner(buf);
-        self.absorb_inner(&[0x3])
+        self.absorb_bytes(buf);
     }
 
     /// Absorbs a slice of integer into the transcript.

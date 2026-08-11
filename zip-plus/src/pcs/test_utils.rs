@@ -243,7 +243,7 @@ where
 
     let mut transcript = transcript.into_verification_transcript();
 
-    transcript.fs_transcript.absorb_slice(&comm.root.0);
+    transcript.fs_transcript.absorb_bytes(&comm.root.0);
 
     (pp, comm, point_f, eval_f, transcript)
 }

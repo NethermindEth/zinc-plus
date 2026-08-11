@@ -420,7 +420,7 @@ where
             &proof.commitments.1,
             &proof.commitments.2,
         ] {
-            base.pcs_transcript.fs_transcript.absorb_slice(&comm.root);
+            base.pcs_transcript.fs_transcript.absorb_bytes(&comm.root);
         }
 
         absorb_public_columns(

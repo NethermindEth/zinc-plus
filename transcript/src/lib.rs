@@ -38,7 +38,7 @@ impl Blake3Transcript {
 
     fn gen_random<R: ConstTranscribable>(&mut self, buf: &mut [u8]) -> R {
         self.fill_with_random_bytes(buf);
-        self.absorb_inner(buf);
+        self.absorb_bytes(buf);
         R::read_transcription_bytes_exact(buf)
     }
 }

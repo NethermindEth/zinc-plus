@@ -388,7 +388,7 @@ pub fn verify<
                     // Initializing the verification transcript with the commitment and getting
                     // field config and projecting element are (arguably) verifier's responsibility
                     // and should be included in the verification time.
-                    transcript.fs_transcript.absorb_slice(&commitment.root);
+                    transcript.fs_transcript.absorb_bytes(&commitment.root);
                     let field_cfg = transcript
                         .fs_transcript
                         .get_random_field_cfg::<Cfg, Zt::Fmod, Zt::PrimeTest>();
