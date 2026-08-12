@@ -381,7 +381,8 @@ pub trait Transcript {
     /// Should not be used directly.
     fn absorb_inner(&mut self, v: &[u8]);
 
-    /// Absorbs a byte slice into the transcript.
+    /// Absorbs a byte slice into the transcript, delimited by
+    /// domain-separation tags.
     fn absorb_bytes(&mut self, buf: &[u8]) {
         self.absorb_inner(&[0x06]);
         self.absorb_inner(buf);

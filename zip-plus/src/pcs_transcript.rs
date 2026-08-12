@@ -43,6 +43,9 @@ macro_rules! common_methods {
 /// A transcript for Polynomial Commitment Scheme (PCS) operations.
 /// Manages both Fiat-Shamir transformations and serialization/deserialization
 /// of proof data.
+///
+/// Every byte written to the proof stream is absorbed into the Fiat-Shamir
+/// transcript by the same call
 #[derive(Debug, Clone)]
 pub struct PcsProverTranscript {
     /// Handles Fiat-Shamir transformations for non-interactive zero-knowledge
@@ -121,6 +124,9 @@ impl PcsProverTranscript {
                 .take(T::LENGTH_NUM_BYTES)
                 .collect_vec();
             self.stream.write_all(&len_bytes)?;
+            // A length that selects how much of the stream is read later is
+            // itself a prover message, so it has to bind.
+            self.fs_transcript.absorb_bytes(&len_bytes);
         }
 
         let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
@@ -131,7 +137,9 @@ impl PcsProverTranscript {
             inner.resize(next_pos, 0_u8);
         }
 
-        v.write_transcription_bytes_exact(&mut inner[prev_pos..next_pos]);
+        let inner_slice = &mut inner[prev_pos..next_pos];
+        v.write_transcription_bytes_exact(inner_slice);
+        self.fs_transcript.absorb_bytes(inner_slice);
 
         self.stream.set_position(safe_cast!(next_pos, usize, u64)?);
         Ok(())
@@ -207,6 +215,26 @@ pub struct PcsVerifierTranscript {
 impl PcsVerifierTranscript {
     common_methods!();
 
+    /// Returns an error unless the whole proof stream has been consumed.
+    ///
+    /// Call this once at the end of verification, after every component
+    /// sharing the stream has read its section.
+    pub fn check_eof(&self) -> Result<(), ZipError> {
+        let position = safe_cast!(self.stream.position(), u64, usize)?;
+        let len = self.stream.get_ref().len();
+        if position == len {
+            Ok(())
+        } else {
+            Err(ZipError::Transcript(
+                ErrorKind::InvalidData,
+                format!(
+                    "proof stream not fully consumed: {} unread byte(s)",
+                    len.saturating_sub(position)
+                ),
+            ))
+        }
+    }
+
     /// Reads canonical lifted integers from the proof stream, strictly
     /// validates them against the field modulus, projects them into the
     /// field, and absorbs the resulting elements into the transcript. The
@@ -232,6 +260,7 @@ impl PcsVerifierTranscript {
         let data_len = if T::LENGTH_NUM_BYTES > 0 {
             let mut len_buf = vec![0u8; T::LENGTH_NUM_BYTES];
             self.stream.read_exact(&mut len_buf)?;
+            self.fs_transcript.absorb_bytes(&len_buf);
             T::read_num_bytes(&len_buf)
         } else {
             // LENGTH_NUM_BYTES == 0 means size is known at compile time via
@@ -241,6 +270,7 @@ impl PcsVerifierTranscript {
         };
 
         read_stream_slice(&mut self.stream, data_len, |slice| {
+            self.fs_transcript.absorb_bytes(slice);
             Ok(T::read_transcription_bytes_exact(slice))
         })
     }
@@ -375,6 +405,115 @@ mod tests {
             read_const_many,
             original_hashes,
             "hashes vector"
+        );
+    }
+
+    const CAP: usize = 1 << 24;
+
+    /// Every byte on the wire must bind the challenges drawn after it.
+    ///
+    /// This pins the invariant whose absence let a prover choose
+    /// `combined_row` *after* learning the column indices it was supposed to
+    /// be committed to beforehand. Before wire writes were absorbed, the two
+    /// payloads below produced identical challenges.
+    #[test]
+    fn wire_writes_bind_subsequent_challenges() {
+        let comm = ZipPlusCommitment::default();
+
+        let challenge_after = |payload: &[u64]| {
+            let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+            transcript
+                .write_const_many(payload)
+                .expect("write should succeed");
+            transcript.squeeze_challenge_idx(CAP)
+        };
+
+        assert_ne!(
+            challenge_after(&[1, 2, 3, 4]),
+            challenge_after(&[1, 2, 3, 5]),
+            "changing a written value left the next challenge unchanged: \
+             wire bytes are not entering the transcript"
+        );
+    }
+
+    /// A length prefix selects how much of the stream is read later, so it is
+    /// a prover message and must bind just like a payload.
+    #[test]
+    fn length_prefixed_writes_bind_subsequent_challenges() {
+        let comm = ZipPlusCommitment::default();
+
+        let challenge_after = |value: u64| {
+            let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+            transcript.write(&value).expect("write should succeed");
+            transcript.squeeze_challenge_idx(CAP)
+        };
+
+        assert_ne!(
+            challenge_after(7),
+            challenge_after(8),
+            "`write` is not absorbing its payload"
+        );
+    }
+
+    /// Prover and verifier must reach the same state after the same logical
+    /// message, no matter how either side chunks it into calls.
+    ///
+    /// Absorbs are framed, so call granularity is normally significant. The
+    /// `write_const_many_iter` / `read_const_many` pair frames one fixed-size
+    /// element at a time rather than one call at a time, which is what makes
+    /// the split into calls irrelevant here. That property is load-bearing:
+    /// the prover writes column values one codeword matrix at a time while
+    /// the verifier reads them in a single batched call.
+    #[test]
+    fn transcript_state_is_independent_of_call_chunking() {
+        let comm = ZipPlusCommitment::default();
+        let payload: Vec<u64> = (0..8).collect();
+
+        // Prover emits the run as two calls ...
+        let mut prover = PcsProverTranscript::new_from_commitment(&comm);
+        prover
+            .write_const_many(&payload[..3])
+            .expect("write should succeed");
+        prover
+            .write_const_many(&payload[3..])
+            .expect("write should succeed");
+        let prover_challenge = prover.squeeze_challenge_idx(CAP);
+
+        // ... the verifier consumes it as one.
+        let mut verifier = prover.into_verification_transcript();
+        verifier.fs_transcript.absorb_bytes(&comm.root);
+        let read: Vec<u64> = verifier
+            .read_const_many(payload.len())
+            .expect("read should succeed");
+        let verifier_challenge = verifier.squeeze_challenge_idx(CAP);
+
+        assert_eq!(read, payload, "round-trip lost data");
+        assert_eq!(
+            prover_challenge, verifier_challenge,
+            "prover and verifier transcripts diverged on identical data"
+        );
+        verifier
+            .check_eof()
+            .expect("stream should be fully consumed");
+    }
+
+    /// Trailing bytes are bytes that never entered the transcript, so they
+    /// must be rejected rather than silently ignored.
+    #[test]
+    fn check_eof_rejects_unread_trailing_bytes() {
+        let comm = ZipPlusCommitment::default();
+        let mut prover = PcsProverTranscript::new_from_commitment(&comm);
+        prover
+            .write_const_many(&[1u64, 2, 3])
+            .expect("write should succeed");
+
+        let mut verifier = prover.into_verification_transcript();
+        verifier.fs_transcript.absorb_bytes(&comm.root);
+        let _: Vec<u64> = verifier.read_const_many(2).expect("read should succeed");
+
+        assert!(
+            verifier.check_eof().is_err(),
+            "check_eof accepted a stream with unread trailing bytes"
         );
     }
 }
