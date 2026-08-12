@@ -163,9 +163,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(field_cfg, point_f, vp.num_rows)?;
         let zero_f = field_cfg.zero();
 
-        let b: Vec<C::Element> = transcript
-            .read_field_elements(field_cfg, num_rows)
-            .map_err(|_| ZipError::NonCanonicalFieldElement)?;
+        let b: Vec<C::Element> = transcript.read_field_elements(field_cfg, num_rows)?;
 
         // Check 1: <q_0, b> == eval_f
         let q_0_dot_b =
