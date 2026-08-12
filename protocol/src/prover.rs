@@ -1516,12 +1516,13 @@ impl_with_type_bounds!(ProverMultipointEvaled
         // Uniform order: each constraint family's witness-only lifted
         // evals, then the q'' family. Mirrored in step6_lifted_evals.
         let mut transcription_buf: Vec<u8> = vec![0; C::Integer::NUM_BYTES];
-        for lifted_i in &lifted_evals {
+        debug_assert_eq!(self.all_field_cfgs.len(), lifted_evals.len());
+        for (cfg_i, lifted_i) in self.all_field_cfgs.iter().zip(&lifted_evals) {
             for bar_u in lifted_i {
                 self.base
                     .pcs_transcript
                     .fs_transcript
-                    .absorb_field_element_slice(&self.field_cfg, &bar_u.coeffs, &mut transcription_buf);
+                    .absorb_field_element_slice(cfg_i, &bar_u.coeffs, &mut transcription_buf);
             }
         }
         if let Some(ref lifted_pp) = lifted_evals_pp {
