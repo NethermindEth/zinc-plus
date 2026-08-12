@@ -230,6 +230,9 @@ impl AffineVirtualTerm {
     }
 
     /// Construct a shifted term `coefficient * source_col[row + row_shift]`.
+    ///
+    /// [`UairSignature::with_affine_virtual_specs`] currently rejects shifted
+    /// terms until the protocol binds row-shifted source projections.
     pub fn new_shifted(source_col: usize, coefficient: i64, row_shift: usize) -> Self {
         assert!(row_shift > 0, "row shift must be non-zero");
         Self {
@@ -548,17 +551,17 @@ impl<Prime: Semiring> UairSignature<Prime> {
 
     /// Attach affine virtual booleanity specs to the signature.
     ///
-    /// Each term in each spec must reference a binary_poly column. Affine
-    /// virtuals describe Q-side `{0,1}^{<D}[X]` membership targets such as the
-    /// Ch/Maj linear combinations in the Zinc+ paper. They are not committed
-    /// columns and do not affect the down-row layout.
+    /// Each term in each spec must be unshifted and reference a binary_poly
+    /// column. Affine virtuals describe Q-side `{0,1}^{<D}[X]` membership
+    /// targets such as the Ch/Maj linear combinations in the Zinc+ paper. They
+    /// are not committed columns and do not affect the down-row layout.
     pub fn with_affine_virtual_specs(
         mut self,
         affine_virtual_specs: Vec<AffineVirtualSpec>,
     ) -> Self {
         let binary_poly_end = self.total_cols.num_binary_poly_cols();
-        for spec in &affine_virtual_specs {
-            for term in spec.terms() {
+        for (spec_index, spec) in affine_virtual_specs.iter().enumerate() {
+            for (term_index, term) in spec.terms().iter().enumerate() {
                 assert!(
                     term.source_col() < binary_poly_end,
                     "AffineVirtualTerm source_col {} is not a binary_poly column \
@@ -566,6 +569,12 @@ impl<Prime: Semiring> UairSignature<Prime> {
                      are only defined over binary_poly cells.",
                     term.source_col(),
                     binary_poly_end,
+                );
+                assert!(
+                    term.row_shift() == 0,
+                    "shifted affine virtual terms are not supported: spec {spec_index}, \
+                     term {term_index}, row shift {}",
+                    term.row_shift(),
                 );
             }
         }
@@ -896,14 +905,11 @@ mod tests {
         let specs = vec![
             AffineVirtualSpec::new(vec![
                 AffineVirtualTerm::new(0, 1),
-                AffineVirtualTerm::new_shifted(1, 1, 2),
+                AffineVirtualTerm::new(1, 1),
                 AffineVirtualTerm::new(0, -2),
             ]),
             AffineVirtualSpec::with_ones_coefficient(
-                vec![
-                    AffineVirtualTerm::new(0, -1),
-                    AffineVirtualTerm::new_shifted(1, 1, 1),
-                ],
+                vec![AffineVirtualTerm::new(0, -1), AffineVirtualTerm::new(1, 1)],
                 1,
             ),
         ];
@@ -913,7 +919,7 @@ mod tests {
         assert_eq!(sig.affine_virtual_specs(), specs);
         assert_eq!(sig.affine_virtual_specs()[0].terms()[1].source_col(), 1);
         assert_eq!(sig.affine_virtual_specs()[0].terms()[1].coefficient(), 1);
-        assert_eq!(sig.affine_virtual_specs()[0].terms()[1].row_shift(), 2);
+        assert_eq!(sig.affine_virtual_specs()[0].terms()[1].row_shift(), 0);
         assert_eq!(sig.affine_virtual_specs()[1].ones_coefficient(), 1);
         assert_eq!(sig.down_cols().num_binary_poly_cols(), 1);
         assert_eq!(sig.down_cols().num_arbitrary_poly_cols(), 1);
@@ -948,6 +954,17 @@ mod tests {
         let _ =
             signature_with_mixed_shifts().with_affine_virtual_specs(vec![AffineVirtualSpec::new(
                 vec![AffineVirtualTerm::new(2, 1)],
+            )]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "shifted affine virtual terms are not supported: spec 0, term 0, row shift 1"
+    )]
+    fn affine_virtual_specs_reject_shifted_terms() {
+        let _ =
+            signature_with_mixed_shifts().with_affine_virtual_specs(vec![AffineVirtualSpec::new(
+                vec![AffineVirtualTerm::new_shifted(0, 1, 1)],
             )]);
     }
 }

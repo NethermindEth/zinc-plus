@@ -66,6 +66,15 @@
 //! By Schwartz–Zippel on the indeterminate $X$, if `bit_slice_evals` are
 //! not the true bit-decomposition then equality fails with probability
 //! $\le (D-1)/|F|$, so the verifier rejects.
+//!
+//! For an unshifted affine virtual, the protocol collapses its bit-slice
+//! claims at the same $\alpha'$ and compares the result directly with the
+//! declared affine combination of source-column collapses at $r^\star$.
+//! Public source collapses are recomputed from the public trace; witness source
+//! collapses are the committed-column values bound through the MP/PCS chain
+//! above. Shifted affine terms require a separate row-shift opening and are
+//! rejected when affine specs are attached to the UAIR signature until that
+//! binding is implemented.
 
 use crate::{
     CombFn,
@@ -114,7 +123,7 @@ type BooleanityZerocheckSetup<F> = (Vec<F>, Vec<F>, CombFn<F>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BooleanityProof<F> {
     /// Flat list of `\widetilde{v_{j,i}}(r*)`, ordered `(j-major, i-minor)`.
-    /// Length = `num_wit_bin_cols * D`.
+    /// Length is `num_cols * D` for the corresponding Booleanity group.
     pub bit_slice_evals: Vec<F>,
 }
 

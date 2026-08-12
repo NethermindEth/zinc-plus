@@ -7,7 +7,7 @@ use std::{
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::{IdealCheckProtocol, Proof as IdealCheckProof},
-    lookup::booleanity::{BooleanityChecker, BooleanityProof},
+    lookup::booleanity::{BoolProverAncillary, BooleanityChecker, BooleanityProof},
     multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedScalars, ProjectedTrace, RowMajorTrace,
@@ -310,14 +310,15 @@ pub struct ProverSumchecked<
     combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<C::Element>>,
     lookup_proof: Option<BatchedLookupProof<C::Element>>,
     booleanity_proof: Option<BooleanityProof<C::Element>>,
+    affine_booleanity_proof: Option<BooleanityProof<C::Element>>,
     /// Fresh challenge sampled after `bit_slice_evals` were absorbed by
     /// booleanity's `finalize_prover`. Used by the next step to (a) build the
     /// extra $\alpha'$-projected witness-bin trace MLEs and (b) compute
     /// the per-column bridge scalars $c_j = \sum_i (\alpha')^i b_{j,i}$
     /// appended to multipoint-eval's `up_evals`.
     ///
-    /// `None` iff there are no witness binary-poly columns (no booleanity
-    /// argument).
+    /// `None` iff there are neither witness binary-poly columns nor affine
+    /// virtual booleanity targets.
     alpha_prime_f: Option<C::Element>,
 }
 
@@ -351,6 +352,7 @@ pub struct ProverMultipointEvaled<
     combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<C::Element>>,
     lookup_proof: Option<BatchedLookupProof<C::Element>>,
     booleanity_proof: Option<BooleanityProof<C::Element>>,
+    affine_booleanity_proof: Option<BooleanityProof<C::Element>>,
 
     // New
     mp_proof: MultipointEvalProof<C::Element>,
@@ -386,6 +388,7 @@ pub struct ProverLifted<
     combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<C::Element>>,
     lookup_proof: Option<BatchedLookupProof<C::Element>>,
     booleanity_proof: Option<BooleanityProof<C::Element>>,
+    affine_booleanity_proof: Option<BooleanityProof<C::Element>>,
     mp_proof: MultipointEvalProof<C::Element>,
     /// Per-prime multipoint-eval proofs threaded forward from
     /// `ProverMultipointEvaled`.
@@ -438,6 +441,7 @@ pub struct ProverPcsOpened<
     combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<C::Element>>,
     lookup_proof: Option<BatchedLookupProof<C::Element>>,
     booleanity_proof: Option<BooleanityProof<C::Element>>,
+    affine_booleanity_proof: Option<BooleanityProof<C::Element>>,
     mp_proof: MultipointEvalProof<C::Element>,
     /// Per-prime multipoint-eval proofs threaded forward.
     mp_proofs_fq: Vec<MultipointEvalProof<C::Element>>,
@@ -965,13 +969,16 @@ impl_with_type_bounds!(ProverEvalProjected
     /// `up_evals`/`down_evals` (CPR), `bit_slice_evals` (booleanity), and
     /// lookup auxiliary witnesses at `r*`.
     ///
-    /// After booleanity's `finalize_prover` absorbs `bit_slice_evals` into
+    /// After booleanity's `finalize_prover` absorbs all committed and affine
+    /// `bit_slice_evals` into
     /// the transcript, this step squeezes a fresh challenge $\alpha'$ and
     /// stores it on `ProverSumchecked`. The actual Schwartz-Zippel bridge
     /// is installed in `step6_multipoint_eval`, which appends one extra
     /// $\alpha'$-projected witness-bin column MLE (and matching up_eval
     /// $c_j = \sum_i b_{j,i} (\alpha')^i$) per witness binary-poly column
-    /// to the multipoint-eval inputs. Shifts continue to reference the
+    /// to the multipoint-eval inputs. Unshifted affine virtuals are collapsed
+    /// at the same $\alpha'$ and checked directly by the verifier against
+    /// their source projections at $r^*$. Shifts continue to reference the
     /// original $\psi_a$-projected witness-bin slot, so `down_evals` are
     /// untouched: shifted booleanity is inherited from un-shifted
     /// booleanity (same committed column).
@@ -1034,6 +1041,25 @@ impl_with_type_bounds!(ProverEvalProjected
             Some(anc)
         } else {
             None
+        };
+
+        // Affine virtuals are a separate generic group. Their residual cells
+        // are not binary, so the committed-column round-1 fast path cannot
+        // represent them.
+        let affine_bool_ancillary = if sig.affine_virtual_specs().is_empty() {
+            None
+        } else {
+            let (affine_group, anc) =
+                BooleanityChecker::prepare_affine_virtual_sumcheck_group::<D>(
+                    &mut self.base.pcs_transcript.fs_transcript,
+                    &self.base.original_trace.binary_poly,
+                    sig.affine_virtual_specs(),
+                    self.base.num_vars,
+                    &self.field_cfg,
+                )
+                .map_err(ProtocolError::Booleanity)?;
+            q_groups.push(affine_group);
+            Some(anc)
         };
 
         // TODO: for each LookupGroup from group_lookup_specs(lookup_specs):
@@ -1102,20 +1128,22 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
-        let booleanity_proof = if let Some(anc) = bool_ancillary {
-            let state = md_iter.next().expect("booleanity group present");
-            Some(
-                BooleanityChecker::finalize_prover(
-                    &mut self.base.pcs_transcript.fs_transcript,
-                    state,
-                    anc,
-                    &self.field_cfg,
-                )
-                .map_err(ProtocolError::Booleanity)?,
-            )
-        } else {
-            None
+        let mut finalize_booleanity_group = |ancillary: Option<BoolProverAncillary>| {
+            ancillary
+                .map(|ancillary| {
+                    BooleanityChecker::finalize_prover(
+                        &mut self.base.pcs_transcript.fs_transcript,
+                        md_iter.next().expect("booleanity group present"),
+                        ancillary,
+                        &self.field_cfg,
+                    )
+                    .map_err(ProtocolError::Booleanity)
+                })
+                .transpose()
         };
+        let booleanity_proof = finalize_booleanity_group(bool_ancillary)?;
+        let affine_booleanity_proof = finalize_booleanity_group(affine_bool_ancillary)?;
+        debug_assert!(md_iter.next().is_none());
 
         // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
         let lookup_proof = None;
@@ -1145,14 +1173,15 @@ impl_with_type_bounds!(ProverEvalProjected
             cpr_eval_points_fq.push(cpr_state_i.evaluation_point);
         }
 
-        // Booleanity -> multipoint-eval `alpha_prime` bridge: squeeze
-        // \alpha' after `bit_slice_evals` were absorbed by `finalize_prover`.
-        let alpha_prime_f: Option<C::Element> = booleanity_proof.as_ref().map(|_| {
-            self.base
-                .pcs_transcript
-                .fs_transcript
-                .get_field_challenge(&self.field_cfg)
-        });
+        // Booleanity bridges: squeeze alpha' after the committed and affine
+        // bit-slice evaluations were absorbed by their finalize calls.
+        let alpha_prime_f: Option<C::Element> =
+            (booleanity_proof.is_some() || affine_booleanity_proof.is_some()).then(|| {
+                self.base
+                    .pcs_transcript
+                    .fs_transcript
+                    .get_field_challenge(&self.field_cfg)
+            });
 
         Ok(ProverSumchecked {
             base: self.base,
@@ -1175,6 +1204,7 @@ impl_with_type_bounds!(ProverEvalProjected
             combined_sumchecks_fq,
             lookup_proof,
             booleanity_proof,
+            affine_booleanity_proof,
             alpha_prime_f,
         })
     }
@@ -1245,16 +1275,21 @@ impl_with_type_bounds!(ProverSumchecked
                 .collect();
             debug_assert_eq!(extra_trace_mles.len(), num_wit_bin);
 
-            let bp = self
-                .booleanity_proof
-                .as_ref()
-                .expect("booleanity_proof present iff alpha_prime_f is Some");
-            let extra_up_evals = alpha_prime_bridge_up_evals::<C, D>(
-                &bp.bit_slice_evals,
-                num_wit_bin,
-                alpha_prime,
-                &self.field_cfg,
-            );
+            let extra_up_evals = if num_wit_bin == 0 {
+                debug_assert!(self.booleanity_proof.is_none());
+                Vec::new()
+            } else {
+                let proof = self
+                    .booleanity_proof
+                    .as_ref()
+                    .expect("witness binary columns require a booleanity proof");
+                collapse_bit_slice_evals::<C, D>(
+                    &proof.bit_slice_evals,
+                    num_wit_bin,
+                    alpha_prime,
+                    &self.field_cfg,
+                )
+            };
 
             projected_trace_f.extend(extra_trace_mles);
 
@@ -1358,6 +1393,7 @@ impl_with_type_bounds!(ProverSumchecked
             combined_sumchecks_fq: self.combined_sumchecks_fq,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
+            affine_booleanity_proof: self.affine_booleanity_proof,
             mp_proof: mp_proof_q,
             r_0: r_0_q,
             mp_proofs_fq,
@@ -1545,6 +1581,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             combined_sumchecks_fq: self.combined_sumchecks_fq,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
+            affine_booleanity_proof: self.affine_booleanity_proof,
             mp_proof: self.mp_proof,
             mp_proofs_fq: self.mp_proofs_fq,
             lifted_evals,
@@ -1632,6 +1669,7 @@ impl_with_type_bounds!(ProverLifted
             combined_sumchecks_fq: self.combined_sumchecks_fq,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
+            affine_booleanity_proof: self.affine_booleanity_proof,
             mp_proof: self.mp_proof,
             mp_proofs_fq: self.mp_proofs_fq,
             lifted_evals: self.lifted_evals,
@@ -1702,6 +1740,10 @@ impl_with_type_bounds!(ProverPcsOpened
                 None => None,
             },
             booleanity_proof: match &self.booleanity_proof {
+                Some(p) => Some(lift!(self.field_cfg, p)?),
+                None => None,
+            },
+            affine_booleanity_proof: match &self.affine_booleanity_proof {
                 Some(p) => Some(lift!(self.field_cfg, p)?),
                 None => None,
             },
@@ -1790,46 +1832,5 @@ fn commit_optionally<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     } else {
         let (hint, commitment) = ZipPlus::commit(pp, trace)?;
         Ok((Some(hint), commitment))
-    }
-}
-
-/// Project a single witness binary-poly column at a field element by
-/// evaluating each bit-packed cell $\sum_i \text{bit}_i \cdot X^i$ at
-/// $X = \alpha$.
-///
-/// Used to build the appended $\alpha'$-projected witness-binary-poly MLEs that
-/// participate in `MultipointEval` as the Schwartz-Zippel bridge from
-/// booleanity into the PCS chain.
-#[allow(clippy::arithmetic_side_effects)]
-fn project_binary_col_at_field<C, const D: usize>(
-    col: &DenseMultilinearExtension<BinaryPoly<D>>,
-    alpha_powers: &[C::Element],
-    field_cfg: &C,
-) -> DenseMultilinearExtension<C::Element>
-where
-    C: BaseFieldConfig,
-{
-    debug_assert_eq!(alpha_powers.len(), D);
-    let zero = field_cfg.zero();
-
-    // Sequential row loop: per-row work is at most `D` conditional adds.
-    // The caller parallelizes the outer loop over witness binary-poly columns.
-    let evaluations: Vec<C::Element> = col
-        .evaluations
-        .iter()
-        .map(|entry| {
-            let mut acc = zero.clone();
-            for (i, bit) in entry.iter().enumerate() {
-                if *bit.inner() {
-                    field_cfg.add_assign(&mut acc, &alpha_powers[i]);
-                }
-            }
-            acc
-        })
-        .collect();
-
-    DenseMultilinearExtension {
-        num_vars: col.num_vars,
-        evaluations,
     }
 }

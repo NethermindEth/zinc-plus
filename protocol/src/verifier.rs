@@ -4,7 +4,7 @@ use std::io::Cursor;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::{self, IdealCheckProtocol},
-    lookup::booleanity::{BooleanityChecker, BooleanityProof},
+    lookup::booleanity::{BoolVerifierAncillary, BooleanityChecker, BooleanityProof},
     multipoint_eval::{self, MultipointEval, MultipointEvalFamilyInputs},
     projections::{
         ProjectedScalars, ProjectedTrace, project_scalars, project_scalars_to_field,
@@ -23,7 +23,7 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
-use zinc_utils::{add, projectable_to_field::ProjectableToField, sub};
+use zinc_utils::{add, powers, projectable_to_field::ProjectableToField, sub};
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsVerifierTranscript,
@@ -81,6 +81,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<Zt::Fmod>>,
     proof_booleanity: Option<BooleanityProof<Zt::Fmod>>,
+    proof_affine_booleanity: Option<BooleanityProof<Zt::Fmod>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<Zt::Fmod>>,
     proof_cpr_fq: Vec<CombinedPolyResolverProof<Zt::Fmod>>,
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<Zt::Fmod>>,
@@ -116,6 +117,7 @@ pub struct VerifierPrimeProjected<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
+    proof_affine_booleanity: Option<BooleanityProof<C::Element>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<C::Element>>,
     proof_cpr_fq: Vec<CombinedPolyResolverProof<C::Element>>,
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<C::Element>>,
@@ -164,6 +166,7 @@ pub struct VerifierIdealChecked<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
+    proof_affine_booleanity: Option<BooleanityProof<C::Element>>,
     /// Per-prime CPR proofs (one per declared prime).
     proof_cpr_fq: Vec<CombinedPolyResolverProof<C::Element>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime).
@@ -221,6 +224,7 @@ pub struct VerifierEvalProjected<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
+    proof_affine_booleanity: Option<BooleanityProof<C::Element>>,
     /// Per-prime CPR proofs (one per declared prime).
     proof_cpr_fq: Vec<CombinedPolyResolverProof<C::Element>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime),
@@ -273,11 +277,15 @@ pub struct VerifierSumchecked<
     ///
     /// `None` iff there are no witness binary-poly columns.
     bool_bit_slice_evals: Option<Vec<C::Element>>,
+    /// Affine-virtual bit-slice evaluations carried separately from the
+    /// committed-column Booleanity proof.
+    affine_bool_bit_slice_evals: Option<Vec<C::Element>>,
     /// Fresh challenge sampled after `bit_slice_evals` were absorbed by
     /// booleanity's `finalize_verifier`. Consumed in step 5 (bridge
     /// scalars) and step 6 (appended $\alpha'$-projected open_evals).
     ///
-    /// `None` iff there are no witness binary-poly columns.
+    /// `None` iff there are neither witness binary-poly columns nor affine
+    /// virtual booleanity targets.
     alpha_prime_f: Option<C::Element>,
 
     // Proof leftovers
@@ -369,6 +377,74 @@ pub struct VerifierPcsVerified<IdealOverF> {
     _phantom: PhantomData<IdealOverF>,
 }
 
+fn prepare_booleanity_verifier_group<C>(
+    transcript: &mut Blake3Transcript,
+    claimed_sums: &[C::Element],
+    group_idx: &mut usize,
+    num_cols: usize,
+    bit_width: usize,
+    num_vars: usize,
+    field_cfg: &C,
+) -> Result<Option<BoolVerifierAncillary<C::Element>>, ProtocolError<C::Element>>
+where
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
+    C::Integer: ConstTranscribable,
+{
+    if num_cols == 0 {
+        return Ok(None);
+    }
+
+    let claimed_sum = claimed_sums
+        .get(*group_idx)
+        .ok_or(ProtocolError::BooleanityProofMissing)?;
+    let ancillary = BooleanityChecker::<C>::prepare_verifier(
+        transcript,
+        claimed_sum,
+        num_cols,
+        bit_width,
+        num_vars,
+        field_cfg,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+    *group_idx = add!(*group_idx, 1);
+    Ok(Some(ancillary))
+}
+
+fn finalize_booleanity_verifier_group<C>(
+    transcript: &mut Blake3Transcript,
+    proof: Option<BooleanityProof<C::Element>>,
+    shared_point: &[C::Element],
+    expected_evaluations: &[C::Element],
+    group_idx: &mut usize,
+    ancillary: Option<BoolVerifierAncillary<C::Element>>,
+    field_cfg: &C,
+) -> Result<Option<Vec<C::Element>>, ProtocolError<C::Element>>
+where
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
+    C::Integer: ConstTranscribable,
+{
+    let (proof, ancillary) = match (proof, ancillary) {
+        (None, None) => return Ok(None),
+        (Some(proof), Some(ancillary)) => (proof, ancillary),
+        _ => return Err(ProtocolError::BooleanityProofMissing),
+    };
+    let expected_eval = expected_evaluations
+        .get(*group_idx)
+        .ok_or(ProtocolError::BooleanityProofMissing)?;
+    *group_idx = add!(*group_idx, 1);
+
+    let subclaim = BooleanityChecker::<C>::finalize_verifier(
+        transcript,
+        proof,
+        shared_point.to_vec(),
+        expected_eval,
+        ancillary,
+        field_cfg,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+    Ok(Some(subclaim.bit_slice_evals))
+}
+
 //
 // Step implementations
 //
@@ -402,10 +478,11 @@ where
             num_vars > 0,
             "Attempt to verify a constant: num_vars must be > 0"
         );
+        let uair_signature = U::signature();
         let zip_proof = std::mem::take(&mut proof.zip);
         let mut base = VerifierBase {
             num_vars,
-            uair_signature: U::signature(),
+            uair_signature,
             public_trace,
             pcs_transcript: PcsVerifierTranscript {
                 fs_transcript: Blake3Transcript::default(),
@@ -448,6 +525,7 @@ where
             proof_witness_lifted_evals_pp: proof.witness_lifted_evals_pp,
             proof_lookup_proof: proof.lookup_proof,
             proof_booleanity: proof.booleanity_proof,
+            proof_affine_booleanity: proof.affine_booleanity_proof,
             proof_ideal_checks_fq: proof.ideal_checks_fq,
             proof_cpr_fq: proof.cpr_proofs_fq,
             proof_combined_sumchecks_fq: proof.combined_sumchecks_fq,
@@ -543,6 +621,10 @@ where
                 None => None,
             },
             proof_booleanity: match &self.proof_booleanity {
+                Some(p) => Some(project!(&field_cfg, p)?),
+                None => None,
+            },
+            proof_affine_booleanity: match &self.proof_affine_booleanity {
                 Some(p) => Some(project!(&field_cfg, p)?),
                 None => None,
             },
@@ -682,6 +764,7 @@ where
             proof_witness_lifted_evals_pp: self.proof_witness_lifted_evals_pp,
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
+            proof_affine_booleanity: self.proof_affine_booleanity,
             proof_cpr_fq: self.proof_cpr_fq,
             proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
             proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
@@ -771,6 +854,7 @@ where
             proof_witness_lifted_evals_pp: self.proof_witness_lifted_evals_pp,
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
+            proof_affine_booleanity: self.proof_affine_booleanity,
             proof_cpr_fq: self.proof_cpr_fq,
             proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
             proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
@@ -847,29 +931,28 @@ where
         let sig = self.base.uair_signature.clone();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_total_bin = sig.total_cols().num_binary_poly_cols();
-        let bin_wit_present = num_total_bin > num_pub_bin;
+        let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
+        let num_affine_virtuals = sig.affine_virtual_specs().len();
+        let mut bool_group_idx = 1;
 
-        let bool_verifier_ancillary = if bin_wit_present {
-            // booleanity is group index 1 (right after CPR) on the Q-family.
-            let bool_claimed_sum = self
-                .proof_combined_sumcheck
-                .claimed_sums()
-                .get(1)
-                .ok_or(ProtocolError::BooleanityProofMissing)?;
-            let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
-            let anc = BooleanityChecker::<C>::prepare_verifier(
-                &mut self.base.pcs_transcript.fs_transcript,
-                bool_claimed_sum,
-                num_wit_bin,
-                D,
-                self.base.num_vars,
-                &self.field_cfg,
-            )
-            .map_err(ProtocolError::Booleanity)?;
-            Some(anc)
-        } else {
-            None
-        };
+        let bool_verifier_ancillary = prepare_booleanity_verifier_group(
+            &mut self.base.pcs_transcript.fs_transcript,
+            self.proof_combined_sumcheck.claimed_sums(),
+            &mut bool_group_idx,
+            num_wit_bin,
+            D,
+            self.base.num_vars,
+            &self.field_cfg,
+        )?;
+        let affine_bool_verifier_ancillary = prepare_booleanity_verifier_group(
+            &mut self.base.pcs_transcript.fs_transcript,
+            self.proof_combined_sumcheck.claimed_sums(),
+            &mut bool_group_idx,
+            num_affine_virtuals,
+            D,
+            self.base.num_vars,
+            &self.field_cfg,
+        )?;
 
         // -------- Per-prime families: CPR pre-sumcheck ------------------
         let mut fq_cpr_ancillaries: Vec<_> = Vec::with_capacity(n_fq);
@@ -930,33 +1013,25 @@ where
         // After `finalize_verifier` (residue check + transcript absorption of
         // `bit_slice_evals`), squeeze `alpha_prime` and carry both forward to the
         // next step.
-        let bool_bit_slice_evals: Option<Vec<C::Element>> =
-            if let Some(anc) = bool_verifier_ancillary {
-                let booleanity_proof = self
-                    .proof_booleanity
-                    .take()
-                    .ok_or(ProtocolError::BooleanityProofMissing)?;
-                let expected_eval = q_md_subclaims
-                    .expected_evaluations()
-                    .get(1)
-                    .ok_or(ProtocolError::BooleanityProofMissing)?;
-
-                // Sumcheck residue check at r* against the bit-slice evals.
-                // Absorbs bit_slice_evals.
-                let bool_subclaim = BooleanityChecker::<C>::finalize_verifier(
-                    &mut self.base.pcs_transcript.fs_transcript,
-                    booleanity_proof,
-                    q_md_subclaims.point().to_vec(),
-                    expected_eval,
-                    anc,
-                    &self.field_cfg,
-                )
-                .map_err(ProtocolError::Booleanity)?;
-
-                Some(bool_subclaim.bit_slice_evals)
-            } else {
-                None
-            };
+        let mut bool_group_idx = 1;
+        let bool_bit_slice_evals = finalize_booleanity_verifier_group(
+            &mut self.base.pcs_transcript.fs_transcript,
+            self.proof_booleanity.take(),
+            q_md_subclaims.point(),
+            q_md_subclaims.expected_evaluations(),
+            &mut bool_group_idx,
+            bool_verifier_ancillary,
+            &self.field_cfg,
+        )?;
+        let affine_bool_bit_slice_evals = finalize_booleanity_verifier_group(
+            &mut self.base.pcs_transcript.fs_transcript,
+            self.proof_affine_booleanity.take(),
+            q_md_subclaims.point(),
+            q_md_subclaims.expected_evaluations(),
+            &mut bool_group_idx,
+            affine_bool_verifier_ancillary,
+            &self.field_cfg,
+        )?;
 
         // -------- Per-prime family finalize ---------------------------
         // Mirror the prover's loop: pop next subclaim per family, call
@@ -994,12 +1069,13 @@ where
         }
 
         // Squeeze alpha_prime in the same transcript order as the prover.
-        let alpha_prime_f: Option<C::Element> = bool_bit_slice_evals.as_ref().map(|_| {
-            self.base
-                .pcs_transcript
-                .fs_transcript
-                .get_field_challenge(&self.field_cfg)
-        });
+        let alpha_prime_f: Option<C::Element> =
+            (bool_bit_slice_evals.is_some() || affine_bool_bit_slice_evals.is_some()).then(|| {
+                self.base
+                    .pcs_transcript
+                    .fs_transcript
+                    .get_field_challenge(&self.field_cfg)
+            });
 
         let cpr_eval_point = cpr_subclaim.evaluation_point;
 
@@ -1023,6 +1099,7 @@ where
             cpr_bit_op_evals_fq,
             cpr_down_evals_fq,
             bool_bit_slice_evals,
+            affine_bool_bit_slice_evals,
             alpha_prime_f,
             proof_commitments: self.proof_commitments,
             proof_multipoint_eval: self.proof_multipoint_eval,
@@ -1076,30 +1153,81 @@ where
             });
         }
 
-        // Q[X] family up_evals
-        // (with booleanity-bridge appended when alpha_prime is present) and num_wit_bin
-        // extension width.
-        let (q_up_evals, num_wit_bin): (Vec<C::Element>, usize) =
-            if let (Some(bit_slice_evals), Some(alpha_prime)) =
-                (&self.bool_bit_slice_evals, &self.alpha_prime_f)
+        // Q[X] family up_evals, extended only by the committed-column
+        // Booleanity bridge. Affine virtuals stay separate and are checked
+        // directly against their source-column projections below.
+        let sig = self.base.uair_signature.clone();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_total_bin = sig.total_cols().num_binary_poly_cols();
+        let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
+        let num_affine_virtuals = sig.affine_virtual_specs().len();
+        let alpha_prime = self.alpha_prime_f.as_ref();
+
+        let witness_bridge_evals = if num_wit_bin == 0 {
+            Vec::new()
+        } else {
+            collapse_bit_slice_evals::<C, D>(
+                self.bool_bit_slice_evals
+                    .as_ref()
+                    .ok_or(ProtocolError::BooleanityProofMissing)?,
+                num_wit_bin,
+                alpha_prime.ok_or(ProtocolError::BooleanityProofMissing)?,
+                &self.field_cfg,
+            )
+        };
+
+        if num_affine_virtuals > 0 {
+            let alpha_prime = alpha_prime.ok_or(ProtocolError::BooleanityProofMissing)?;
+            let alpha_powers = powers(&self.field_cfg, alpha_prime, D);
+            let mut source_bridge_evals: Vec<C::Element> = self
+                .base
+                .public_trace
+                .binary_poly
+                .iter()
+                .map(|col| {
+                    project_binary_col_at_field::<C, D>(col, &alpha_powers, &self.field_cfg)
+                        .evaluate(&self.field_cfg, &self.cpr_eval_point)
+                        .map_err(ProtocolError::AffineVirtualSourceProjection)
+                })
+                .collect::<Result<_, _>>()?;
+            debug_assert_eq!(source_bridge_evals.len(), num_pub_bin);
+            source_bridge_evals.extend(witness_bridge_evals.iter().cloned());
+
+            let affine_bridge_evals = collapse_bit_slice_evals::<C, D>(
+                self.affine_bool_bit_slice_evals
+                    .as_ref()
+                    .ok_or(ProtocolError::BooleanityProofMissing)?,
+                num_affine_virtuals,
+                alpha_prime,
+                &self.field_cfg,
+            );
+            let expected_affine_evals = expected_affine_virtual_bridge_evals::<C, _, D>(
+                &sig,
+                &source_bridge_evals,
+                alpha_prime,
+                &self.field_cfg,
+            );
+            for (spec_index, (got, expected)) in affine_bridge_evals
+                .into_iter()
+                .zip(expected_affine_evals)
+                .enumerate()
             {
-                let sig = self.base.uair_signature.clone();
-                let num_pub_bin = sig.public_cols().num_binary_poly_cols();
-                let num_total_bin = sig.total_cols().num_binary_poly_cols();
-                let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
-                let extra = alpha_prime_bridge_up_evals::<C, D>(
-                    bit_slice_evals,
-                    num_wit_bin,
-                    alpha_prime,
-                    &self.field_cfg,
-                );
-                (
-                    self.cpr_up_evals.iter().cloned().chain(extra).collect(),
-                    num_wit_bin,
-                )
-            } else {
-                (self.cpr_up_evals.clone(), 0)
-            };
+                if got != expected {
+                    return Err(ProtocolError::AffineVirtualBridgeMismatch {
+                        spec_index,
+                        got,
+                        expected,
+                    });
+                }
+            }
+        }
+
+        let q_up_evals: Vec<C::Element> = self
+            .cpr_up_evals
+            .iter()
+            .cloned()
+            .chain(witness_bridge_evals)
+            .collect();
 
         // Per-prime families: zero-pad up_evals to match Q's column count
         //

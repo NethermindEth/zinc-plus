@@ -20,8 +20,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    BitOp, BitOpSpec, ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout,
-    TraceRow, Uair, UairSignature, UairTrace,
+    AffineVirtualSpec, AffineVirtualTerm, BitOp, BitOpSpec, ConstraintBuilder, PublicColumnLayout,
+    ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -1139,6 +1139,124 @@ where
     }
 }
 
+/// UAIR fixture for affine virtual booleanity targets while an independent F_q
+/// constraint family is present.
+///
+/// For public `e` and witness `g`, the witnesses `u_not = (!e) & g` and
+/// `u_and = e & g` are characterized by the paper's two Ch membership
+/// expressions
+///
+/// ```text
+/// (1_32 - e) + g - 2u_not in {0, 1}^{<32}[X]
+/// e + g - 2u_and in {0, 1}^{<32}[X].
+/// ```
+#[derive(Clone, Debug)]
+pub struct TestUairAffineVirtual<R, P, const NUM_PUBLIC_BINARY: usize>(PhantomData<(R, P)>);
+
+/// Unshifted variant with one public and three witness binary columns.
+pub type TestUairAffineVirtualUnshifted<R, P> = TestUairAffineVirtual<R, P, 1>;
+
+/// Unshifted variant with all four binary columns public.
+pub type TestUairAffineVirtualPublicOnly<R, P> = TestUairAffineVirtual<R, P, 4>;
+
+impl<R, P, const NUM_PUBLIC_BINARY: usize> Uair for TestUairAffineVirtual<R, P, NUM_PUBLIC_BINARY>
+where
+    R: ConstSemiring + 'static,
+    P: Semiring + From<u64> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+    type Prime = P;
+
+    fn signature() -> UairSignature<Self::Prime> {
+        UairSignature::new(
+            TotalColumnLayout::new(4, 0, 0),
+            PublicColumnLayout::new(NUM_PUBLIC_BINARY, 0, 0),
+            vec![],
+            vec![],
+        )
+        .with_affine_virtual_specs(vec![
+            AffineVirtualSpec::with_ones_coefficient(
+                vec![
+                    AffineVirtualTerm::new(0, -1),
+                    AffineVirtualTerm::new(1, 1),
+                    AffineVirtualTerm::new(2, -2),
+                ],
+                1,
+            ),
+            AffineVirtualSpec::new(vec![
+                AffineVirtualTerm::new(0, 1),
+                AffineVirtualTerm::new(1, 1),
+                AffineVirtualTerm::new(3, -2),
+            ]),
+        ])
+        .with_primes(vec![P::from(MERSENNE_61_PRIME)])
+    }
+
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
+        b: &mut B,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        _down: TraceRow<C::Element>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+        fq_ideal_from_ref: IFqFromR,
+    ) where
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
+    {
+        // Keep independent zero identities in both constraint families so the
+        // fixture exercises affine booleanity alongside Q and F_q CPR. The Ch
+        // relations themselves are enforced by booleanity.
+        let identity = expr_cfg.sub(&up.binary_poly[1], &up.binary_poly[1]);
+        b.assert_in_ideal(
+            identity.clone(),
+            &ideal_from_ref(&DegreeOneIdeal::new(R::ONE)),
+        );
+        b.assert_in_fq_ideal(
+            0,
+            identity,
+            &fq_ideal_from_ref(&DegreeOneIdeal::new(R::ONE)),
+        );
+    }
+}
+
+impl<R, P, const NUM_PUBLIC_BINARY: usize> GenerateRandomTrace<32>
+    for TestUairAffineVirtual<R, P, NUM_PUBLIC_BINARY>
+where
+    R: ConstSemiring + 'static,
+    P: Semiring + From<u64> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<G: Rng + ?Sized>(
+        num_vars: usize,
+        rng: &mut G,
+    ) -> UairTrace<'static, R, R, 32, 32> {
+        let n = 1usize << num_vars;
+        let e: Vec<u32> = (0..n).map(|_| rng.next_u32()).collect();
+        let g: Vec<u32> = (0..n).map(|_| rng.next_u32()).collect();
+        let u_not: Vec<u32> = e.iter().zip(&g).map(|(e, g)| !e & g).collect();
+        let u_and: Vec<u32> = e.iter().zip(&g).map(|(e, g)| e & g).collect();
+
+        UairTrace {
+            binary_poly: vec![
+                e.into_iter().map(BinaryPoly::from).collect(),
+                g.into_iter().map(BinaryPoly::from).collect(),
+                u_not.into_iter().map(BinaryPoly::from).collect(),
+                u_and.into_iter().map(BinaryPoly::from).collect(),
+            ]
+            .into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// A UAIR exercising the Flavor-1 $F_{q}[X]$-constraint surface
 /// for **multiple large primes**.
 ///
@@ -1285,6 +1403,8 @@ mod tests {
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>, u64>>(&[1, 1]);
         assert_uair_shape::<TestUairBitOpsMixedSplice<Int<LIMBS>, u64>>(&[1, 1, 1]);
         assert_uair_shape::<TestUairBitOpsFqFamily<Int<LIMBS>, u64>>(&[1, 1]);
+        assert_uair_shape::<TestUairAffineVirtualUnshifted<Int<LIMBS>, u64>>(&[1, 1]);
+        assert_uair_shape::<TestUairAffineVirtualPublicOnly<Int<LIMBS>, u64>>(&[1, 1]);
         // TestUairFqLargePrime: two F_{q_i}[X] linear constraints (one per
         // declared prime).
         assert_uair_shape::<TestUairFqLargePrime<Int<LIMBS>, u64>>(&[1, 1]);

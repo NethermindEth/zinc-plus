@@ -11,13 +11,16 @@
 //! After the three compiler steps, the protocol continues with:
 //!
 //! - Combined CPR + Booleanity + Lookup multi-degree sumcheck (CPR group at
-//!   degree `max_deg+2`; optional booleanity group at degree 3 when the UAIR
-//!   has witness binary-poly columns; one lookup group per table type; shared
-//!   eval point `r*`)
+//!   degree `max_deg+2`; optional degree-3 booleanity groups for committed
+//!   witness binary columns and affine virtual targets; one lookup group per
+//!   table type; shared eval point `r*`)
 //! - $\alpha'$ bridge: squeeze a fresh challenge $\alpha'$ after the booleanity
 //!   `bit_slice_evals` are absorbed, and append one extra $\alpha'$-projected
 //!   MLE + up-eval to the multipoint-eval inputs per witness binary-poly column
 //!   (see `BooleanityChecker`)
+//! - Affine virtual bridge: collapse each unshifted virtual at the same
+//!   `alpha'` and compare it directly with the affine combination of its
+//!   public/committed source projections at `r*`
 //! - Multi-point evaluation sumcheck (combines up/down evals at `r*` into a
 //!   single evaluation point `r_0`)
 //! - Lift-and-project (unprojected MLE evaluations at `r_0`)
@@ -130,6 +133,9 @@ pub struct Proof<F> {
     /// has no witness binary-poly columns (the argument is omitted from
     /// the multi-degree sumcheck in that case).
     pub booleanity_proof: Option<BooleanityProof<F>>,
+    /// Affine-virtual booleanity argument proof. `None` when the UAIR has no
+    /// affine virtual specs.
+    pub affine_booleanity_proof: Option<BooleanityProof<F>>,
     /// Per-prime $F_{q_i}[X]$ ideal-check proofs, one per declared
     /// prime in [`zinc_uair::UairSignature::primes`], in the same order.
     /// Empty for UAIRs with $Q[X]$-only constraints.
@@ -159,6 +165,43 @@ pub struct Proof<F> {
     /// If no $F_q[X]$ constraints are present, this will be `None` to indicate
     /// $q'' := q_0$ and this is identical to `witness_lifted_evals`.
     pub witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<F>>>,
+}
+
+fn read_optional_booleanity_proof<F>(bytes: &[u8]) -> (Option<BooleanityProof<F>>, &[u8])
+where
+    F: ConstTranscribable,
+{
+    let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
+    if presence == 0 {
+        (None, bytes)
+    } else {
+        let (proof, bytes) = BooleanityProof::read_transcription_bytes_subset(bytes);
+        (Some(proof), bytes)
+    }
+}
+
+fn write_optional_booleanity_proof<'a, F>(
+    proof: &Option<BooleanityProof<F>>,
+    mut buf: &'a mut [u8],
+) -> &'a mut [u8]
+where
+    F: ConstTranscribable,
+{
+    buf = u32::from(proof.is_some()).write_transcription_bytes_subset(buf);
+    if let Some(proof) = proof {
+        buf = proof.write_transcription_bytes_subset(buf);
+    }
+    buf
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn optional_booleanity_proof_num_bytes<F>(proof: &Option<BooleanityProof<F>>) -> usize
+where
+    F: ConstTranscribable,
+{
+    proof.as_ref().map_or(0, |proof| {
+        BooleanityProof::<F>::LENGTH_NUM_BYTES + proof.get_num_bytes()
+    })
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -195,15 +238,8 @@ where
             bytes = rest;
         }
 
-        // booleanity_proof: presence flag (u32: 0 = absent, 1 = present)
-        // followed by the proof body (length-prefixed) when present.
-        let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
-        let (booleanity_proof, bytes) = if presence != 0 {
-            let (p, rest) = BooleanityProof::<F>::read_transcription_bytes_subset(bytes);
-            (Some(p), rest)
-        } else {
-            (None, bytes)
-        };
+        let (booleanity_proof, bytes) = read_optional_booleanity_proof(bytes);
+        let (affine_booleanity_proof, bytes) = read_optional_booleanity_proof(bytes);
 
         // ideal_checks_fq: u32 count, then that many length-prefixed
         // IdealCheckProof entries (one per declared prime).
@@ -273,6 +309,7 @@ where
             witness_lifted_evals,
             lookup_proof: None,
             booleanity_proof,
+            affine_booleanity_proof,
             ideal_checks_fq,
             cpr_proofs_fq,
             combined_sumchecks_fq,
@@ -316,13 +353,8 @@ where
             buf = DynamicPolyVec::reinterpret(wlf).write_transcription_bytes_subset(buf);
         }
 
-        // booleanity_proof: u32 presence flag, then (optionally) the body
-        // with its own length prefix.
-        let presence = u32::from(self.booleanity_proof.is_some());
-        buf = presence.write_transcription_bytes_subset(buf);
-        if let Some(ref bp) = self.booleanity_proof {
-            buf = bp.write_transcription_bytes_subset(buf);
-        }
+        buf = write_optional_booleanity_proof(&self.booleanity_proof, buf);
+        buf = write_optional_booleanity_proof(&self.affine_booleanity_proof, buf);
 
         // ideal_checks_fq: u32 count + that many length-prefixed entries.
         let n_fq = u32::try_from(self.ideal_checks_fq.len())
@@ -376,10 +408,9 @@ where
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
-        let booleanity_bytes = match &self.booleanity_proof {
-            Some(bp) => BooleanityProof::<F>::LENGTH_NUM_BYTES + bp.get_num_bytes(),
-            None => 0,
-        };
+        let booleanity_bytes = optional_booleanity_proof_num_bytes(&self.booleanity_proof);
+        let affine_booleanity_bytes =
+            optional_booleanity_proof_num_bytes(&self.affine_booleanity_proof);
         let ideal_checks_fq_bytes: usize = self
             .ideal_checks_fq
             .iter()
@@ -432,9 +463,12 @@ where
             // witness_lifted_evals: count + sum of (length-prefix + body) per family
             + u32::NUM_BYTES
             + witness_lifted_evals_bytes
-            // booleanity presence flag + optional payload
+            // committed-column booleanity presence flag + optional payload
             + u32::NUM_BYTES
             + booleanity_bytes
+            // affine-virtual booleanity presence flag + optional payload
+            + u32::NUM_BYTES
+            + affine_booleanity_bytes
             // ideal_checks_fq: count + sum of (length-prefix + body) per entry
             + u32::NUM_BYTES
             + ideal_checks_fq_bytes
@@ -569,6 +603,16 @@ pub enum ProtocolError<F: SetElement> {
     Booleanity(#[from] BooleanityError<F>),
     #[error("booleanity proof missing from proof object")]
     BooleanityProofMissing,
+    #[error("affine virtual source projection failed: {0}")]
+    AffineVirtualSourceProjection(PolyEvaluationError),
+    #[error(
+        "affine virtual bridge mismatch at spec {spec_index}: got {got:?}, expected {expected:?}"
+    )]
+    AffineVirtualBridgeMismatch {
+        spec_index: usize,
+        got: F,
+        expected: F,
+    },
     #[error("non-canonical proof element: lifted integer >= family modulus")]
     NonCanonicalElement,
     #[error("proof family count mismatch: got {got}, expected {expected}")]
@@ -708,28 +752,25 @@ fn compute_lifted_evals<C: BaseFieldConfig, const D: usize>(
     result
 }
 
-/// Compute the $\alpha'$ Schwartz-Zippel bridge scalars for the witness
-/// binary-poly columns:
+/// Collapse column-major bit-slice evaluations at $\alpha'$:
 ///
 /// $$
 ///   c_j \;=\; \sum_{i=0}^{D-1} (\alpha')^{i} \cdot
 ///     \text{bit\_slice\_evals}[j \cdot D + i].
 /// $$
 ///
-/// One $c_j$ is produced per witness binary-poly column (in column-major
-/// order, matching `BooleanityProof::bit_slice_evals`). The result is
-/// appended to `MultipointEval`'s `up_evals` and bound to the committed
-/// witness column by the MP sumcheck + PCS chain at a fresh random
-/// $\alpha'$, replacing the previous (underconstrained for $D > 1$)
-/// $\psi_a$ linear pin-down.
+/// One $c_j$ is produced per input column, in the same column-major order as
+/// `BooleanityProof::bit_slice_evals`. Committed witness results are appended
+/// to `MultipointEval`'s `up_evals`; affine virtual results are checked against
+/// the corresponding affine combination of source results.
 #[allow(clippy::arithmetic_side_effects)]
-fn alpha_prime_bridge_up_evals<C: BaseFieldConfig, const D: usize>(
+fn collapse_bit_slice_evals<C: BaseFieldConfig, const D: usize>(
     bit_slice_evals: &[C::Element],
-    num_wit_bin: usize,
+    num_cols: usize,
     alpha_prime: &C::Element,
     field_cfg: &C,
 ) -> Vec<C::Element> {
-    debug_assert_eq!(bit_slice_evals.len(), num_wit_bin * D);
+    debug_assert_eq!(bit_slice_evals.len(), num_cols * D);
     let alpha_powers: Vec<C::Element> = powers(field_cfg, alpha_prime, D);
     bit_slice_evals
         .chunks_exact(D)
@@ -743,6 +784,89 @@ fn alpha_prime_bridge_up_evals<C: BaseFieldConfig, const D: usize>(
                 })
         })
         .collect()
+}
+
+/// Reconstruct the expected alpha-prime projection of each unshifted affine
+/// virtual from the corresponding source-column projections.
+#[allow(clippy::arithmetic_side_effects)]
+fn expected_affine_virtual_bridge_evals<C, P, const D: usize>(
+    signature: &UairSignature<P>,
+    source_bridge_evals: &[C::Element],
+    alpha_prime: &C::Element,
+    field_cfg: &C,
+) -> Vec<C::Element>
+where
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
+    P: Semiring,
+{
+    debug_assert_eq!(
+        source_bridge_evals.len(),
+        signature.total_cols().num_binary_poly_cols()
+    );
+
+    let ones_projection = powers(field_cfg, alpha_prime, D).into_iter().fold(
+        field_cfg.zero(),
+        |mut acc, alpha_power| {
+            field_cfg.add_assign(&mut acc, &alpha_power);
+            acc
+        },
+    );
+
+    signature
+        .affine_virtual_specs()
+        .iter()
+        .map(|spec| {
+            let mut expected = field_cfg.mul(
+                &field_cfg.project(&spec.ones_coefficient()),
+                &ones_projection,
+            );
+            for term in spec.terms() {
+                debug_assert_eq!(term.row_shift(), 0);
+                let term_eval = field_cfg.mul(
+                    &field_cfg.project(&term.coefficient()),
+                    &source_bridge_evals[term.source_col()],
+                );
+                field_cfg.add_assign(&mut expected, &term_eval);
+            }
+            expected
+        })
+        .collect()
+}
+
+/// Project a binary-polynomial column at a field element by evaluating each
+/// bit-packed cell $\sum_i \mathrm{bit}_i X^i$ at that element.
+#[allow(clippy::arithmetic_side_effects)]
+fn project_binary_col_at_field<C, const D: usize>(
+    col: &DenseMultilinearExtension<BinaryPoly<D>>,
+    alpha_powers: &[C::Element],
+    field_cfg: &C,
+) -> DenseMultilinearExtension<C::Element>
+where
+    C: BaseFieldConfig,
+{
+    debug_assert_eq!(alpha_powers.len(), D);
+    let zero = field_cfg.zero();
+
+    // Sequential row loop: per-row work is at most `D` conditional adds.
+    // Callers parallelize the outer loop over binary-polynomial columns.
+    let evaluations: Vec<C::Element> = col
+        .evaluations
+        .iter()
+        .map(|entry| {
+            let mut acc = zero.clone();
+            for (i, bit) in entry.iter().enumerate() {
+                if *bit.inner() {
+                    field_cfg.add_assign(&mut acc, &alpha_powers[i]);
+                }
+            }
+            acc
+        })
+        .collect();
+
+    DenseMultilinearExtension {
+        num_vars: col.num_vars,
+        evaluations,
+    }
 }
 
 /// Project a DensePolynomial scalar to DynamicPolynomial by projecting each
@@ -833,7 +957,8 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        ShaProxy, TestUairBitOpsFqFamily, TestUairFqLargePrime, TestUairMixedShifts,
+        ShaProxy, TestUairAffineVirtualPublicOnly, TestUairAffineVirtualUnshifted,
+        TestUairBitOpsFqFamily, TestUairFqLargePrime, TestUairMixedShifts,
         TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
@@ -1250,6 +1375,181 @@ mod tests {
             |_| {},
             |res| res.unwrap(),
         );
+    }
+
+    /// End-to-end test for the unshifted affine Ch-style booleanity bridge.
+    #[test]
+    fn test_e2e_affine_virtual_unshifted() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualUnshifted<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                assert_eq!(
+                    proof
+                        .booleanity_proof
+                        .as_ref()
+                        .expect("witness binary columns require a booleanity proof")
+                        .bit_slice_evals
+                        .len(),
+                    3 * D,
+                );
+                assert_eq!(
+                    proof
+                        .affine_booleanity_proof
+                        .as_ref()
+                        .expect("affine virtuals require an affine booleanity proof")
+                        .bit_slice_evals
+                        .len(),
+                    2 * D,
+                );
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Affine virtuals can be bound entirely to public source columns without
+    /// adding witness PCS or multipoint-evaluation bridge columns.
+    #[test]
+    fn test_e2e_affine_virtual_public_only() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualPublicOnly<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                assert!(proof.booleanity_proof.is_none());
+                assert_eq!(
+                    proof
+                        .affine_booleanity_proof
+                        .as_ref()
+                        .expect("affine virtuals require an affine booleanity proof")
+                        .bit_slice_evals
+                        .len(),
+                    2 * D,
+                );
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// A prover cannot omit affine bit-slice evaluations: their number is
+    /// derived from the public UAIR signature.
+    #[test]
+    fn test_affine_virtual_truncated_bit_slice_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualUnshifted<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                proof
+                    .affine_booleanity_proof
+                    .as_mut()
+                    .expect("affine virtuals require an affine booleanity proof")
+                    .bit_slice_evals
+                    .pop();
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::Booleanity(BooleanityError::WrongBitSliceEvalsNumber { .. })
+                ));
+            },
+        );
+    }
+
+    /// The involution `b -> 1-b` preserves `b(b-1)`, so this tamper passes
+    /// affine Booleanity and can only be rejected by the source-binding bridge.
+    #[test]
+    fn test_affine_virtual_source_binding_rejects_booleanity_preserving_tamper() {
+        type U = TestUairAffineVirtualUnshifted<ZtInt, ZtFmod>;
+        type Piop = ZincPlusPiop<TestZincTypesIprs, U, F, D, QUARTER_D>;
+        type Ideal = IdealOrZero<DegreeOneIdeal<E>>;
+
+        let num_vars = 8;
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let trace = U::generate_random_trace(num_vars, &mut rng());
+        let public_trace = trace.public(&U::signature());
+        let mut proof =
+            Piop::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn).expect("prove");
+
+        let cfg = Piop::step0_reconstruct_transcript::<Ideal>(
+            &pp,
+            proof.clone(),
+            &public_trace,
+            num_vars,
+        )
+        .and_then(|s| s.step1_prime_projection())
+        .and_then(|s| {
+            s.step2_ideal_check(default_project_ideal!(), |ideal, field_cfg| {
+                ideal.map(|i| DegreeOneIdeal::project(field_cfg, i))
+            })
+        })
+        .and_then(|s| s.step3_eval_projection(project_scalar_fn))
+        .expect("steps 0..=3")
+        .field_cfg()
+        .clone();
+
+        let affine_evals = &mut proof
+            .affine_booleanity_proof
+            .as_mut()
+            .expect("affine virtuals require an affine booleanity proof")
+            .bit_slice_evals;
+        let one = cfg.one();
+        let tamper_index = affine_evals
+            .iter()
+            .position(|wire_eval| {
+                let eval: E = cfg.project(wire_eval);
+                eval != cfg.sub(&one, &eval)
+            })
+            .expect("at least one affine endpoint must differ from its complement");
+        let eval: E = cfg.project(&affine_evals[tamper_index]);
+        let tampered_eval = cfg.sub(&one, &eval);
+        assert_eq!(
+            cfg.mul(&eval, &cfg.sub(&eval, &one)),
+            cfg.mul(&tampered_eval, &cfg.sub(&tampered_eval, &one)),
+            "b -> 1-b must preserve the Booleanity residue",
+        );
+        affine_evals[tamper_index] = cfg.lift(&tampered_eval);
+
+        let err = Piop::verify::<Ideal, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+        )
+        .expect_err("the affine source-binding bridge must reject the tamper");
+        assert!(matches!(
+            err,
+            ProtocolError::AffineVirtualBridgeMismatch { .. }
+        ));
     }
 
     /// End-to-end test: [`BigLinearUair`].
