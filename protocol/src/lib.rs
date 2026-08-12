@@ -824,7 +824,7 @@ mod tests {
         crypto_bigint_monty::{MontyField, MontyFieldElement},
         crypto_bigint_uint::{U64, Uint},
     };
-    use num_traits::{ConstOne, Zero};
+    use num_traits::{ConstOne, WrappingAdd, Zero};
     use rand::rng;
     use zinc_piop::{
         combined_poly_resolver::CombinedPolyResolverError, multipoint_eval::MultipointEvalError,
@@ -1709,10 +1709,9 @@ mod tests {
                     .booleanity_proof
                     .as_mut()
                     .expect("BigLinearUair has binary-poly witnesses");
-                // The Q-family cfg (random q_0) is not carried by raw
-                // elements; swapping two (distinct w.o.p.) evals is an
-                // equally non-trivial perturbation of the residue.
-                bp.bit_slice_evals.swap(0, 1);
+                // Add a constant to the raw wire integer.
+                let tampered = bp.bit_slice_evals[0].wrapping_add(&Uint::from(7_u64));
+                bp.bit_slice_evals[0] = tampered
             },
             |res| {
                 assert!(matches!(
