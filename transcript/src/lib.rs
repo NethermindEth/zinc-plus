@@ -2,6 +2,8 @@ pub mod traits;
 
 use crate::traits::{ConstTranscribable, GenTranscribable, Transcript};
 use crypto_primitives::{BaseFieldConfig, ConstIntSemiring};
+use std::io::ErrorKind;
+use thiserror::Error;
 use zinc_primality::PrimalityTest;
 
 /// A cryptographic transcript implementation using the BLAKE3 hash
@@ -107,3 +109,7 @@ where
     modulus.write_transcription_bytes_exact(buf);
     rest
 }
+
+#[derive(Clone, Debug, PartialEq, Error)]
+#[error("{1}")]
+pub struct TranscriptError(pub ErrorKind, pub String);

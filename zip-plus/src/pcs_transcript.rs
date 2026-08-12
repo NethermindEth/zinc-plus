@@ -1,4 +1,4 @@
-use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
+use crate::{merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
 use crypto_primitives::BaseFieldConfig;
 use itertools::Itertools;
 use std::{
@@ -6,7 +6,7 @@ use std::{
     io::{Cursor, ErrorKind, Read, Write},
 };
 use zinc_transcript::{
-    Blake3Transcript,
+    Blake3Transcript, TranscriptError,
     traits::{ConstTranscribable, Transcribable, Transcript},
 };
 use zinc_utils::{add, mul, rem};
@@ -14,7 +14,7 @@ use zinc_utils::{add, mul, rem};
 macro_rules! safe_cast {
     ($value:expr, $from:ident, $to:ident) => {
         $to::try_from($value).map_err(|_err| {
-            ZipError::Transcript(
+            TranscriptError(
                 ErrorKind::Unsupported,
                 format!(
                     "Failed to convert {} to {}",
@@ -105,7 +105,11 @@ impl PcsProverTranscript {
     /// Absorbs the elements into the Fiat-Shamir transcript (raw inner
     /// representation) and writes their canonical lifted integers to the
     /// proof stream. The wire never carries raw Montgomery residues.
-    pub fn write_field_elements<C>(&mut self, cfg: &C, elems: &[C::Element]) -> Result<(), ZipError>
+    pub fn write_field_elements<C>(
+        &mut self,
+        cfg: &C,
+        elems: &[C::Element],
+    ) -> Result<(), TranscriptError>
     where
         C: BaseFieldConfig,
         C::Integer: ConstTranscribable,
@@ -113,7 +117,7 @@ impl PcsProverTranscript {
         self.write_const_many_iter(elems.iter().map(|e| cfg.lift(e)), elems.len())
     }
 
-    pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), ZipError> {
+    pub fn write<T: Transcribable>(&mut self, v: &T) -> Result<(), TranscriptError> {
         let data_len = v.get_num_bytes();
 
         // Write the length prefix when it is not known at compile time.
@@ -123,7 +127,9 @@ impl PcsProverTranscript {
                 .into_iter()
                 .take(T::LENGTH_NUM_BYTES)
                 .collect_vec();
-            self.stream.write_all(&len_bytes)?;
+            self.stream
+                .write_all(&len_bytes)
+                .map_err(to_transcript_error)?;
             // A length that selects how much of the stream is read later is
             // itself a prover message, so it has to bind.
             self.fs_transcript.absorb_bytes(&len_bytes);
@@ -148,14 +154,21 @@ impl PcsProverTranscript {
     // Note(alex):
     // Parallelizing this greatly degrades performance rather than improving it.
     // Maybe we should think of breakpoints for parallelization later.
-    pub fn write_const_many<T: ConstTranscribable>(&mut self, vs: &[T]) -> Result<(), ZipError> {
+    pub fn write_const_many<T: ConstTranscribable>(
+        &mut self,
+        vs: &[T],
+    ) -> Result<(), TranscriptError> {
         self.write_const_many_iter::<T, _>(vs, vs.len())
     }
 
     // Note(alex):
     // Parallelizing this greatly degrades performance rather than improving it.
     // Maybe we should think of breakpoints for parallelization later.
-    pub fn write_const_many_iter<'a, T, I>(&mut self, vs: I, vs_len: usize) -> Result<(), ZipError>
+    pub fn write_const_many_iter<'a, T, I>(
+        &mut self,
+        vs: I,
+        vs_len: usize,
+    ) -> Result<(), TranscriptError>
     where
         T: ConstTranscribable + 'a,
         I: IntoIterator,
@@ -180,12 +193,12 @@ impl PcsProverTranscript {
         Ok(())
     }
 
-    fn write_usize(&mut self, value: usize) -> Result<(), ZipError> {
+    fn write_usize(&mut self, value: usize) -> Result<(), TranscriptError> {
         let value_u64 = safe_cast!(value, usize, u64)?;
         self.write(&value_u64)
     }
 
-    pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
+    pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), TranscriptError> {
         // Write the dimensions of matrix used to construct the Merkle tree
         self.write_usize(proof.leaf_index)?;
         self.write_usize(proof.leaf_count)?;
@@ -219,13 +232,13 @@ impl PcsVerifierTranscript {
     ///
     /// Call this once at the end of verification, after every component
     /// sharing the stream has read its section.
-    pub fn check_eof(&self) -> Result<(), ZipError> {
+    pub fn check_eof(&self) -> Result<(), TranscriptError> {
         let position = safe_cast!(self.stream.position(), u64, usize)?;
         let len = self.stream.get_ref().len();
         if position == len {
             Ok(())
         } else {
-            Err(ZipError::Transcript(
+            Err(TranscriptError(
                 ErrorKind::InvalidData,
                 format!(
                     "proof stream not fully consumed: {} unread byte(s)",
@@ -242,7 +255,11 @@ impl PcsVerifierTranscript {
     ///
     /// Rejects any integer `>= modulus`: every field value has exactly one
     /// accepted encoding on the wire.
-    pub fn read_field_elements<C>(&mut self, cfg: &C, n: usize) -> Result<Vec<C::Element>, ZipError>
+    pub fn read_field_elements<C>(
+        &mut self,
+        cfg: &C,
+        n: usize,
+    ) -> Result<Vec<C::Element>, TranscriptError>
     where
         C: BaseFieldConfig,
         C::Integer: ConstTranscribable,
@@ -250,16 +267,21 @@ impl PcsVerifierTranscript {
         let ints: Vec<C::Integer> = self.read_const_many(n)?;
         let modulus = cfg.modulus();
         if ints.iter().any(|int| *int >= modulus) {
-            return Err(ZipError::NonCanonicalFieldElement);
+            return Err(TranscriptError(
+                ErrorKind::InvalidData,
+                "Non-canonical field element".to_owned(),
+            ));
         }
         let elems = ints.iter().map(|int| cfg.project(int)).collect_vec();
         Ok(elems)
     }
 
-    pub fn read<T: Transcribable>(&mut self) -> Result<T, ZipError> {
+    pub fn read<T: Transcribable>(&mut self) -> Result<T, TranscriptError> {
         let data_len = if T::LENGTH_NUM_BYTES > 0 {
             let mut len_buf = vec![0u8; T::LENGTH_NUM_BYTES];
-            self.stream.read_exact(&mut len_buf)?;
+            self.stream
+                .read_exact(&mut len_buf)
+                .map_err(to_transcript_error)?;
             self.fs_transcript.absorb_bytes(&len_buf);
             T::read_num_bytes(&len_buf)
         } else {
@@ -275,7 +297,10 @@ impl PcsVerifierTranscript {
         })
     }
 
-    pub fn read_const_many<T: ConstTranscribable>(&mut self, n: usize) -> Result<Vec<T>, ZipError> {
+    pub fn read_const_many<T: ConstTranscribable>(
+        &mut self,
+        n: usize,
+    ) -> Result<Vec<T>, TranscriptError> {
         read_stream_slice(&mut self.stream, mul!(n, T::NUM_BYTES), |slice| {
             Ok(slice
                 .chunks(T::NUM_BYTES)
@@ -287,12 +312,12 @@ impl PcsVerifierTranscript {
         })
     }
 
-    fn read_usize(&mut self) -> Result<usize, ZipError> {
+    fn read_usize(&mut self) -> Result<usize, TranscriptError> {
         let value = self.read::<u64>()?;
         safe_cast!(value, u64, usize)
     }
 
-    pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, ZipError> {
+    pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, TranscriptError> {
         // Read the dimensions of matrix used to construct the Merkle tree
         let leaf_index = self.read_usize()?;
         let leaf_count = self.read_usize()?;
@@ -314,14 +339,14 @@ impl PcsVerifierTranscript {
 fn read_stream_slice<T>(
     stream: &mut Cursor<Vec<u8>>,
     length: usize,
-    mut action: impl FnMut(&[u8]) -> Result<T, ZipError>,
-) -> Result<T, ZipError> {
+    mut action: impl FnMut(&[u8]) -> Result<T, TranscriptError>,
+) -> Result<T, TranscriptError> {
     let prev_pos = safe_cast!(stream.position(), u64, usize)?;
     let next_pos = add!(prev_pos, length);
 
     let stream_vec = stream.get_ref();
     if next_pos > stream_vec.len() {
-        return Err(ZipError::Transcript(
+        return Err(TranscriptError(
             ErrorKind::UnexpectedEof,
             format!(
                 "Attempted to read beyond the end of the stream: {} + {} exceeds stream length {}",
@@ -337,10 +362,8 @@ fn read_stream_slice<T>(
 }
 
 // Do not expose this outside
-impl From<std::io::Error> for ZipError {
-    fn from(err: std::io::Error) -> Self {
-        ZipError::Transcript(err.kind(), err.to_string())
-    }
+fn to_transcript_error(err: std::io::Error) -> TranscriptError {
+    TranscriptError(err.kind(), err.to_string())
 }
 
 #[cfg(test)]

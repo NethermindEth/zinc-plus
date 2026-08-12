@@ -13,7 +13,7 @@ bench = false
 blake3 = { workspace = true }
 crypto-bigint = { workspace = true }
 crypto-primitives = { workspace = true }
-
+thiserror = { workspace = true}
 itertools = { workspace = true }
 num-traits = { workspace = true }
 zinc-primality = { workspace = true }

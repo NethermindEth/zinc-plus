@@ -365,6 +365,7 @@ pub struct VerifierLiftedEvalsChecked<
 /// [`finish`](VerifierPcsVerified::finish).
 #[derive(Clone, Debug)]
 pub struct VerifierPcsVerified<IdealOverF> {
+    pcs_transcript: PcsVerifierTranscript,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -1641,6 +1642,7 @@ where
         );
 
         Ok(VerifierPcsVerified {
+            pcs_transcript: self.base.pcs_transcript,
             _phantom: PhantomData,
         })
     }
@@ -1648,7 +1650,10 @@ where
 
 impl<IdealOverF: Ideal> VerifierPcsVerified<IdealOverF> {
     /// Complete verification.
+    ///
+    /// Asserts that the proof stream has been fully consumed.
     pub fn finish<E: SetElement>(self) -> Result<(), ProtocolError<E>> {
+        self.pcs_transcript.check_eof()?;
         Ok(())
     }
 }

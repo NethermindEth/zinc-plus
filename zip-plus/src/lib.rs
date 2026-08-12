@@ -1,14 +1,12 @@
 pub mod code;
+pub mod merkle;
 pub mod pcs;
 pub mod pcs_transcript;
 pub mod utils;
 
-pub mod merkle;
-
-use std::io::ErrorKind;
-
 use crypto_primitives::FieldError;
 use thiserror::Error;
+use zinc_transcript::TranscriptError;
 
 #[derive(Clone, Debug, PartialEq, Error)]
 pub enum ZipError {
@@ -20,8 +18,8 @@ pub enum ZipError {
     InvalidSnark(String),
     #[error("Serialization Error: {0}")]
     Serialization(String),
-    #[error("Transcript failure: {1}")]
-    Transcript(ErrorKind, String),
+    #[error("Transcript failure: {0}")]
+    Transcript(#[from] TranscriptError),
     #[error("Error during polynomial evaluation: {0}")]
     PolynomialEvaluationError(zinc_poly::EvaluationError),
     #[error("Non-canonical field element: lifted integer >= modulus")]

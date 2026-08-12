@@ -63,7 +63,10 @@ use zinc_poly::{
     },
 };
 use zinc_primality::PrimalityTest;
-use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
+use zinc_transcript::{
+    TranscriptError,
+    traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
+};
 use zinc_uair::{Uair, UairSignature};
 use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, from_ref::FromRef, named::Named, powers};
 use zip_plus::{
@@ -574,6 +577,10 @@ pub enum ProtocolError<F: SetElement> {
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+    /// Happens outside of Zip+, otherwise it would be wrapped in
+    /// [`ZipError::Transcript`]
+    #[error("transcript failure: {0}")]
+    Transcript(#[from] TranscriptError),
     #[error("F_q[X] ideal check failed at prime_idx {prime_idx} (q = {q}): {source}")]
     FqIdealCheck {
         prime_idx: usize,
@@ -1607,6 +1614,35 @@ mod tests {
                     res.unwrap_err(),
                     ProtocolError::NonCanonicalElement
                 ));
+            },
+        );
+    }
+
+    /// Bytes appended past the end of the proof stream are never read, and so
+    /// are never absorbed into the transcript. They must be rejected rather
+    /// than ignored: otherwise every verifying proof admits unboundedly many
+    /// accepted variants, which breaks proof uniqueness wherever proofs are
+    /// hashed, deduplicated, or compared for equality.
+    #[test]
+    fn test_big_linear_tamper_trailing_proof_bytes() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            default_project_fq_ideal!(),
+            |proof| proof.zip.push(0),
+            |res| {
+                assert!(res.is_err(), "trailing proof bytes were accepted");
+                let err = res.unwrap_err();
+                assert!(
+                    matches!(err, ProtocolError::Transcript(_)),
+                    "trailing proof bytes resulted in {err:?} rather than a transcript error"
+                );
             },
         );
     }
