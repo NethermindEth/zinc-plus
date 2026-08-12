@@ -731,7 +731,6 @@ fn booleanity_zerocheck_setup<C>(
 ) -> BooleanityZerocheckSetup<C::Element>
 where
     C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
-    C::Element: ConstTranscribable,
     C::Integer: ConstTranscribable,
 {
     // Order of challenge squeezing must match between prover and verifier.
