@@ -61,6 +61,27 @@ impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
+/// Dedicated test configuration for the optional grinding path. Ordinary test
+/// and production configurations retain the default of zero grinding bits.
+#[derive(Debug, Clone)]
+pub struct GrindZipTypes<const N: usize, const K: usize, const M: usize> {}
+impl<const N: usize, const K: usize, const M: usize> ZipTypes for GrindZipTypes<N, K, M> {
+    // Grinding plumbing is tested without taking any query-reduction credit.
+    const NUM_COLUMN_OPENINGS: usize = 100;
+    const GRINDING_BITS: u32 = if cfg!(miri) { 2 } else { 8 };
+    type Eval = Int<N>;
+    type Cw = Int<K>;
+    type Fmod = Uint<K>;
+    type PrimeTest = MillerRabin;
+    type Chal = Int<N>;
+    type Pt = Int<N>;
+    type CombR = Int<M>;
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
 #[derive(Debug, Clone)]
 pub struct TestBinPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> {}
 impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
@@ -96,6 +117,22 @@ pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
         IprsCode<TestZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
     >,
     DenseMultilinearExtension<<TestZipTypes<N, K, M> as ZipTypes>::Eval>,
+) {
+    setup_test_params_inner(
+        num_vars,
+        IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).unwrap(),
+        |poly_size| (1..=poly_size as i32).map(Int::from).collect(),
+    )
+}
+
+pub fn setup_grind_test_params<const N: usize, const K: usize, const M: usize>(
+    num_vars: usize,
+) -> (
+    ZipPlusParams<
+        GrindZipTypes<N, K, M>,
+        IprsCode<GrindZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
+    >,
+    DenseMultilinearExtension<<GrindZipTypes<N, K, M> as ZipTypes>::Eval>,
 ) {
     setup_test_params_inner(
         num_vars,
@@ -171,6 +208,30 @@ where
     C::Integer: ConstTranscribable + FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod>,
 {
     setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_test_params, || {
+        (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
+    })
+}
+
+pub fn setup_full_grinding_protocol<C, const N: usize, const K: usize, const M: usize>(
+    num_vars: usize,
+) -> (
+    ZipPlusParams<
+        GrindZipTypes<N, K, M>,
+        IprsCode<GrindZipTypes<N, K, M>, TestIprsConfig, REP_FACTOR, CHECKED>,
+    >,
+    ZipPlusCommitment,
+    Vec<C::Element>,
+    C::Element,
+    PcsVerifierTranscript,
+)
+where
+    C: BaseFieldConfig
+        + ProjectElementWithConfig<<GrindZipTypes<N, K, M> as ZipTypes>::Pt>
+        + ProjectElementWithConfig<<GrindZipTypes<N, K, M> as ZipTypes>::CombR>
+        + Sync,
+    C::Integer: ConstTranscribable + FromRef<<GrindZipTypes<N, K, M> as ZipTypes>::Fmod>,
+{
+    setup_full_protocol_inner::<_, _, C, N>(num_vars, setup_grind_test_params, || {
         (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect()
     })
 }

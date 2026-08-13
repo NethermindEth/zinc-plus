@@ -789,6 +789,11 @@ mod tests {
             // b vectors: per poly, num_rows field elements
             let b_phase_size = batch_size * (pp.num_rows * size_of_f);
             let combined_row_size = pp.linear_code.row_len() * size_of_zt_m;
+            let grinding_size = if Zt::GRINDING_BITS == 0 {
+                0
+            } else {
+                size_of::<u64>()
+            };
 
             // Column openings: per opening, column values from all cw_matrices + one Merkle
             // proof
@@ -798,7 +803,7 @@ mod tests {
             let column_opening_phase_size =
                 Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
 
-            b_phase_size + combined_row_size + column_opening_phase_size
+            b_phase_size + combined_row_size + grinding_size + column_opening_phase_size
         }
 
         type F = MontyField<K>;

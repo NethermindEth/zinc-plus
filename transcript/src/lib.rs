@@ -1,3 +1,4 @@
+pub mod pow;
 pub mod traits;
 
 use crate::traits::{ConstTranscribable, GenTranscribable, Transcript};
@@ -38,6 +39,21 @@ impl Blake3Transcript {
         let mut hasher = blake3::Hasher::new();
         hasher.update(DOMAIN_SEPARATOR);
         Self { hasher }
+    }
+
+    fn derive_seed(&self, context: &'static str) -> [u8; 32] {
+        let transcript_digest = self.hasher.finalize();
+        blake3::derive_key(context, transcript_digest.as_bytes())
+    }
+
+    /// Derives the proof-of-work seed from the current transcript prefix
+    /// without changing the transcript state.
+    ///
+    /// The operation has a fixed BLAKE3 derive-key context. Keeping it
+    /// non-mutating makes the subsequent nonce message the only transcript
+    /// state change made by grinding.
+    pub fn derive_pow_seed(&self) -> [u8; 32] {
+        self.derive_seed(crate::pow::POW_SEED_CONTEXT)
     }
 
     /// Generates a specified number of pseudorandom bytes based on the current
@@ -113,3 +129,35 @@ where
 #[derive(Clone, Debug, PartialEq, Error)]
 #[error("{1}")]
 pub struct TranscriptError(pub ErrorKind, pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_derivation_is_stable_domain_separated_and_non_mutating() {
+        let mut transcript = Blake3Transcript::new();
+        transcript.absorb_bytes(b"shared prefix");
+        let mut untouched = transcript.clone();
+
+        let seed = transcript.derive_pow_seed();
+        assert_eq!(seed, transcript.derive_pow_seed());
+        assert_ne!(
+            seed,
+            transcript.derive_seed("zinc-plus/test/seed-b/v1"),
+            "different operations must not share derived seeds"
+        );
+        let mut different_prefix = transcript.clone();
+        different_prefix.absorb_bytes(b"different suffix");
+        assert_ne!(
+            seed,
+            different_prefix.derive_pow_seed(),
+            "the proof-of-work seed must bind the transcript prefix"
+        );
+        assert_eq!(
+            transcript.get_challenge::<u64>(),
+            untouched.get_challenge::<u64>(),
+            "deriving a seed must not consume or absorb a challenge"
+        );
+    }
+}

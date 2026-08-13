@@ -16,6 +16,7 @@ parallel = [
     "zinc-poly/parallel",
     "zinc-uair/parallel",
     "zinc-utils/parallel",
+    "zip-plus/parallel",
 ]
 simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
 unchecked = []

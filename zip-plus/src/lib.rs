@@ -20,6 +20,8 @@ pub enum ZipError {
     Serialization(String),
     #[error("Transcript failure: {0}")]
     Transcript(#[from] TranscriptError),
+    #[error("Proof-of-work grinding check failed: {0}")]
+    Grinding(String),
     #[error("Error during polynomial evaluation: {0}")]
     PolynomialEvaluationError(zinc_poly::EvaluationError),
     #[error("Error during inner product computation: {0}")]
