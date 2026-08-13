@@ -1,4 +1,4 @@
-use crate::{merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
+use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
 use crypto_primitives::BaseFieldConfig;
 use itertools::Itertools;
 use std::{
@@ -7,6 +7,7 @@ use std::{
 };
 use zinc_transcript::{
     Blake3Transcript, TranscriptError,
+    pow::{MAX_GRINDING_BITS, check_pow, find_pow_nonce},
     traits::{ConstTranscribable, Transcribable, Transcript},
 };
 use zinc_utils::{add, mul, rem};
@@ -97,6 +98,28 @@ impl PcsProverTranscript {
     }
 
     common_methods!();
+
+    /// Performs proof-of-work immediately before a protected Fiat-Shamir
+    /// challenge. The seed is derived from the pre-nonce transcript prefix;
+    /// writing the nonce is the sole transcript mutation in this operation.
+    ///
+    /// This is a no-op when `bits == 0` and rejects infeasible configurations
+    /// before deriving a seed or touching the proof stream.
+    pub fn grind(&mut self, bits: u32) -> Result<(), ZipError> {
+        if bits == 0 {
+            return Ok(());
+        }
+        if bits > MAX_GRINDING_BITS {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "grinding bits must not exceed {MAX_GRINDING_BITS}, got {bits}"
+            )));
+        }
+
+        let seed = self.fs_transcript.derive_pow_seed();
+        let nonce = find_pow_nonce(&seed, bits);
+        self.write(&nonce)?;
+        Ok(())
+    }
 
     /// Writes field elements to the proof stream and absorbs them into the
     /// transcript, as raw (inner-representation) bytes.
@@ -227,6 +250,31 @@ pub struct PcsVerifierTranscript {
 
 impl PcsVerifierTranscript {
     common_methods!();
+
+    /// Reads and checks a proof-of-work nonce before the protected challenge.
+    /// The seed is derived before `read` absorbs the nonce, mirroring
+    /// [`PcsProverTranscript::grind`]. An invalid nonce still remains absorbed,
+    /// but callers must abort verification on the returned error.
+    pub fn check_grinding(&mut self, bits: u32) -> Result<(), ZipError> {
+        if bits == 0 {
+            return Ok(());
+        }
+        if bits > MAX_GRINDING_BITS {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "grinding bits must not exceed {MAX_GRINDING_BITS}, got {bits}"
+            )));
+        }
+
+        let seed = self.fs_transcript.derive_pow_seed();
+        let nonce: u64 = self.read()?;
+        if check_pow(&seed, nonce, bits) {
+            Ok(())
+        } else {
+            Err(ZipError::Grinding(format!(
+                "nonce {nonce} does not provide {bits} bits of work"
+            )))
+        }
+    }
 
     /// Returns an error unless the whole proof stream has been consumed.
     ///
@@ -518,6 +566,159 @@ mod tests {
         verifier
             .check_eof()
             .expect("stream should be fully consumed");
+    }
+
+    #[test]
+    fn grinding_roundtrip_uses_the_pre_nonce_seed_and_stays_in_sync() {
+        const BITS: u32 = 8;
+
+        let comm = ZipPlusCommitment::default();
+        let prefix = [11u64, 22, 33];
+        let mut prover = PcsProverTranscript::new_from_commitment(&comm);
+        prover
+            .write_const_many(&prefix)
+            .expect("prefix write should succeed");
+        let expected_seed = prover.fs_transcript.derive_pow_seed();
+        let expected_nonce = find_pow_nonce(&expected_seed, BITS);
+        let mut one_write = prover.clone();
+        one_write
+            .write(&expected_nonce)
+            .expect("manual nonce write should succeed");
+        prover.grind(BITS).expect("grinding should succeed");
+        assert_eq!(
+            prover.stream, one_write.stream,
+            "grinding must serialize exactly one ordinary nonce message"
+        );
+        let prover_challenge = prover.squeeze_challenge_idx(CAP);
+        assert_eq!(
+            prover_challenge,
+            one_write.squeeze_challenge_idx(CAP),
+            "grinding must absorb the nonce exactly once"
+        );
+
+        let mut verifier = prover.into_verification_transcript();
+        verifier.fs_transcript.absorb_bytes(&comm.root);
+        let read_prefix: Vec<u64> = verifier
+            .read_const_many(prefix.len())
+            .expect("prefix read should succeed");
+        assert_eq!(read_prefix, prefix);
+        assert_eq!(
+            verifier.fs_transcript.derive_pow_seed(),
+            expected_seed,
+            "verifier must derive the PoW seed before reading the nonce"
+        );
+
+        verifier
+            .check_grinding(BITS)
+            .expect("valid nonce should verify");
+        let verifier_challenge = verifier.squeeze_challenge_idx(CAP);
+        assert_eq!(prover_challenge, verifier_challenge);
+        verifier
+            .check_eof()
+            .expect("stream should be fully consumed");
+    }
+
+    #[test]
+    fn zero_bit_grinding_is_an_exact_no_op() {
+        let comm = ZipPlusCommitment::default();
+        let mut baseline = PcsProverTranscript::new_from_commitment(&comm);
+        let mut zero_work = baseline.clone();
+
+        zero_work
+            .grind(0)
+            .expect("zero-bit grinding should succeed");
+        assert_eq!(zero_work.stream, baseline.stream, "zero bits wrote a nonce");
+        assert_eq!(
+            zero_work.squeeze_challenge_idx(CAP),
+            baseline.squeeze_challenge_idx(CAP),
+            "zero bits changed the Fiat-Shamir state"
+        );
+
+        let mut verifier = zero_work.into_verification_transcript();
+        verifier.fs_transcript.absorb_bytes(&comm.root);
+        let mut verifier_baseline = verifier.clone();
+        verifier
+            .check_grinding(0)
+            .expect("zero-bit check should succeed");
+        assert_eq!(verifier.stream.position(), 0, "zero bits read proof bytes");
+        assert_eq!(
+            verifier.squeeze_challenge_idx(CAP),
+            verifier_baseline.squeeze_challenge_idx(CAP),
+            "zero-bit verification changed the Fiat-Shamir state"
+        );
+    }
+
+    #[test]
+    fn invalid_grinding_configuration_fails_before_mutating_state() {
+        let comm = ZipPlusCommitment::default();
+        let mut prover = PcsProverTranscript::new_from_commitment(&comm);
+        let mut untouched_prover = prover.clone();
+        assert!(matches!(
+            prover.grind(MAX_GRINDING_BITS + 1),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+        assert_eq!(prover.stream, untouched_prover.stream);
+        assert_eq!(
+            prover.squeeze_challenge_idx(CAP),
+            untouched_prover.squeeze_challenge_idx(CAP)
+        );
+
+        let mut verifier =
+            PcsProverTranscript::new_from_commitment(&comm).into_verification_transcript();
+        verifier.fs_transcript.absorb_bytes(&comm.root);
+        let mut untouched_verifier = verifier.clone();
+        assert!(matches!(
+            verifier.check_grinding(MAX_GRINDING_BITS + 1),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+        assert_eq!(
+            verifier.stream.position(),
+            untouched_verifier.stream.position()
+        );
+        assert_eq!(
+            verifier.squeeze_challenge_idx(CAP),
+            untouched_verifier.squeeze_challenge_idx(CAP)
+        );
+    }
+
+    #[test]
+    fn missing_and_invalid_grinding_nonces_are_distinguished() {
+        const BITS: u32 = 8;
+
+        let comm = ZipPlusCommitment::default();
+        let mut missing =
+            PcsProverTranscript::new_from_commitment(&comm).into_verification_transcript();
+        missing.fs_transcript.absorb_bytes(&comm.root);
+        assert!(matches!(
+            missing.check_grinding(BITS),
+            Err(ZipError::Transcript(TranscriptError(
+                ErrorKind::UnexpectedEof,
+                _
+            )))
+        ));
+
+        let mut prover = PcsProverTranscript::new_from_commitment(&comm);
+        prover
+            .write_const_many(&[7u64, 8, 9])
+            .expect("prefix write should succeed");
+        let seed = prover.fs_transcript.derive_pow_seed();
+        prover.grind(BITS).expect("grinding should succeed");
+
+        let bad_nonce = (0u64..)
+            .find(|nonce| !check_pow(&seed, *nonce, BITS))
+            .expect("an invalid nonce exists");
+        let nonce_offset = prover.stream.get_ref().len() - size_of::<u64>();
+        prover.stream.get_mut()[nonce_offset..].copy_from_slice(&bad_nonce.to_le_bytes());
+
+        let mut invalid = prover.into_verification_transcript();
+        invalid.fs_transcript.absorb_bytes(&comm.root);
+        let _: Vec<u64> = invalid
+            .read_const_many(3)
+            .expect("prefix read should succeed");
+        assert!(matches!(
+            invalid.check_grinding(BITS),
+            Err(ZipError::Grinding(_))
+        ));
     }
 
     /// Trailing bytes are bytes that never entered the transcript, so they

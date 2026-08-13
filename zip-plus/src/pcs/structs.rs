@@ -11,8 +11,17 @@ use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
 use zinc_utils::{from_ref::FromRef, inner_product::InnerProduct, named::Named};
 
 pub trait ZipTypes: Clone + Debug + Send + Sync {
-    /// For IPRS codes, 2^{-security_parameter} = rate^{num_openings / 3}
+    /// Number of columns opened by the verifier.
     const NUM_COLUMN_OPENINGS: usize;
+
+    /// Proof-of-work bits applied immediately before the column-query
+    /// challenges. Zero disables grinding and adds no proof bytes.
+    ///
+    /// This mechanism does not by itself justify reducing
+    /// [`Self::NUM_COLUMN_OPENINGS`]. Crediting these bits requires a protocol
+    /// soundness argument that isolates the protected query term.
+    /// Values above [`zinc_transcript::pow::MAX_GRINDING_BITS`] are rejected.
+    const GRINDING_BITS: u32 = 0;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube
     type Eval: ConstCoeffBitWidth + Default + Named + Clone + Debug + Send + Sync;

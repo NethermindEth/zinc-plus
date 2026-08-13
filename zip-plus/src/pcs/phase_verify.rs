@@ -70,8 +70,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// 5. Re-derives combination coefficients `s` (or `[1]` when `num_rows ==
     ///    1`).
     /// 6. Reads combined row `w` (CombR, length `row_len`) and encodes it.
-    /// 7. **Check 2**: asserts `<w, q_1> == <s, b>`.
-    /// 8. For each of `NUM_COLUMN_OPENINGS`: a. Squeezes column index, reads
+    /// 7. Checks and absorbs the optional proof-of-work nonce.
+    /// 8. **Check 2**: asserts `<w, q_1> == <s, b>`.
+    /// 9. For each of `NUM_COLUMN_OPENINGS`: a. Squeezes column index, reads
     ///    per-poly column values + Merkle proof. b. **Check 3**:
     ///    `verify_column_testing_batched`. c. **Check 4**:
     ///    `proof.verify(comm.root, column_values, col)`.
@@ -110,6 +111,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + ProjectElementWithConfig<Zt::Chal>,
         C::Integer: ConstTranscribable,
     {
+        const {
+            assert!(
+                Zt::GRINDING_BITS <= zinc_transcript::pow::MAX_GRINDING_BITS,
+                "GRINDING_BITS exceeds the supported maximum"
+            )
+        }
+
         let per_poly_alphas = Self::sample_alphas(&mut transcript.fs_transcript, comm.batch_size);
         Self::verify_with_alphas::<C, CHECK_FOR_OVERFLOW>(
             transcript,
@@ -181,6 +189,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+        transcript.check_grinding(Zt::GRINDING_BITS)?;
         let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
 
         // Check 2: <w, q_1> == <s, b>
@@ -335,7 +344,10 @@ mod tests {
         mle::{DenseMultilinearExtension, MultilinearExtensionRand},
         univariate::binary::BinaryPoly,
     };
-    use zinc_transcript::traits::{ConstTranscribable, Transcript};
+    use zinc_transcript::{
+        pow::check_pow,
+        traits::{ConstTranscribable, Transcript},
+    };
     use zinc_utils::CHECKED;
 
     const INT_LIMBS: usize = U64::LIMBS;
@@ -359,6 +371,111 @@ mod tests {
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
+
+    type GrindZt = GrindZipTypes<N, K, M>;
+    type GrindC = IprsCode<GrindZt, TestIprsConfig, REP_FACTOR, CHECKED>;
+    type GrindZip = ZipPlus<GrindZt, GrindC>;
+
+    #[test]
+    fn grinding_enabled_proof_roundtrips() {
+        let num_vars = 10;
+        let (pp, comm, point_f, eval_f, mut transcript) =
+            setup_full_grinding_protocol::<Cfg, N, K, M>(num_vars);
+        let field_cfg = get_field_cfg::<GrindZt, Cfg>(&mut transcript.fs_transcript);
+
+        let result = GrindZip::verify::<_, CHECKED>(
+            &mut transcript,
+            &pp,
+            &comm,
+            &field_cfg,
+            &point_f,
+            &eval_f,
+        );
+        assert!(result.is_ok(), "grinding proof failed: {result:?}");
+        transcript
+            .check_eof()
+            .expect("grinding proof should be fully consumed");
+    }
+
+    #[test]
+    fn grinding_adds_one_nonce_without_reducing_queries() {
+        let num_vars = 10;
+        assert_eq!(
+            GrindZt::NUM_COLUMN_OPENINGS,
+            Zt::NUM_COLUMN_OPENINGS,
+            "the plumbing test must not take unproved query-reduction credit"
+        );
+
+        let (_, _, _, _, baseline) = setup_full_protocol::<Cfg, N, K, M>(num_vars);
+        let (_, _, _, _, grinded) = setup_full_grinding_protocol::<Cfg, N, K, M>(num_vars);
+        assert_eq!(
+            grinded.stream.get_ref().len(),
+            baseline.stream.get_ref().len() + size_of::<u64>(),
+            "enabled grinding must add exactly one fixed-width nonce"
+        );
+    }
+
+    #[test]
+    fn grinding_enabled_proof_rejects_a_proven_invalid_nonce() {
+        let num_vars = 10;
+        let (pp, poly) = setup_grind_test_params::<N, K, M>(num_vars);
+        let (hint, comm) = GrindZip::commit_single(&pp, &poly).expect("commit should succeed");
+        let point: Vec<Int<N>> = (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();
+
+        let mut prover = PcsProverTranscript::new_from_commitment(&comm);
+        let field_cfg = get_field_cfg::<GrindZt, Cfg>(&mut prover.fs_transcript);
+        let eval_f = GrindZip::prove_single::<Cfg, CHECKED>(
+            &mut prover,
+            &pp,
+            &poly,
+            &point,
+            &hint,
+            &field_cfg,
+        )
+        .expect("prove should succeed");
+        let point_f: Vec<F> = point.iter().map(|v| field_cfg.project(v)).collect();
+
+        // Replay the public verifier prefix exactly up to, but not including,
+        // the nonce. This gives the seed against which the tampered nonce is
+        // proven invalid instead of relying on a probabilistic byte flip.
+        let mut prefix = prover.clone().into_verification_transcript();
+        prefix.fs_transcript.absorb_bytes(&comm.root);
+        let prefix_field_cfg = get_field_cfg::<GrindZt, Cfg>(&mut prefix.fs_transcript);
+        let _alphas = GrindZip::sample_alphas(&mut prefix.fs_transcript, comm.batch_size);
+        let _b = prefix
+            .read_field_elements(&prefix_field_cfg, pp.num_rows)
+            .expect("b read should succeed");
+        if pp.num_rows > 1 {
+            let _: Vec<<GrindZt as ZipTypes>::Chal> =
+                prefix.fs_transcript.get_challenges(pp.num_rows);
+        }
+        let _combined_row: Vec<<GrindZt as ZipTypes>::CombR> = prefix
+            .read_const_many(pp.linear_code.row_len())
+            .expect("combined row read should succeed");
+        let seed = prefix.fs_transcript.derive_pow_seed();
+        let nonce_offset = usize::try_from(prefix.stream.position()).expect("offset fits usize");
+        let bad_nonce = (0u64..)
+            .find(|nonce| !check_pow(&seed, *nonce, GrindZt::GRINDING_BITS))
+            .expect("an invalid nonce exists");
+
+        let mut tampered = prover.into_verification_transcript();
+        tampered.stream.get_mut()[nonce_offset..nonce_offset + size_of::<u64>()]
+            .copy_from_slice(&bad_nonce.to_le_bytes());
+        tampered.fs_transcript.absorb_bytes(&comm.root);
+        let verify_field_cfg = get_field_cfg::<GrindZt, Cfg>(&mut tampered.fs_transcript);
+        let result = GrindZip::verify::<_, CHECKED>(
+            &mut tampered,
+            &pp,
+            &comm,
+            &verify_field_cfg,
+            &point_f,
+            &eval_f,
+        );
+        assert!(
+            matches!(result, Err(ZipError::Grinding(_))),
+            "expected the dedicated grinding error, got {result:?}"
+        );
+    }
 
     #[test]
     fn successful_verification_of_valid_proof() {

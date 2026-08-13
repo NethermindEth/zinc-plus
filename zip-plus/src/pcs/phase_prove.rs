@@ -45,7 +45,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ///    `row_len`) = `sum_i(sum_j(s_j * w'_ij))`, accumulated across all
     ///    polynomials
     /// 6. Writes `combined_row` to the transcript.
-    /// 7. Opens `NUM_COLUMN_OPENINGS` Merkle columns: for each, squeezes a
+    /// 7. Performs `GRINDING_BITS` of proof-of-work (a no-op when zero), then
+    ///    writes and absorbs the nonce.
+    /// 8. Opens `NUM_COLUMN_OPENINGS` Merkle columns: for each, squeezes a
     ///    column index, writes per-polynomial column values (Cw entries), and
     ///    appends the Merkle proof.
     ///
@@ -56,6 +58,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// [b written as F elements]
     /// [coeffs s sampled (or hardcoded [1])]
     /// [combined_row written as CombR]
+    /// [grinding nonce written as u64, only when GRINDING_BITS > 0]
     /// [column openings: idx, per-poly column values, merkle proof] × NUM_COLUMN_OPENINGS
     /// ```
     ///
@@ -97,6 +100,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         C::Integer: ConstTranscribable,
         Zt::CombR: MulByScalar<Zt::Chal>,
     {
+        const {
+            assert!(
+                Zt::GRINDING_BITS <= zinc_transcript::pow::MAX_GRINDING_BITS,
+                "GRINDING_BITS exceeds the supported maximum"
+            )
+        }
+
         let point = point
             .iter()
             .map(|v| field_cfg.project(v))
@@ -252,6 +262,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         transcript.write_const_many(&combined_row)?;
+        transcript.grind(Zt::GRINDING_BITS)?;
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
             Self::open_merkle_trees_for_column(transcript, commit_hint, column_idx)?;
