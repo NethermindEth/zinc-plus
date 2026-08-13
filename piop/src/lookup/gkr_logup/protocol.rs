@@ -448,6 +448,15 @@ where
     assert!(chunk_width > 0 && width % chunk_width == 0, "chunk_width must divide width");
     assert!(chunk_width < 32, "chunk_width must leave a u32 chunk index");
     let num_chunks = width / chunk_width;
+    // The witness fraction tree has num_chunks * witness_len leaves. Both
+    // the BitPoly path and this one only ever build power-of-two trees --
+    // BitPoly because its chunk count always is one -- so the padded case
+    // is untested rather than supported. Refuse the shape here, where the
+    // reason is legible, rather than emit a proof the verifier rejects.
+    assert!(
+        num_chunks.is_power_of_two(),
+        "width / chunk_width must be a power of two, got {num_chunks}"
+    );
     let num_lookups = instance.parent_columns.len();
     let n_vars = instance.n_vars;
     let witness_len = 1usize << n_vars;
@@ -995,6 +1004,30 @@ mod tests {
             verifier_sub.combined_polynomial[0],
             DynamicPolynomialF::new_trimmed(vec![expected])
         );
+    }
+
+    /// The witness fraction tree is built over `num_chunks · witness_len`
+    /// leaves and only the power-of-two case is exercised, so a chunk
+    /// count that is not one is refused where the reason is readable
+    /// rather than surfacing later as a verifier rejection.
+    #[test]
+    #[should_panic(expected = "must be a power of two")]
+    fn a_chunk_count_that_is_not_a_power_of_two_is_refused() {
+        let cfg = ();
+        let n_vars = 5;
+        let cells: Vec<i64> = (0..(1usize << n_vars)).map(|i| (i % 256) as i64).collect();
+        let parent = DenseMultilinearExtension::from_evaluations_vec(n_vars, cells, 0i64);
+        let a: F = F::from(7u64);
+        let instance = WordLookupInstance::<'_, F, i64> {
+            parent_columns: vec![&parent],
+            parent_column_indices: vec![0],
+            // 20 / 4 = 5 chunks.
+            table_type: LookupTableType::Word { width: 20, chunk_width: Some(4) },
+            projecting_element_f: &a,
+            n_vars,
+        };
+        let mut ts = Blake3Transcript::new();
+        let _ = prove_group_word::<F, i64>(&mut ts, &instance, &cfg);
     }
 
     /// The whole point: a cell outside the table cannot be proved. A
