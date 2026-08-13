@@ -35,9 +35,11 @@ use zinc_utils::{cfg_iter, cfg_into_iter, inner_transparent_field::InnerTranspar
 use super::gkr::{
     batched_gkr_fraction_prove, batched_gkr_fraction_verify, build_fraction_tree,
     build_fraction_tree_ones_leaf, gkr_fraction_prove, gkr_fraction_verify,
+    BatchedGkrFractionProveResult,
 };
 use super::structs::{
-    GkrLogupError, GkrLogupGroupMeta, GkrLogupGroupProof, GkrLogupGroupSubclaim,
+    GkrFractionProof, GkrLogupError, GkrLogupGroupMeta, GkrLogupGroupProof,
+    GkrLogupGroupSubclaim,
 };
 use super::tables::generate_bitpoly_table;
 
@@ -117,7 +119,6 @@ where
     // fraction tree's `leaf_q` construction (Step 5), avoiding any
     // intermediate `chunks_psi: Vec<Vec<Vec<F>>>` materialization.
     let a = instance.projecting_element_f.clone();
-    let one = F::one_with_cfg(field_cfg);
     let zero = F::zero_with_cfg(field_cfg);
 
     let chunks_idx: Vec<Vec<Vec<u32>>> = cfg_iter!(instance.parent_columns)
@@ -156,6 +157,130 @@ where
 
     // ---- Step 2: Build subtable T = ψ_a({0,1}^{<chunk_width}[X]) ----
     let subtable: Vec<F> = generate_bitpoly_table(chunk_width, &a, field_cfg);
+
+    // ---- Steps 3-8: multiplicities, challenges, fraction trees, GKR ----
+    //
+    // Shared with every other table type: from here to the lifts, the
+    // proof is a function of the chunk indices and the subtable alone.
+    let FractionPhase { agg_mults, witness_result, table_gkr } = prove_fraction_phase(
+        transcript,
+        &chunks_idx,
+        &subtable,
+        num_lookups,
+        num_chunks,
+        witness_len,
+        field_cfg,
+    );
+
+    // ---- Step 9: Polynomial-valued chunk lifts ----
+    //
+    // For each (ell, k), c_k'^(ell) = MLE[v_k^(ell)](r_inner) is a
+    // polynomial in F_q[X]_{<chunk_width}. We compute the parent's
+    // full lifted eval (D coefficients) and split into chunks of
+    // chunk_width coefficients each.
+    let r_full = &witness_result.eval_point;
+    assert!(
+        r_full.len() >= n_vars,
+        "GKR descent must have at least n_vars row variables"
+    );
+    let r_inner: Vec<F> = r_full[..n_vars].to_vec();
+
+    // Batch the L parent lifts so the eq(·, r_inner) table is built
+    // once and the bit walks run in parallel across the L parents.
+    let parent_lifts =
+        compute_binary_poly_lifts::<F, D>(&instance.parent_columns, &r_inner, field_cfg);
+    let chunk_lifts: Vec<Vec<DynamicPolynomialF<F>>> = parent_lifts
+        .into_iter()
+        .map(|mut parent_lifted| {
+            // `compute_binary_poly_lifts` returns trimmed polys; if the parent
+            // column has structurally-zero high bits across all rows (e.g.
+            // SHA's `S = w >> k` columns), the trimmed length can be < width.
+            // Zero-pad up to `width` so chunk slicing always sees full chunks.
+            if parent_lifted.coeffs.len() < width {
+                parent_lifted.coeffs.resize(width, zero.clone());
+            }
+            (0..num_chunks)
+                .map(|k| {
+                    let lo = k * chunk_width;
+                    let hi = lo + chunk_width;
+                    DynamicPolynomialF::new_trimmed(parent_lifted.coeffs[lo..hi].to_vec())
+                })
+                .collect()
+        })
+        .collect();
+
+    // ---- Step 10: Combine chunks → parent claim at r_inner ----
+    let combined_polynomial: Vec<DynamicPolynomialF<F>> = (0..num_lookups)
+        .map(|ell| combine_chunks::<F>(&chunk_lifts[ell], chunk_width, width, &zero))
+        .collect();
+
+    // ---- Sanity (debug) ----
+    debug_assert!({
+        // Multiplicity sum invariant.
+        let expected_per_lookup =
+            F::from_with_cfg((num_chunks * witness_len) as u64, field_cfg);
+        agg_mults.iter().all(|agg| {
+            let sum: F = agg.iter().cloned().fold(zero.clone(), |a, b| a + &b);
+            sum == expected_per_lookup
+        })
+    });
+
+    let meta = GkrLogupGroupMeta {
+        table_type: instance.table_type.clone(),
+        num_lookups,
+        num_chunks,
+        chunk_width,
+        witness_len,
+        parent_columns: instance.parent_column_indices.clone(),
+    };
+    let proof = GkrLogupGroupProof {
+        chunk_lifts,
+        aggregated_multiplicities: agg_mults,
+        witness_gkr: witness_result.proof,
+        table_gkr,
+        bin_lifts_at_r_inner: Vec::new(),
+    };
+    let subclaim = GkrLogupGroupSubclaim {
+        r_inner,
+        combined_polynomial,
+        parent_columns: meta.parent_columns.clone(),
+    };
+    Ok((proof, meta, subclaim))
+}
+
+/// The half of a lookup group's proof that does not care what the parent
+/// columns are made of: multiplicities over the chunk indices, the
+/// transcript's challenges, the witness and table fraction trees, and
+/// both GKR runs.
+///
+/// Everything above this point differs per table type -- how a column's
+/// cells become chunk indices, and which subtable those index into --
+/// and everything below it differs again, in how the parent's lift is
+/// taken. In between, a chunk index is a chunk index.
+pub(super) struct FractionPhase<F: PrimeField> {
+    pub agg_mults: Vec<Vec<F>>,
+    pub witness_result: BatchedGkrFractionProveResult<F>,
+    pub table_gkr: GkrFractionProof<F>,
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+pub(super) fn prove_fraction_phase<F>(
+    transcript: &mut impl Transcript,
+    chunks_idx: &[Vec<Vec<u32>>],
+    subtable: &[F],
+    num_lookups: usize,
+    num_chunks: usize,
+    witness_len: usize,
+    field_cfg: &F::Config,
+) -> FractionPhase<F>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
+    F::Config: Sync,
+{
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
     let table_len = subtable.len();
 
     // ---- Step 3: Multiplicities via per-ell histogram ----
@@ -252,80 +377,7 @@ where
     // ---- Step 8: Table GKR ----
     let (table_gkr, _table_eval_point) = gkr_fraction_prove(transcript, &table_tree, field_cfg);
 
-    // ---- Step 9: Polynomial-valued chunk lifts ----
-    //
-    // For each (ell, k), c_k'^(ell) = MLE[v_k^(ell)](r_inner) is a
-    // polynomial in F_q[X]_{<chunk_width}. We compute the parent's
-    // full lifted eval (D coefficients) and split into chunks of
-    // chunk_width coefficients each.
-    let r_full = &witness_result.eval_point;
-    assert!(
-        r_full.len() >= n_vars,
-        "GKR descent must have at least n_vars row variables"
-    );
-    let r_inner: Vec<F> = r_full[..n_vars].to_vec();
-
-    // Batch the L parent lifts so the eq(·, r_inner) table is built
-    // once and the bit walks run in parallel across the L parents.
-    let parent_lifts =
-        compute_binary_poly_lifts::<F, D>(&instance.parent_columns, &r_inner, field_cfg);
-    let chunk_lifts: Vec<Vec<DynamicPolynomialF<F>>> = parent_lifts
-        .into_iter()
-        .map(|mut parent_lifted| {
-            // `compute_binary_poly_lifts` returns trimmed polys; if the parent
-            // column has structurally-zero high bits across all rows (e.g.
-            // SHA's `S = w >> k` columns), the trimmed length can be < width.
-            // Zero-pad up to `width` so chunk slicing always sees full chunks.
-            if parent_lifted.coeffs.len() < width {
-                parent_lifted.coeffs.resize(width, zero.clone());
-            }
-            (0..num_chunks)
-                .map(|k| {
-                    let lo = k * chunk_width;
-                    let hi = lo + chunk_width;
-                    DynamicPolynomialF::new_trimmed(parent_lifted.coeffs[lo..hi].to_vec())
-                })
-                .collect()
-        })
-        .collect();
-
-    // ---- Step 10: Combine chunks → parent claim at r_inner ----
-    let combined_polynomial: Vec<DynamicPolynomialF<F>> = (0..num_lookups)
-        .map(|ell| combine_chunks::<F>(&chunk_lifts[ell], chunk_width, width, &zero))
-        .collect();
-
-    // ---- Sanity (debug) ----
-    debug_assert!({
-        // Multiplicity sum invariant.
-        let expected_per_lookup =
-            F::from_with_cfg((num_chunks * witness_len) as u64, field_cfg);
-        agg_mults.iter().all(|agg| {
-            let sum: F = agg.iter().cloned().fold(zero.clone(), |a, b| a + &b);
-            sum == expected_per_lookup
-        })
-    });
-
-    let meta = GkrLogupGroupMeta {
-        table_type: instance.table_type.clone(),
-        num_lookups,
-        num_chunks,
-        chunk_width,
-        witness_len,
-        parent_columns: instance.parent_column_indices.clone(),
-    };
-    let proof = GkrLogupGroupProof {
-        chunk_lifts,
-        aggregated_multiplicities: agg_mults,
-        witness_gkr: witness_result.proof,
-        table_gkr,
-        bin_lifts_at_r_inner: Vec::new(),
-    };
-    let subclaim = GkrLogupGroupSubclaim {
-        r_inner,
-        combined_polynomial,
-        parent_columns: meta.parent_columns.clone(),
-    };
-    Ok((proof, meta, subclaim))
+    FractionPhase { agg_mults, witness_result, table_gkr }
 }
 
 // ---------------------------------------------------------------------------
