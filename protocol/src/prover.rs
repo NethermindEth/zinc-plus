@@ -255,6 +255,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     /// Witness-int lifted evaluations at the pointer-query points
     /// `r_A` / `r_B` (empty when no composed reads are declared).
     pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    word_int_lifted: Vec<DynamicPolynomialF<F>>,
     pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -285,6 +286,7 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     lifted_evals: Vec<DynamicPolynomialF<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    word_int_lifted: Vec<DynamicPolynomialF<F>>,
     pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -1035,8 +1037,15 @@ impl_with_type_bounds!(ProverSumchecked
             }
         }
 
-        let lookup_r_inners: Vec<Vec<F>> =
-            subclaims.iter().map(|s| s.r_inner.clone()).collect();
+        // Only the binary groups' r_inners reach step 7's bin reducer: a
+        // Word group carries no bin lifts and is discharged by its own int
+        // opening, so feeding it here would claim an empty bin lift.
+        let lookup_r_inners: Vec<Vec<F>> = subclaims
+            .iter()
+            .zip(group_meta.iter())
+            .filter(|(_, meta)| !matches!(meta.table_type, LookupTableType::Word { .. }))
+            .map(|(s, _)| s.r_inner.clone())
+            .collect();
         Ok(ProverLookupProved {
             word_lookup_point,
             base: self.base,
@@ -1292,6 +1301,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             r_0: self.r_0,
             lifted_evals,
             pq_int_lifted_at_r_a,
+            word_int_lifted,
             pq_int_lifted_at_r_b,
         })
     }
@@ -1322,7 +1332,15 @@ impl_with_type_bounds!(ProverLifted
         let num_total_bin = total.num_binary_poly_cols();
         let num_wit_bin = num_total_bin - num_pub_bin;
 
-        let n_groups = self.lookup_proof.groups.len();
+        // Only groups over binary columns want the bin reducer; a Word
+        // group is discharged by its own int opening, so a lookup set
+        // made only of Word groups leaves the bin side untouched.
+        let n_groups = self
+            .lookup_proof
+            .group_meta
+            .iter()
+            .filter(|meta| !matches!(meta.table_type, LookupTableType::Word { .. }))
+            .count();
         let (bin_reducer_proof, bin_lifts_at_r_star) = if n_groups == 0
             || self.base.hint_bin.is_none()
         {
@@ -1476,6 +1494,7 @@ impl_with_type_bounds!(ProverLifted
             bin_lifts_at_r_star,
             pointer_query_proof: self.pointer_query_proof,
             pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
+            word_int_lifted: self.word_int_lifted,
             pq_int_lifted_at_r_b: self.pq_int_lifted_at_r_b,
         })
     }
@@ -1527,6 +1546,7 @@ impl_with_type_bounds!(ProverPcsOpened
             bin_lifts_at_r_star: self.bin_lifts_at_r_star,
             pointer_query_proof: self.pointer_query_proof,
             pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
+            word_int_lifted: self.word_int_lifted,
             pq_int_lifted_at_r_b: self.pq_int_lifted_at_r_b,
         })
     }
@@ -2094,6 +2114,7 @@ where
         bin_lifts_at_r_star,
         pointer_query_proof: None,
         pq_int_lifted_at_r_a: Vec::new(),
+        word_int_lifted: Vec::new(),
         pq_int_lifted_at_r_b: Vec::new(),
     })
 }
@@ -2987,6 +3008,7 @@ where
         bin_lifts_at_r_star,
         pointer_query_proof: None,
         pq_int_lifted_at_r_a: Vec::new(),
+        word_int_lifted: Vec::new(),
         pq_int_lifted_at_r_b: Vec::new(),
     };
     if let Some(t) = timings.as_mut() {

@@ -214,6 +214,87 @@ where
     }
 }
 
+/// Synthetic Word-lookup UAIR: four witness integer columns, all
+/// declared as a single `Word { width: 16, chunk_width: 8 }` lookup
+/// group. The algebraic constraint is trivial -- the range check is the
+/// whole point -- so a proof of this UAIR is exactly the claim that
+/// every cell of every int column lies in `[0, 2^16)`.
+///
+/// This is the shape a range check takes: a slack cell committed as an
+/// integer, declared to the table, and refused when it does not fit.
+#[derive(Clone, Debug)]
+pub struct IntWordLookupUair<R>(PhantomData<R>);
+
+/// How many integer columns [`IntWordLookupUair`] range-checks.
+pub const INT_WORD_COLS: usize = 4;
+/// The width [`IntWordLookupUair`] range-checks to.
+pub const INT_WORD_WIDTH: usize = 16;
+
+impl<R> Uair for IntWordLookupUair<R>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, INT_WORD_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = (0..INT_WORD_COLS)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: LookupTableType::Word {
+                    width: INT_WORD_WIDTH,
+                    chunk_width: Some(8),
+                },
+            })
+            .collect();
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the lookup carries the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for IntWordLookupUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let bound: u32 = 1 << INT_WORD_WIDTH;
+        let cols: Vec<DenseMultilinearExtension<R>> = (0..INT_WORD_COLS)
+            .map(|_| {
+                let evals: Vec<R> = (0..row_count)
+                    .map(|_| R::from(rng.next_u32() % bound))
+                    .collect();
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+            })
+            .collect();
+        UairTrace {
+            int: cols.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// No-lookup control for [`BinLookup16Uair`]: identical 16-column layout
 /// and trivial constraint but **no lookup specs**. With this UAIR step 4b
 /// early-returns and the step-7 reducer is skipped, so an A/B against the

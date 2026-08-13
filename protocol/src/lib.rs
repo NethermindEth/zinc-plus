@@ -113,6 +113,11 @@ pub struct Proof<F: PrimeField> {
     /// Empty when `pointer_query_proof` is `None`.
     pub pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
     pub pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
+    /// Witness-int lifted evaluations at the Word lookup group's
+    /// `r_inner`, discharged by one extra int-batch opening. Empty when
+    /// the UAIR declares no Word lookup. This is what ties the group's
+    /// parent claim to the integer columns actually committed.
+    pub word_int_lifted: Vec<DynamicPolynomialF<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -144,6 +149,11 @@ where
 
         let (lookup_proof, bytes) =
             GkrLogupLookupProof::<F>::read_transcription_bytes_subset(bytes);
+
+        // word_int_lifted: always present, empty when there is no Word
+        // group, so it needs no presence flag of its own.
+        let (word_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        let word_int_lifted = word_vec.0;
 
         // [reducer_present: u8] [reducer_proof? : subset] [bin_lifts? : subset]
         let reducer_present = bytes[0];
@@ -188,6 +198,7 @@ where
             pointer_query_proof,
             pq_int_lifted_at_r_a,
             pq_int_lifted_at_r_b,
+            word_int_lifted,
         }
     }
 
@@ -222,6 +233,11 @@ where
 
         // lookup_proof: u32 length prefix + GkrLogupLookupProof encoding
         let buf = self.lookup_proof.write_transcription_bytes_subset(buf);
+
+        // word_int_lifted: u32 length prefix + DynamicPolyVecF encoding,
+        // empty when no Word group was proved.
+        let buf = DynamicPolyVecF::reinterpret(&self.word_int_lifted)
+            .write_transcription_bytes_subset(buf);
 
         // [reducer_present: u8] then optional reducer_proof + bin_lifts.
         let buf = match &self.bin_reducer_proof {
@@ -288,6 +304,8 @@ where
             + witness_vec.get_num_bytes()
             + GkrLogupLookupProof::<F>::LENGTH_NUM_BYTES
             + self.lookup_proof.get_num_bytes()
+            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+            + DynamicPolyVecF::reinterpret(&self.word_int_lifted).get_num_bytes()
             + 1 // reducer_present flag
             + match &self.bin_reducer_proof {
                 None => 0,
@@ -920,7 +938,7 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
-        BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair,
+        BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair, IntWordLookupUair,
         BitOpRotUair, BrokenPointerHopUair, EC_FP_INT_LIMBS, GenerateRandomTrace,
         POINTER_HOP_NUM_VARS, PointerHopUair, Sha256CompressionSliceUair, Sha256Ideal,
         ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
@@ -1381,6 +1399,52 @@ mod tests {
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test of the Word lookup over integer columns: four
+    /// witness int columns, all declared as one `Word{16, 8}` group.
+    /// Exercises prove_group_word, the int parent binding against the
+    /// witness-int lifted evaluations, the extra int opening at the
+    /// group's r_inner, and the proof serialization round trip.
+    #[test]
+    fn test_e2e_int_word_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Negative test: corrupting the witness-int lifted evaluation the
+    /// Word group's parent claim binds against must make verification
+    /// fail. Without that binding the lookup would prove a range for
+    /// numbers unrelated to the committed columns.
+    #[test]
+    fn test_e2e_int_word_lookup_tampered_lift_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let c = &mut proof.word_int_lifted[0].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(res.is_err(), "a tampered word lift must not verify");
+            },
         );
     }
 
