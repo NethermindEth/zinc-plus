@@ -20,8 +20,8 @@ use zinc_piop::{
         prepare_booleanity_group,
     },
     lookup::gkr_logup::{
-        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, combine_chunks,
-        compute_binary_poly_lifts, prove_group,
+        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, WordLookupInstance,
+        combine_chunks, compute_binary_poly_lifts, prove_group, prove_group_word,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -209,6 +209,7 @@ pub struct ProverLookupProved<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
+    word_lookup_point: Option<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
 }
@@ -224,6 +225,7 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
+    word_lookup_point: Option<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
 
@@ -242,6 +244,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
+    word_lookup_point: Option<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
     mp_proof: MultipointEvalProof<F>,
@@ -829,6 +832,10 @@ impl_with_type_bounds!(ProverSumchecked
         let mut groups = Vec::new();
         let mut group_meta = Vec::new();
         let mut subclaims: Vec<GkrLogupGroupSubclaim<F>> = Vec::new();
+        // The Word group's r_inner, if the UAIR range-checks anything:
+        // discharged by one extra int opening, as the pointer query
+        // discharges its endpoints.
+        let mut word_lookup_point: Option<Vec<F>> = None;
 
         if !lookup_specs.is_empty() {
             // MVP: group all specs sharing the same BitPoly{width,chunk_width}
@@ -850,7 +857,70 @@ impl_with_type_bounds!(ProverSumchecked
             let pub_cols = self.base.uair_signature.public_cols();
             let num_pub_bin = pub_cols.num_binary_poly_cols();
 
+            // Witness int columns, for Word groups: a Word parent is an
+            // integer column, so its indices are counted past the binary
+            // and arbitrary groups.
+            let total_for_int = self.base.uair_signature.total_cols();
+            let num_int_offset = add!(
+                add!(
+                    total_for_int.num_binary_poly_cols(),
+                    total_for_int.num_arbitrary_poly_cols()
+                ),
+                pub_cols.num_int_cols()
+            );
+
             for (table_type, parent_indices) in grouped {
+                // A Word group reads integer columns and is discharged by
+                // an extra int opening at its own r_inner, the way the
+                // pointer query discharges r_A / r_B. Stage one takes a
+                // single Word group, which is what one width and chunk
+                // width give: every column range-checked the same way
+                // groups together.
+                if let LookupTableType::Word { .. } = table_type {
+                    if word_lookup_point.is_some() {
+                        return Err(ProtocolError::Lookup(
+                            zinc_piop::lookup::LookupError::NotImplemented,
+                        ));
+                    }
+                    let mut int_refs = Vec::with_capacity(parent_indices.len());
+                    for &idx in &parent_indices {
+                        if idx < num_int_offset {
+                            return Err(ProtocolError::Lookup(
+                                zinc_piop::lookup::LookupError::NotImplemented,
+                            ));
+                        }
+                        let int_idx = idx - num_int_offset;
+                        if int_idx >= witness_trace.int.len() {
+                            return Err(ProtocolError::Lookup(
+                                zinc_piop::lookup::LookupError::NotImplemented,
+                            ));
+                        }
+                        int_refs.push(&witness_trace.int[int_idx]);
+                    }
+                    let instance = WordLookupInstance::<'_, F, Zt::Int> {
+                        parent_columns: int_refs,
+                        parent_column_indices: parent_indices.clone(),
+                        table_type,
+                        projecting_element_f: &self.projecting_element_f,
+                        n_vars: self.base.num_vars,
+                    };
+                    let (group_proof, meta, sub) = prove_group_word::<F, Zt::Int>(
+                        &mut self.base.pcs_transcript.fs_transcript,
+                        &instance,
+                        &self.field_cfg,
+                    )
+                    .map_err(|_| {
+                        ProtocolError::Lookup(
+                            zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
+                        )
+                    })?;
+                    word_lookup_point = Some(sub.r_inner.clone());
+                    groups.push(group_proof);
+                    group_meta.push(meta);
+                    subclaims.push(sub);
+                    continue;
+                }
+
                 // Validate: all parent indices must be witness binary_poly.
                 let total = self.base.uair_signature.total_cols();
                 let num_total_bin = total.num_binary_poly_cols();
@@ -968,6 +1038,7 @@ impl_with_type_bounds!(ProverSumchecked
         let lookup_r_inners: Vec<Vec<F>> =
             subclaims.iter().map(|s| s.r_inner.clone()).collect();
         Ok(ProverLookupProved {
+            word_lookup_point,
             base: self.base,
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
@@ -1095,6 +1166,7 @@ impl_with_type_bounds!(ProverLookupProved
         )?;
 
         Ok(ProverMultipointEvaled {
+            word_lookup_point: self.word_lookup_point,
             base: self.base,
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
@@ -1137,6 +1209,38 @@ impl_with_type_bounds!(ProverMultipointEvaled
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
+        // Word lookup: witness-int lifted evaluations at the group's
+        // r_inner, absorbed after the r_0 evals and opened in step 7.
+        // The lookup proved a claim about the parents' chunks; this is
+        // what ties that claim to the columns actually committed.
+        let word_int_lifted: Vec<DynamicPolynomialF<F>> = match &self.word_lookup_point {
+            None => Vec::new(),
+            Some(point) => {
+                let sig = &self.base.uair_signature;
+                let witness_int_offset = add!(
+                    add!(
+                        sig.total_cols().num_binary_poly_cols(),
+                        sig.total_cols().num_arbitrary_poly_cols()
+                    ),
+                    sig.public_cols().num_int_cols()
+                );
+                let lifted = compute_lifted_evals::<F, D>(
+                    point,
+                    &self.base.trace.binary_poly,
+                    &self.projected_trace,
+                    &self.field_cfg,
+                );
+                let witness_int: Vec<_> = lifted[witness_int_offset..].to_vec();
+                for bar_u in &witness_int {
+                    self.base
+                        .pcs_transcript
+                        .fs_transcript
+                        .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+                }
+                witness_int
+            }
+        };
+
         // Pointer query: witness-int lifted evaluations at r_A / r_B,
         // absorbed after the r_0 evals, opened in step 7.
         let (pq_int_lifted_at_r_a, pq_int_lifted_at_r_b) = match &self.pq_points {
@@ -1174,6 +1278,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
         };
 
         Ok(ProverLifted {
+            word_lookup_point: self.word_lookup_point,
             base: self.base,
             field_cfg: self.field_cfg,
             ic_proof: self.ic_proof,
@@ -1314,6 +1419,25 @@ impl_with_type_bounds!(ProverLifted
                 self.base.pp_int,
                 &witness_trace.int,
                 &self.r_0,
+                hint_int,
+                &self.field_cfg,
+            )?;
+        }
+
+        // Word lookup: discharge the group's parent claim with one more
+        // int-batch opening at its r_inner. Same stage-one shape as the
+        // pointer query below, and the same future fold.
+        if let Some(point) = &self.word_lookup_point {
+            let hint_int = self
+                .base
+                .hint_int
+                .as_ref()
+                .expect("a Word lookup requires witness int columns");
+            let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut self.base.pcs_transcript,
+                self.base.pp_int,
+                &witness_trace.int,
+                point,
                 hint_int,
                 &self.field_cfg,
             )?;
