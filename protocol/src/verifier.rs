@@ -81,7 +81,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<Zt::Fmod>>,
     proof_booleanity: Option<BooleanityProof<Zt::Fmod>>,
-    proof_affine_booleanity: Option<BooleanityProof<Zt::Fmod>>,
+    proof_affine_virtual: Option<AffineVirtualProof<Zt::Fmod>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<Zt::Fmod>>,
     proof_cpr_fq: Vec<CombinedPolyResolverProof<Zt::Fmod>>,
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<Zt::Fmod>>,
@@ -117,7 +117,7 @@ pub struct VerifierPrimeProjected<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
-    proof_affine_booleanity: Option<BooleanityProof<C::Element>>,
+    proof_affine_virtual: Option<AffineVirtualProof<C::Element>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<C::Element>>,
     proof_cpr_fq: Vec<CombinedPolyResolverProof<C::Element>>,
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<C::Element>>,
@@ -166,7 +166,7 @@ pub struct VerifierIdealChecked<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
-    proof_affine_booleanity: Option<BooleanityProof<C::Element>>,
+    proof_affine_virtual: Option<AffineVirtualProof<C::Element>>,
     /// Per-prime CPR proofs (one per declared prime).
     proof_cpr_fq: Vec<CombinedPolyResolverProof<C::Element>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime).
@@ -224,7 +224,7 @@ pub struct VerifierEvalProjected<
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<Zt::Fmod>>>,
     proof_lookup_proof: Option<BatchedLookupProof<C::Element>>,
     proof_booleanity: Option<BooleanityProof<C::Element>>,
-    proof_affine_booleanity: Option<BooleanityProof<C::Element>>,
+    proof_affine_virtual: Option<AffineVirtualProof<C::Element>>,
     /// Per-prime CPR proofs (one per declared prime).
     proof_cpr_fq: Vec<CombinedPolyResolverProof<C::Element>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime),
@@ -280,6 +280,9 @@ pub struct VerifierSumchecked<
     /// Affine-virtual bit-slice evaluations carried separately from the
     /// committed-column Booleanity proof.
     affine_bool_bit_slice_evals: Option<Vec<C::Element>>,
+    /// One claimed alpha-prime projection for every unique shifted witness
+    /// source used by the affine virtual specs, in public-signature order.
+    affine_shifted_witness_evals: Vec<C::Element>,
     /// Fresh challenge sampled after `bit_slice_evals` were absorbed by
     /// booleanity's `finalize_verifier`. Consumed in step 5 (bridge
     /// scalars) and step 6 (appended $\alpha'$-projected open_evals).
@@ -525,7 +528,7 @@ where
             proof_witness_lifted_evals_pp: proof.witness_lifted_evals_pp,
             proof_lookup_proof: proof.lookup_proof,
             proof_booleanity: proof.booleanity_proof,
-            proof_affine_booleanity: proof.affine_booleanity_proof,
+            proof_affine_virtual: proof.affine_virtual_proof,
             proof_ideal_checks_fq: proof.ideal_checks_fq,
             proof_cpr_fq: proof.cpr_proofs_fq,
             proof_combined_sumchecks_fq: proof.combined_sumchecks_fq,
@@ -624,7 +627,7 @@ where
                 Some(p) => Some(project!(&field_cfg, p)?),
                 None => None,
             },
-            proof_affine_booleanity: match &self.proof_affine_booleanity {
+            proof_affine_virtual: match &self.proof_affine_virtual {
                 Some(p) => Some(project!(&field_cfg, p)?),
                 None => None,
             },
@@ -764,7 +767,7 @@ where
             proof_witness_lifted_evals_pp: self.proof_witness_lifted_evals_pp,
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
-            proof_affine_booleanity: self.proof_affine_booleanity,
+            proof_affine_virtual: self.proof_affine_virtual,
             proof_cpr_fq: self.proof_cpr_fq,
             proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
             proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
@@ -854,7 +857,7 @@ where
             proof_witness_lifted_evals_pp: self.proof_witness_lifted_evals_pp,
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
-            proof_affine_booleanity: self.proof_affine_booleanity,
+            proof_affine_virtual: self.proof_affine_virtual,
             proof_cpr_fq: self.proof_cpr_fq,
             proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
             proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
@@ -1023,9 +1026,15 @@ where
             bool_verifier_ancillary,
             &self.field_cfg,
         )?;
+        let (affine_booleanity_proof, affine_shifted_witness_evals) = self
+            .proof_affine_virtual
+            .take()
+            .map_or((None, Vec::new()), |proof| {
+                (Some(proof.booleanity_proof), proof.shifted_witness_evals)
+            });
         let affine_bool_bit_slice_evals = finalize_booleanity_verifier_group(
             &mut self.base.pcs_transcript.fs_transcript,
-            self.proof_affine_booleanity.take(),
+            affine_booleanity_proof,
             q_md_subclaims.point(),
             q_md_subclaims.expected_evaluations(),
             &mut bool_group_idx,
@@ -1100,6 +1109,7 @@ where
             cpr_down_evals_fq,
             bool_bit_slice_evals,
             affine_bool_bit_slice_evals,
+            affine_shifted_witness_evals,
             alpha_prime_f,
             proof_commitments: self.proof_commitments,
             proof_multipoint_eval: self.proof_multipoint_eval,
@@ -1132,7 +1142,8 @@ where
     /// These collapse the bit-slice claims at $r^\star$ into the
     /// multipoint-eval consistency equation; the matching
     /// $\alpha'$-projected `open_evals` are produced in step 6.
-    /// `down_evals` are passed through unchanged.
+    /// Shifted witness sources append signature-derived claims to
+    /// `down_evals`; shifted public sources are recomputed directly.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
@@ -1162,6 +1173,26 @@ where
         let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
         let num_affine_virtuals = sig.affine_virtual_specs().len();
         let alpha_prime = self.alpha_prime_f.as_ref();
+        let affine_witness_shifts = affine_virtual_witness_shifts(&sig);
+        let expected_shift_evals = affine_witness_shifts.len();
+        if self.affine_shifted_witness_evals.len() != expected_shift_evals {
+            return Err(ProtocolError::AffineVirtualShiftEvalsLengthMismatch {
+                got: self.affine_shifted_witness_evals.len(),
+                expected: expected_shift_evals,
+            });
+        }
+
+        if !self.affine_shifted_witness_evals.is_empty() {
+            let mut transcription_buf = vec![0; C::Integer::NUM_BYTES];
+            self.base
+                .pcs_transcript
+                .fs_transcript
+                .absorb_field_element_slice(
+                    &self.field_cfg,
+                    &self.affine_shifted_witness_evals,
+                    &mut transcription_buf,
+                );
+        }
 
         let witness_bridge_evals = if num_wit_bin == 0 {
             Vec::new()
@@ -1179,19 +1210,44 @@ where
         if num_affine_virtuals > 0 {
             let alpha_prime = alpha_prime.ok_or(ProtocolError::BooleanityProofMissing)?;
             let alpha_powers = powers(&self.field_cfg, alpha_prime, D);
-            let mut source_bridge_evals: Vec<C::Element> = self
+            let public_bridge_mles: Vec<DenseMultilinearExtension<C::Element>> = self
                 .base
                 .public_trace
                 .binary_poly
                 .iter()
-                .map(|col| {
-                    project_binary_col_at_field::<C, D>(col, &alpha_powers, &self.field_cfg)
-                        .evaluate(&self.field_cfg, &self.cpr_eval_point)
+                .map(|col| project_binary_col_at_field::<C, D>(col, &alpha_powers, &self.field_cfg))
+                .collect();
+            let mut source_bridge_evals: Vec<C::Element> = public_bridge_mles
+                .iter()
+                .map(|mle| {
+                    mle.evaluate(&self.field_cfg, &self.cpr_eval_point)
                         .map_err(ProtocolError::AffineVirtualSourceProjection)
                 })
                 .collect::<Result<_, _>>()?;
             debug_assert_eq!(source_bridge_evals.len(), num_pub_bin);
             source_bridge_evals.extend(witness_bridge_evals.iter().cloned());
+
+            let mut witness_shift_evals = self.affine_shifted_witness_evals.iter();
+            let shifted_source_bridge_evals = affine_virtual_shifts(&sig)
+                .into_iter()
+                .map(|shift| {
+                    let value = if shift.source_col < num_pub_bin {
+                        evaluate_shifted_mle(
+                            &public_bridge_mles[shift.source_col],
+                            &self.cpr_eval_point,
+                            shift.row_shift,
+                            &self.field_cfg,
+                        )?
+                    } else {
+                        witness_shift_evals
+                            .next()
+                            .expect("witness shift count checked above")
+                            .clone()
+                    };
+                    Ok((shift, value))
+                })
+                .collect::<Result<Vec<_>, MultipointEvalError<C::Element>>>()?;
+            debug_assert!(witness_shift_evals.next().is_none());
 
             let affine_bridge_evals = collapse_bit_slice_evals::<C, D>(
                 self.affine_bool_bit_slice_evals
@@ -1204,6 +1260,7 @@ where
             let expected_affine_evals = expected_affine_virtual_bridge_evals::<C, _, D>(
                 &sig,
                 &source_bridge_evals,
+                &shifted_source_bridge_evals,
                 alpha_prime,
                 &self.field_cfg,
             );
@@ -1228,6 +1285,8 @@ where
             .cloned()
             .chain(witness_bridge_evals)
             .collect();
+        let mut q_down_evals = self.cpr_down_evals.clone();
+        q_down_evals.extend(self.affine_shifted_witness_evals.iter().cloned());
 
         // Per-prime families: zero-pad up_evals to match Q's column count
         //
@@ -1243,8 +1302,17 @@ where
                 up_i
             })
             .collect();
+        let fq_down_evals_ext: Vec<Vec<C::Element>> = (0..n_fq)
+            .map(|prime_idx| {
+                let family_idx = add!(prime_idx, 1);
+                let zero_i = self.all_field_cfgs[family_idx].zero();
+                let mut down_i = self.cpr_down_evals_fq[prime_idx].clone();
+                down_i.extend((0..expected_shift_evals).map(|_| zero_i.clone()));
+                down_i
+            })
+            .collect();
 
-        let shifts = self.base.uair_signature.shifts();
+        let shifts = multipoint_shifts_with_affine_virtuals(&sig);
         let num_vars = self.base.num_vars;
         let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
 
@@ -1265,7 +1333,7 @@ where
             eval_point: &self.cpr_eval_point,
             up_evals: &q_up_evals,
             bit_op_evals: &self.cpr_bit_op_evals,
-            down_evals: &self.cpr_down_evals,
+            down_evals: &q_down_evals,
         });
 
         for (prime_idx, up_evals) in fq_up_evals_ext.iter().enumerate() {
@@ -1277,7 +1345,7 @@ where
                 eval_point: &self.cpr_eval_points_fq[prime_idx],
                 up_evals,
                 bit_op_evals: &self.cpr_bit_op_evals_fq[prime_idx],
-                down_evals: &self.cpr_down_evals_fq[prime_idx],
+                down_evals: &fq_down_evals_ext[prime_idx],
             });
         }
 
@@ -1285,7 +1353,7 @@ where
             &mut self.base.pcs_transcript.fs_transcript,
             all_proofs,
             all_families,
-            shifts,
+            &shifts,
             num_vars,
             &q_star_cfg,
         )?
@@ -1395,6 +1463,7 @@ where
         let num_wit_bin = wit_cols.num_binary_poly_cols();
         let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
         let num_wit_int = wit_cols.num_int_cols();
+        let multipoint_shifts = multipoint_shifts_with_affine_virtuals(&self.base.uair_signature);
 
         // Since the entire vector is absorbed into the FS transcript below,
         // prevent a malicious prover from adding entries not tied to a
@@ -1532,7 +1601,7 @@ where
                 &self.projecting_elements[0],
                 &self.field_cfg,
             )?,
-            self.base.uair_signature.shifts(),
+            &multipoint_shifts,
             &self.field_cfg,
         )?;
 
@@ -1571,7 +1640,7 @@ where
                     &self.projecting_elements[family_idx],
                     cfg_i,
                 )?,
-                self.base.uair_signature.shifts(),
+                &multipoint_shifts,
                 cfg_i,
             )?;
         }

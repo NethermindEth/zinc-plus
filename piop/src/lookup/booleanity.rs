@@ -54,11 +54,6 @@
 //!   b_{j,i}\,\alpha'^{\,i}$ (where $b_{j,i} = \widetilde{v_{j,i}}(r^\star)$
 //!   from `bit_slice_evals`).
 //!
-//! No `ShiftSpec` references the appended slot, so down-evals / shifts
-//! pass through unchanged: row-shifted projections of witness binary-poly
-//! columns inherit booleanity from the un-shifted, $\psi_a$-projected
-//! slot they already reference in the multipoint-eval sumcheck.
-//!
 //! Multipoint-eval / PCS is $\psi$-oblivious, so the appended slot
 //! combined with the lifted-evals step evaluating the corresponding
 //! $\bar u_j$ at $\alpha'$ enforces
@@ -67,14 +62,13 @@
 //! not the true bit-decomposition then equality fails with probability
 //! $\le (D-1)/|F|$, so the verifier rejects.
 //!
-//! For an unshifted affine virtual, the protocol collapses its bit-slice
-//! claims at the same $\alpha'$ and compares the result directly with the
-//! declared affine combination of source-column collapses at $r^\star$.
-//! Public source collapses are recomputed from the public trace; witness source
+//! For an affine virtual, the protocol collapses its bit-slice claims at the
+//! same $\alpha'$ and compares the result with the declared affine combination
+//! of source-column collapses at $r^\star$. Public source collapses, including
+//! shifted ones, are recomputed from the public trace. Unshifted witness
 //! collapses are the committed-column values bound through the MP/PCS chain
-//! above. Shifted affine terms require a separate row-shift opening and are
-//! rejected when affine specs are attached to the UAIR signature until that
-//! binding is implemented.
+//! above; unique shifted witness sources add bridge-only `ShiftSpec` claims
+//! over the appended $\alpha'$ slots and use MP's existing shift kernel.
 
 use crate::{
     CombFn,
@@ -840,7 +834,9 @@ where
             for row_idx in 0..n_rows {
                 let mut residual = ones.clone();
                 for (source_col, coeff, row_shift) in &terms {
-                    let shifted_row = add!(row_idx, *row_shift);
+                    let Some(shifted_row) = row_idx.checked_add(*row_shift) else {
+                        continue;
+                    };
                     if shifted_row >= n_rows {
                         continue;
                     }

@@ -231,8 +231,8 @@ impl AffineVirtualTerm {
 
     /// Construct a shifted term `coefficient * source_col[row + row_shift]`.
     ///
-    /// [`UairSignature::with_affine_virtual_specs`] currently rejects shifted
-    /// terms until the protocol binds row-shifted source projections.
+    /// Rows past the trace domain are zero padded. Shifts at or beyond the
+    /// domain size therefore contribute the all-zero column.
     pub fn new_shifted(source_col: usize, coefficient: i64, row_shift: usize) -> Self {
         assert!(row_shift > 0, "row shift must be non-zero");
         Self {
@@ -551,17 +551,17 @@ impl<Prime: Semiring> UairSignature<Prime> {
 
     /// Attach affine virtual booleanity specs to the signature.
     ///
-    /// Each term in each spec must be unshifted and reference a binary_poly
-    /// column. Affine virtuals describe Q-side `{0,1}^{<D}[X]` membership
-    /// targets such as the Ch/Maj linear combinations in the Zinc+ paper. They
-    /// are not committed columns and do not affect the down-row layout.
+    /// Each term in each spec must reference a binary_poly column. Affine
+    /// virtuals describe Q-side `{0,1}^{<D}[X]` membership targets such as the
+    /// Ch/Maj linear combinations in the Zinc+ paper. They are not committed
+    /// columns and do not affect the down-row layout.
     pub fn with_affine_virtual_specs(
         mut self,
         affine_virtual_specs: Vec<AffineVirtualSpec>,
     ) -> Self {
         let binary_poly_end = self.total_cols.num_binary_poly_cols();
-        for (spec_index, spec) in affine_virtual_specs.iter().enumerate() {
-            for (term_index, term) in spec.terms().iter().enumerate() {
+        for spec in &affine_virtual_specs {
+            for term in spec.terms() {
                 assert!(
                     term.source_col() < binary_poly_end,
                     "AffineVirtualTerm source_col {} is not a binary_poly column \
@@ -569,12 +569,6 @@ impl<Prime: Semiring> UairSignature<Prime> {
                      are only defined over binary_poly cells.",
                     term.source_col(),
                     binary_poly_end,
-                );
-                assert!(
-                    term.row_shift() == 0,
-                    "shifted affine virtual terms are not supported: spec {spec_index}, \
-                     term {term_index}, row shift {}",
-                    term.row_shift(),
                 );
             }
         }
@@ -958,13 +952,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "shifted affine virtual terms are not supported: spec 0, term 0, row shift 1"
-    )]
-    fn affine_virtual_specs_reject_shifted_terms() {
-        let _ =
+    fn affine_virtual_specs_support_shifted_terms() {
+        let sig =
             signature_with_mixed_shifts().with_affine_virtual_specs(vec![AffineVirtualSpec::new(
-                vec![AffineVirtualTerm::new_shifted(0, 1, 1)],
+                vec![AffineVirtualTerm::new_shifted(0, 1, 2)],
             )]);
+
+        assert_eq!(sig.affine_virtual_specs()[0].terms()[0].row_shift(), 2);
+        assert_eq!(sig.down_cols().num_binary_poly_cols(), 1);
     }
 }

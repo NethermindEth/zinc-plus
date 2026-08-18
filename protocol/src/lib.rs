@@ -18,9 +18,10 @@
 //!   `bit_slice_evals` are absorbed, and append one extra $\alpha'$-projected
 //!   MLE + up-eval to the multipoint-eval inputs per witness binary-poly column
 //!   (see `BooleanityChecker`)
-//! - Affine virtual bridge: collapse each unshifted virtual at the same
-//!   `alpha'` and compare it directly with the affine combination of its
-//!   public/committed source projections at `r*`
+//! - Affine virtual bridge: collapse each virtual at the same `alpha'` and
+//!   compare it with the affine combination of its source projections at `r*`;
+//!   shifted witness sources are bound through MP's shift kernel, while shifted
+//!   public sources are recomputed
 //! - Multi-point evaluation sumcheck (combines up/down evals at `r*` into a
 //!   single evaluation point `r_0`)
 //! - Lift-and-project (unprojected MLE evaluations at `r_0`)
@@ -64,14 +65,17 @@ use zinc_poly::{
         dense::DensePolynomial,
         dynamic::{DynamicPolyVec, DynamicPolynomial, HasDynamicPolynomialConfig},
     },
+    utils::build_next_c_r_mle,
 };
 use zinc_primality::PrimalityTest;
 use zinc_transcript::{
     TranscriptError,
     traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
 };
-use zinc_uair::{Uair, UairSignature};
-use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, from_ref::FromRef, named::Named, powers};
+use zinc_uair::{ShiftSpec, Uair, UairSignature};
+use zinc_utils::{
+    add, cfg_extend, cfg_into_iter, cfg_iter, from_ref::FromRef, named::Named, powers, sub,
+};
 use zip_plus::{
     ZipError,
     code::LinearCode,
@@ -81,6 +85,74 @@ use zip_plus::{
 //
 // Data structures
 //
+
+/// Affine-virtual proof data.
+///
+/// The Booleanity proof establishes that each affine target has binary
+/// coefficients. `shifted_witness_evals` separately carries one
+/// $\alpha'$-projected evaluation for every unique shifted witness source in
+/// public-signature order. Multipoint evaluation binds those claims back to
+/// the corresponding committed source columns; shifted public sources are
+/// recomputed by the verifier and need no proof entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AffineVirtualProof<F> {
+    /// Booleanity proof for the affine target columns.
+    pub booleanity_proof: BooleanityProof<F>,
+    /// Alpha-prime projected shifted-witness claims in public-signature order.
+    pub shifted_witness_evals: Vec<F>,
+}
+
+impl<F> AffineVirtualProof<F> {
+    fn try_map<T, E>(
+        &self,
+        f: impl FnMut(&F) -> Result<T, E> + Copy,
+    ) -> Result<AffineVirtualProof<T>, E> {
+        Ok(AffineVirtualProof {
+            booleanity_proof: self.booleanity_proof.try_map(f)?,
+            shifted_witness_evals: self
+                .shifted_witness_evals
+                .iter()
+                .map(f)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+impl<F> GenTranscribable for AffineVirtualProof<F>
+where
+    F: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (booleanity_proof, bytes) =
+            BooleanityProof::<F>::read_transcription_bytes_subset(bytes);
+        let (shifted_witness_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "all affine virtual proof bytes consumed");
+        Self {
+            booleanity_proof,
+            shifted_witness_evals,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        buf = self.booleanity_proof.write_transcription_bytes_subset(buf);
+        let _ = self
+            .shifted_witness_evals
+            .write_transcription_bytes_subset(buf);
+    }
+}
+
+impl<F> Transcribable for AffineVirtualProof<F>
+where
+    F: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        BooleanityProof::<F>::LENGTH_NUM_BYTES
+            + self.booleanity_proof.get_num_bytes()
+            + Vec::<F>::LENGTH_NUM_BYTES
+            + self.shifted_witness_evals.get_num_bytes()
+    }
+}
 
 /// Full proof produced by the Zinc+ PIOP for UCS.
 ///
@@ -133,9 +205,9 @@ pub struct Proof<F> {
     /// has no witness binary-poly columns (the argument is omitted from
     /// the multi-degree sumcheck in that case).
     pub booleanity_proof: Option<BooleanityProof<F>>,
-    /// Affine-virtual booleanity argument proof. `None` when the UAIR has no
-    /// affine virtual specs.
-    pub affine_booleanity_proof: Option<BooleanityProof<F>>,
+    /// Affine-virtual argument proof. `None` when the UAIR has no affine
+    /// virtual specs.
+    pub affine_virtual_proof: Option<AffineVirtualProof<F>>,
     /// Per-prime $F_{q_i}[X]$ ideal-check proofs, one per declared
     /// prime in [`zinc_uair::UairSignature::primes`], in the same order.
     /// Empty for UAIRs with $Q[X]$-only constraints.
@@ -167,25 +239,22 @@ pub struct Proof<F> {
     pub witness_lifted_evals_pp: Option<Vec<DynamicPolynomial<F>>>,
 }
 
-fn read_optional_booleanity_proof<F>(bytes: &[u8]) -> (Option<BooleanityProof<F>>, &[u8])
+fn read_optional_proof<T>(bytes: &[u8]) -> (Option<T>, &[u8])
 where
-    F: ConstTranscribable,
+    T: Transcribable,
 {
     let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
     if presence == 0 {
         (None, bytes)
     } else {
-        let (proof, bytes) = BooleanityProof::read_transcription_bytes_subset(bytes);
+        let (proof, bytes) = T::read_transcription_bytes_subset(bytes);
         (Some(proof), bytes)
     }
 }
 
-fn write_optional_booleanity_proof<'a, F>(
-    proof: &Option<BooleanityProof<F>>,
-    mut buf: &'a mut [u8],
-) -> &'a mut [u8]
+fn write_optional_proof<'a, T>(proof: &Option<T>, mut buf: &'a mut [u8]) -> &'a mut [u8]
 where
-    F: ConstTranscribable,
+    T: Transcribable,
 {
     buf = u32::from(proof.is_some()).write_transcription_bytes_subset(buf);
     if let Some(proof) = proof {
@@ -195,13 +264,13 @@ where
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn optional_booleanity_proof_num_bytes<F>(proof: &Option<BooleanityProof<F>>) -> usize
+fn optional_proof_num_bytes<T>(proof: &Option<T>) -> usize
 where
-    F: ConstTranscribable,
+    T: Transcribable,
 {
-    proof.as_ref().map_or(0, |proof| {
-        BooleanityProof::<F>::LENGTH_NUM_BYTES + proof.get_num_bytes()
-    })
+    proof
+        .as_ref()
+        .map_or(0, |proof| T::LENGTH_NUM_BYTES + proof.get_num_bytes())
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -238,8 +307,8 @@ where
             bytes = rest;
         }
 
-        let (booleanity_proof, bytes) = read_optional_booleanity_proof(bytes);
-        let (affine_booleanity_proof, bytes) = read_optional_booleanity_proof(bytes);
+        let (booleanity_proof, bytes) = read_optional_proof(bytes);
+        let (affine_virtual_proof, bytes) = read_optional_proof(bytes);
 
         // ideal_checks_fq: u32 count, then that many length-prefixed
         // IdealCheckProof entries (one per declared prime).
@@ -309,7 +378,7 @@ where
             witness_lifted_evals,
             lookup_proof: None,
             booleanity_proof,
-            affine_booleanity_proof,
+            affine_virtual_proof,
             ideal_checks_fq,
             cpr_proofs_fq,
             combined_sumchecks_fq,
@@ -353,8 +422,8 @@ where
             buf = DynamicPolyVec::reinterpret(wlf).write_transcription_bytes_subset(buf);
         }
 
-        buf = write_optional_booleanity_proof(&self.booleanity_proof, buf);
-        buf = write_optional_booleanity_proof(&self.affine_booleanity_proof, buf);
+        buf = write_optional_proof(&self.booleanity_proof, buf);
+        buf = write_optional_proof(&self.affine_virtual_proof, buf);
 
         // ideal_checks_fq: u32 count + that many length-prefixed entries.
         let n_fq = u32::try_from(self.ideal_checks_fq.len())
@@ -408,9 +477,8 @@ where
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
-        let booleanity_bytes = optional_booleanity_proof_num_bytes(&self.booleanity_proof);
-        let affine_booleanity_bytes =
-            optional_booleanity_proof_num_bytes(&self.affine_booleanity_proof);
+        let booleanity_bytes = optional_proof_num_bytes(&self.booleanity_proof);
+        let affine_virtual_bytes = optional_proof_num_bytes(&self.affine_virtual_proof);
         let ideal_checks_fq_bytes: usize = self
             .ideal_checks_fq
             .iter()
@@ -466,9 +534,9 @@ where
             // committed-column booleanity presence flag + optional payload
             + u32::NUM_BYTES
             + booleanity_bytes
-            // affine-virtual booleanity presence flag + optional payload
+            // affine-virtual presence flag + optional payload
             + u32::NUM_BYTES
-            + affine_booleanity_bytes
+            + affine_virtual_bytes
             // ideal_checks_fq: count + sum of (length-prefix + body) per entry
             + u32::NUM_BYTES
             + ideal_checks_fq_bytes
@@ -613,6 +681,8 @@ pub enum ProtocolError<F: SetElement> {
         got: F,
         expected: F,
     },
+    #[error("affine virtual shifted-witness eval length mismatch: got {got}, expected {expected}")]
+    AffineVirtualShiftEvalsLengthMismatch { got: usize, expected: usize },
     #[error("non-canonical proof element: lifted integer >= family modulus")]
     NonCanonicalElement,
     #[error("proof family count mismatch: got {got}, expected {expected}")]
@@ -786,12 +856,96 @@ fn collapse_bit_slice_evals<C: BaseFieldConfig, const D: usize>(
         .collect()
 }
 
-/// Reconstruct the expected alpha-prime projection of each unshifted affine
-/// virtual from the corresponding source-column projections.
+/// A unique non-zero row shift used by an affine virtual term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AffineVirtualShift {
+    source_col: usize,
+    row_shift: usize,
+}
+
+/// Return shifted affine sources in first-occurrence order, deduplicated by
+/// `(source_col, row_shift)`.
+fn affine_virtual_shifts<P: Semiring>(signature: &UairSignature<P>) -> Vec<AffineVirtualShift> {
+    let mut shifts = Vec::new();
+    for spec in signature.affine_virtual_specs() {
+        for term in spec.terms() {
+            let shift = AffineVirtualShift {
+                source_col: term.source_col(),
+                row_shift: term.row_shift(),
+            };
+            if shift.row_shift > 0 && !shifts.contains(&shift) {
+                shifts.push(shift);
+            }
+        }
+    }
+    shifts
+}
+
+/// Shifted witness sources that require proof-carried evaluations.
+fn affine_virtual_witness_shifts<P: Semiring>(
+    signature: &UairSignature<P>,
+) -> Vec<AffineVirtualShift> {
+    let num_pub_bin = signature.public_cols().num_binary_poly_cols();
+    affine_virtual_shifts(signature)
+        .into_iter()
+        .filter(|shift| shift.source_col >= num_pub_bin)
+        .collect()
+}
+
+/// Extend the UAIR's ordinary shifts with the bridge-only shifts over the
+/// appended alpha-prime witness MLEs.
+fn multipoint_shifts_with_affine_virtuals<P: Semiring>(
+    signature: &UairSignature<P>,
+) -> Vec<ShiftSpec> {
+    let num_pub_bin = signature.public_cols().num_binary_poly_cols();
+    let appended_start = signature.total_cols().cols();
+    signature
+        .shifts()
+        .iter()
+        .cloned()
+        .chain(
+            affine_virtual_witness_shifts(signature)
+                .into_iter()
+                .map(|shift| {
+                    ShiftSpec::new(
+                        add!(appended_start, sub!(shift.source_col, num_pub_bin)),
+                        shift.row_shift,
+                    )
+                }),
+        )
+        .collect()
+}
+
+/// Evaluate the zero-padded forward shift of `source` at `point` using the
+/// same selector kernel as multipoint evaluation.
+fn evaluate_shifted_mle<C: BaseFieldConfig>(
+    source: &DenseMultilinearExtension<C::Element>,
+    point: &[C::Element],
+    row_shift: usize,
+    field_cfg: &C,
+) -> Result<C::Element, MultipointEvalError<C::Element>> {
+    let selector = build_next_c_r_mle(field_cfg, point, row_shift)?;
+    assert_eq!(
+        selector.evaluations.len(),
+        source.evaluations.len(),
+        "shift selector and source MLE must share a domain",
+    );
+    Ok(selector.evaluations.iter().zip(&source.evaluations).fold(
+        field_cfg.zero(),
+        |mut acc, (selector_eval, source_eval)| {
+            field_cfg.add_assign(&mut acc, &field_cfg.mul(selector_eval, source_eval));
+            acc
+        },
+    ))
+}
+
+/// Reconstruct the expected alpha-prime projection of each affine virtual
+/// from the corresponding unshifted and shifted source-column projections.
 #[allow(clippy::arithmetic_side_effects)]
 fn expected_affine_virtual_bridge_evals<C, P, const D: usize>(
     signature: &UairSignature<P>,
     source_bridge_evals: &[C::Element],
+    shifted_source_bridge_evals: &[(AffineVirtualShift, C::Element)],
     alpha_prime: &C::Element,
     field_cfg: &C,
 ) -> Vec<C::Element>
@@ -821,11 +975,19 @@ where
                 &ones_projection,
             );
             for term in spec.terms() {
-                debug_assert_eq!(term.row_shift(), 0);
-                let term_eval = field_cfg.mul(
-                    &field_cfg.project(&term.coefficient()),
-                    &source_bridge_evals[term.source_col()],
-                );
+                let source_eval = if term.row_shift() == 0 {
+                    &source_bridge_evals[term.source_col()]
+                } else {
+                    &shifted_source_bridge_evals
+                        .iter()
+                        .find(|(shift, _)| {
+                            shift.source_col == term.source_col()
+                                && shift.row_shift == term.row_shift()
+                        })
+                        .expect("shifted bridge eval is derived from the signature")
+                        .1
+                };
+                let term_eval = field_cfg.mul(&field_cfg.project(&term.coefficient()), source_eval);
                 field_cfg.add_assign(&mut expected, &term_eval);
             }
             expected
@@ -957,7 +1119,9 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        ShaProxy, TestUairAffineVirtualPublicOnly, TestUairAffineVirtualUnshifted,
+        ShaProxy, TestUairAffineVirtualOversizedShifts, TestUairAffineVirtualPublicOnly,
+        TestUairAffineVirtualShiftedMixed, TestUairAffineVirtualShiftedPublicOnly,
+        TestUairAffineVirtualShiftedWitness, TestUairAffineVirtualUnshifted,
         TestUairBitOpsFqFamily, TestUairFqLargePrime, TestUairMixedShifts,
         TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
@@ -1402,9 +1566,10 @@ mod tests {
                 );
                 assert_eq!(
                     proof
-                        .affine_booleanity_proof
+                        .affine_virtual_proof
                         .as_ref()
                         .expect("affine virtuals require an affine booleanity proof")
+                        .booleanity_proof
                         .bit_slice_evals
                         .len(),
                     2 * D,
@@ -1432,15 +1597,273 @@ mod tests {
                 assert!(proof.booleanity_proof.is_none());
                 assert_eq!(
                     proof
-                        .affine_booleanity_proof
+                        .affine_virtual_proof
                         .as_ref()
                         .expect("affine virtuals require an affine booleanity proof")
+                        .booleanity_proof
                         .bit_slice_evals
                         .len(),
                     2 * D,
                 );
             },
             |res| res.unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_affine_virtual_shift_descriptors_are_deduplicated() {
+        type U = TestUairAffineVirtualShiftedWitness<ZtInt, ZtFmod>;
+
+        let signature = U::signature();
+        assert_eq!(
+            affine_virtual_witness_shifts(&signature),
+            vec![
+                AffineVirtualShift {
+                    source_col: 1,
+                    row_shift: 1,
+                },
+                AffineVirtualShift {
+                    source_col: 1,
+                    row_shift: 2,
+                },
+            ],
+        );
+
+        let shifts = multipoint_shifts_with_affine_virtuals(&signature);
+        assert_eq!(shifts.len(), 3);
+        assert_eq!(shifts[0].source_col(), 0);
+        assert_eq!(shifts[0].shift_amount(), 1);
+        assert_eq!(shifts[1].source_col(), signature.total_cols().cols());
+        assert_eq!(shifts[1].shift_amount(), 1);
+        assert_eq!(shifts[2].source_col(), signature.total_cols().cols());
+        assert_eq!(shifts[2].shift_amount(), 2);
+    }
+
+    #[test]
+    fn test_affine_virtual_mixed_shift_descriptors_preserve_witness_order() {
+        type U = TestUairAffineVirtualShiftedMixed<ZtInt, ZtFmod>;
+
+        let signature = U::signature();
+        assert_eq!(
+            affine_virtual_shifts(&signature),
+            vec![
+                AffineVirtualShift {
+                    source_col: 0,
+                    row_shift: 1,
+                },
+                AffineVirtualShift {
+                    source_col: 3,
+                    row_shift: 2,
+                },
+                AffineVirtualShift {
+                    source_col: 1,
+                    row_shift: 2,
+                },
+                AffineVirtualShift {
+                    source_col: 2,
+                    row_shift: 1,
+                },
+            ],
+        );
+        assert_eq!(
+            affine_virtual_witness_shifts(&signature),
+            vec![
+                AffineVirtualShift {
+                    source_col: 3,
+                    row_shift: 2,
+                },
+                AffineVirtualShift {
+                    source_col: 2,
+                    row_shift: 1,
+                },
+            ],
+        );
+
+        let shifts = multipoint_shifts_with_affine_virtuals(&signature);
+        assert_eq!(shifts.len(), 2);
+        assert_eq!(shifts[0].source_col(), 9);
+        assert_eq!(shifts[0].shift_amount(), 2);
+        assert_eq!(shifts[1].source_col(), 8);
+        assert_eq!(shifts[1].shift_amount(), 1);
+    }
+
+    /// End-to-end shifted affine bridge with a committed shifted source.
+    #[test]
+    fn test_e2e_affine_virtual_shifted_witness() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualShiftedWitness<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                let affine = proof
+                    .affine_virtual_proof
+                    .as_ref()
+                    .expect("affine virtuals require an affine proof");
+                assert_eq!(affine.booleanity_proof.bit_slice_evals.len(), 3 * D);
+                assert_eq!(
+                    affine.shifted_witness_evals.len(),
+                    2,
+                    "the repeated shift-one source must use one proof claim",
+                );
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Shifted public sources are recomputed and add no proof-carried shift
+    /// evaluations or PCS openings.
+    #[test]
+    fn test_e2e_affine_virtual_shifted_public_only() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualShiftedPublicOnly<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                assert!(proof.booleanity_proof.is_none());
+                let affine = proof
+                    .affine_virtual_proof
+                    .as_ref()
+                    .expect("affine virtuals require an affine proof");
+                assert_eq!(affine.booleanity_proof.bit_slice_evals.len(), 3 * D);
+                assert!(affine.shifted_witness_evals.is_empty());
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Interleaved shifted public and witness sources preserve signature order
+    /// while witness claims bind to their appended alpha-prime source slots.
+    #[test]
+    fn test_e2e_affine_virtual_shifted_mixed_sources() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualShiftedMixed<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                let affine = proof
+                    .affine_virtual_proof
+                    .as_ref()
+                    .expect("affine virtuals require an affine proof");
+                assert_eq!(affine.booleanity_proof.bit_slice_evals.len(), 4 * D);
+                assert_eq!(affine.shifted_witness_evals.len(), 2);
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Shifts beginning at and beyond the trace length are zero-padded rather
+    /// than rejected by the shared multipoint selector.
+    #[test]
+    fn test_e2e_affine_virtual_oversized_shifts_are_zero() {
+        let num_vars = 3;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualOversizedShifts<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                let affine = proof
+                    .affine_virtual_proof
+                    .as_ref()
+                    .expect("affine virtuals require an affine proof");
+                assert_eq!(affine.booleanity_proof.bit_slice_evals.len(), 3 * D);
+                assert_eq!(affine.shifted_witness_evals.len(), 2);
+                assert!(affine.shifted_witness_evals.iter().all(Zero::is_zero));
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The shifted-witness claim count comes from the public signature, not
+    /// from the proof.
+    #[test]
+    fn test_affine_virtual_rejects_truncated_shift_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualShiftedWitness<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                proof
+                    .affine_virtual_proof
+                    .as_mut()
+                    .expect("affine virtuals require an affine proof")
+                    .shifted_witness_evals
+                    .pop();
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::AffineVirtualShiftEvalsLengthMismatch {
+                        got: 1,
+                        expected: 2,
+                    }
+                ));
+            },
+        );
+    }
+
+    /// The affine bridge consumes each shifted-source claim before MP-eval;
+    /// changing one therefore produces an exact bridge mismatch. The existing
+    /// multipoint-eval down-claim tests separately isolate binding that claim
+    /// to its source opening.
+    #[test]
+    fn test_affine_virtual_rejects_tampered_shift_eval() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairAffineVirtualShiftedWitness<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
+            |proof| {
+                let shifted_eval = &mut proof
+                    .affine_virtual_proof
+                    .as_mut()
+                    .expect("affine virtuals require an affine proof")
+                    .shifted_witness_evals[0];
+                *shifted_eval = if shifted_eval.is_zero() {
+                    ZtFmod::from(1_u64)
+                } else {
+                    ZtFmod::zero()
+                };
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::AffineVirtualBridgeMismatch { .. }
+                ));
+            },
         );
     }
 
@@ -1460,9 +1883,10 @@ mod tests {
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::project(field_cfg, i)),
             |proof| {
                 proof
-                    .affine_booleanity_proof
+                    .affine_virtual_proof
                     .as_mut()
                     .expect("affine virtuals require an affine booleanity proof")
+                    .booleanity_proof
                     .bit_slice_evals
                     .pop();
             },
@@ -1515,9 +1939,10 @@ mod tests {
         .clone();
 
         let affine_evals = &mut proof
-            .affine_booleanity_proof
+            .affine_virtual_proof
             .as_mut()
             .expect("affine virtuals require an affine booleanity proof")
+            .booleanity_proof
             .bit_slice_evals;
         let one = cfg.one();
         let tamper_index = affine_evals
