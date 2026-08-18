@@ -14,6 +14,9 @@ use zinc_poly::utils::next_mle_eval;
 ///
 /// where `k = ceil(log2(2c))` determines the split point.
 ///
+/// Returns zero when `c >= 2^m`, since every shifted row is outside the
+/// domain.
+///
 /// Cost: O(m + c · log c) field operations.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn eval_shift_predicate<C: SemiringConfig>(
@@ -24,6 +27,11 @@ pub fn eval_shift_predicate<C: SemiringConfig>(
 ) -> C::Element {
     let m = x.len();
     assert_eq!(y.len(), m);
+    let n = 1usize << m;
+
+    if c >= n {
+        return cfg.zero();
+    }
 
     // S_0(x, y) = eq(x, y): identity shift.
     if c == 0 {
@@ -35,7 +43,6 @@ pub fn eval_shift_predicate<C: SemiringConfig>(
         return next_mle_eval(cfg, x, y);
     }
 
-    assert!(c < (1usize << m), "shift c must satisfy c < 2^m");
     // k = ceil(log2(2*c))
     let k = (2 * c).next_power_of_two().trailing_zeros() as usize;
     if k >= m {
@@ -381,6 +388,20 @@ mod tests {
                 "expected {} nonzero entries for c={c}",
                 n - c
             );
+        }
+    }
+
+    #[test]
+    fn test_shift_predicate_at_or_past_domain_is_zero() {
+        let cfg = test_config();
+        let mut rng = rand::rng();
+        let m = 3;
+        let n = 1usize << m;
+        let x: Vec<E> = (0..m).map(|_| rand_field(&cfg, &mut rng)).collect();
+        let y: Vec<E> = (0..m).map(|_| rand_field(&cfg, &mut rng)).collect();
+
+        for c in [n, n + 1, usize::MAX] {
+            assert_eq!(eval_shift_predicate(&cfg, &x, &y, c), cfg.zero());
         }
     }
 

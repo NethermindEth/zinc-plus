@@ -78,6 +78,9 @@ pub fn build_eq_x_r_vec<C: SemiringConfig>(
 ///
 /// Uses the identity `next_c_mle(r, b) = eq(r, b - c)` for `b >= c` and
 /// `0` for `b < c`.
+///
+/// If `c >= 2^num_vars`, every shifted row lies outside the domain and the
+/// selector is identically zero.
 pub fn build_next_c_r_mle<C: SemiringConfig>(
     cfg: &C,
     r: &[C::Element],
@@ -85,7 +88,12 @@ pub fn build_next_c_r_mle<C: SemiringConfig>(
 ) -> Result<DenseMultilinearExtension<C::Element>, ArithErrors> {
     let num_vars = r.len();
     let n = 1 << num_vars;
-    assert!(c < n, "shift c={c} must be < domain size {n}");
+    if c >= n {
+        return Ok(DenseMultilinearExtension {
+            num_vars,
+            evaluations: vec![cfg.zero(); n],
+        });
+    }
 
     let eq_r = build_eq_x_r(cfg, r)?;
     if c == 0 {
@@ -478,6 +486,20 @@ mod tests {
                     "c={c}, b={b}: mismatch"
                 );
             }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // long running
+    fn next_c_r_mle_at_or_past_domain_is_zero() {
+        let num_vars: usize = 4;
+        let n = 1 << num_vars;
+        let r: Vec<F> = (0..num_vars).map(|i| F::from((i + 5) as u32)).collect();
+
+        for c in [n, n + 1, usize::MAX] {
+            let next_c = build_next_c_r_mle(&cfg(), &r, c).unwrap();
+            assert_eq!(next_c.num_vars, num_vars);
+            assert_eq!(next_c.evaluations, vec![F::zero(); n]);
         }
     }
 
