@@ -174,22 +174,88 @@ impl PcsProverTranscript {
         I: IntoIterator,
         I::Item: Borrow<T>,
     {
+        if T::NUM_BYTES == 0 {
+            return Err(TranscriptError(
+                ErrorKind::InvalidInput,
+                "zero-width constant transcription is unsupported".to_owned(),
+            ));
+        }
+
+        let data_len = vs_len.checked_mul(T::NUM_BYTES).ok_or_else(|| {
+            TranscriptError(
+                ErrorKind::InvalidInput,
+                format!("declared iterator length {vs_len} overflows the proof byte length"),
+            )
+        })?;
+
+        let mut vs = vs.into_iter().peekable();
+        let (lower, upper) = vs.size_hint();
+        if upper == Some(lower) && lower != vs_len {
+            return Err(iterator_cardinality_error(vs_len, lower));
+        }
+        if vs_len == 0 {
+            return if vs.next().is_none() {
+                Ok(())
+            } else {
+                Err(iterator_too_long_error(vs_len))
+            };
+        }
+        if vs.peek().is_none() {
+            return Err(iterator_cardinality_error(vs_len, 0));
+        }
+
         let prev_pos = safe_cast!(self.stream.position(), u64, usize)?;
-        let data_len = mul!(vs_len, T::NUM_BYTES);
-        let next_pos = add!(prev_pos, data_len);
+        let prev_len = self.stream.get_ref().len();
+        if prev_pos != prev_len {
+            return Err(TranscriptError(
+                ErrorKind::InvalidInput,
+                "prover transcript writes must append to the proof stream".to_owned(),
+            ));
+        }
+        let next_pos = prev_pos.checked_add(data_len).ok_or_else(|| {
+            TranscriptError(
+                ErrorKind::InvalidInput,
+                "proof stream position overflowed".to_owned(),
+            )
+        })?;
+        let next_pos_u64 = safe_cast!(next_pos, usize, u64)?;
 
         let inner = self.stream.get_mut();
-        // Enlarge the inner buffer if needed
         if inner.len() < next_pos {
+            inner
+                .try_reserve(next_pos.saturating_sub(inner.len()))
+                .map_err(|err| {
+                    TranscriptError(
+                        ErrorKind::OutOfMemory,
+                        format!("failed to reserve proof stream bytes: {err}"),
+                    )
+                })?;
             inner.resize(next_pos, 0_u8);
         }
 
-        for (chunk, v) in inner[prev_pos..next_pos].chunks_mut(T::NUM_BYTES).zip(vs) {
+        let mut actual_len = 0_usize;
+        for chunk in inner[prev_pos..next_pos].chunks_exact_mut(T::NUM_BYTES) {
+            let Some(v) = vs.next() else { break };
             v.borrow().write_transcription_bytes_exact(chunk);
-            self.fs_transcript.absorb_bytes(chunk);
+            actual_len = actual_len.saturating_add(1);
         }
 
-        self.stream.set_position(next_pos as u64);
+        if actual_len != vs_len {
+            self.stream.get_mut().truncate(prev_len);
+            return Err(iterator_cardinality_error(vs_len, actual_len));
+        }
+        if vs.next().is_some() {
+            self.stream.get_mut().truncate(prev_len);
+            return Err(iterator_too_long_error(vs_len));
+        }
+
+        // Delay absorption until exact cardinality is established. This keeps
+        // proof bytes, cursor, and Fiat-Shamir state atomic without cloning the
+        // transcript. Preserve the existing per-element framing schedule.
+        for chunk in inner[prev_pos..next_pos].chunks_exact(T::NUM_BYTES) {
+            self.fs_transcript.absorb_bytes(chunk);
+        }
+        self.stream.set_position(next_pos_u64);
         Ok(())
     }
 
@@ -366,6 +432,20 @@ fn to_transcript_error(err: std::io::Error) -> TranscriptError {
     TranscriptError(err.kind(), err.to_string())
 }
 
+fn iterator_cardinality_error(expected: usize, actual: usize) -> TranscriptError {
+    TranscriptError(
+        ErrorKind::InvalidInput,
+        format!("iterator yielded {actual} element(s), expected exactly {expected}"),
+    )
+}
+
+fn iterator_too_long_error(expected: usize) -> TranscriptError {
+    TranscriptError(
+        ErrorKind::InvalidInput,
+        format!("iterator yielded more than the declared {expected} element(s)"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +618,149 @@ mod tests {
             verifier.check_eof().is_err(),
             "check_eof accepted a stream with unread trailing bytes"
         );
+    }
+
+    #[test]
+    fn exact_iterator_write_matches_transcript_v1_snapshot() {
+        let comm = ZipPlusCommitment::default();
+        let payload = [11u64, 22, 33];
+
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+        transcript
+            .write_const_many_iter::<u64, _>(payload.iter(), payload.len())
+            .expect("exact iterator write should succeed");
+
+        // Frozen from transcript/v1 at the parent of this change.
+        assert_eq!(
+            transcript.stream.get_ref(),
+            &[
+                11, 0, 0, 0, 0, 0, 0, 0, 22, 0, 0, 0, 0, 0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            "exact iterator write changed the transcript-v1 proof bytes"
+        );
+        assert_eq!(
+            transcript.squeeze_challenge_idx(CAP),
+            7_803_897,
+            "exact iterator write changed the transcript-v1 Fiat-Shamir schedule"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    struct ZeroWidth;
+
+    impl zinc_transcript::traits::GenTranscribable for ZeroWidth {
+        fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+            assert!(bytes.is_empty());
+            Self
+        }
+
+        fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+            assert!(buf.is_empty());
+        }
+    }
+
+    impl ConstTranscribable for ZeroWidth {
+        const NUM_BYTES: usize = 0;
+    }
+
+    #[test]
+    fn iterator_write_rejects_zero_width_encoding_atomically() {
+        let comm = ZipPlusCommitment::default();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+        transcript
+            .write_const_many(&[0xA5A5_A5A5_A5A5_A5A5u64])
+            .expect("prefix write should succeed");
+        let mut before = transcript.clone();
+
+        let err = transcript
+            .write_const_many_iter::<ZeroWidth, _>([ZeroWidth], 1)
+            .expect_err("zero-width transcription must fail closed");
+
+        assert_eq!(err.0, ErrorKind::InvalidInput);
+        assert_eq!(transcript.stream.position(), before.stream.position());
+        assert_eq!(transcript.stream.get_ref(), before.stream.get_ref());
+        assert_eq!(
+            transcript.squeeze_challenge_idx(CAP),
+            before.squeeze_challenge_idx(CAP),
+            "failed zero-width write changed the Fiat-Shamir state"
+        );
+    }
+
+    fn assert_cardinality_error_is_atomic(
+        values: impl IntoIterator<Item = u64>,
+        declared_len: usize,
+    ) {
+        let comm = ZipPlusCommitment::default();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+        transcript
+            .write_const_many(&[0xA5A5_A5A5_A5A5_A5A5u64])
+            .expect("prefix write should succeed");
+        let mut before = transcript.clone();
+
+        let err = transcript
+            .write_const_many_iter::<u64, _>(values, declared_len)
+            .expect_err("cardinality mismatch must fail closed");
+
+        assert_eq!(err.0, ErrorKind::InvalidInput);
+        assert_eq!(
+            transcript.stream.position(),
+            before.stream.position(),
+            "failed write advanced the proof cursor"
+        );
+        assert_eq!(
+            transcript.stream.get_ref(),
+            before.stream.get_ref(),
+            "failed write changed the proof bytes"
+        );
+        assert_eq!(
+            transcript.squeeze_challenge_idx(CAP),
+            before.squeeze_challenge_idx(CAP),
+            "failed write changed the Fiat-Shamir state"
+        );
+    }
+
+    #[test]
+    fn iterator_write_rejects_short_input_atomically() {
+        assert_cardinality_error_is_atomic([1u64, 2], 3);
+    }
+
+    #[test]
+    fn iterator_write_rejects_empty_input_atomically() {
+        assert_cardinality_error_is_atomic(std::iter::empty(), 1);
+    }
+
+    #[test]
+    fn iterator_write_rejects_long_input_atomically() {
+        assert_cardinality_error_is_atomic([1u64, 2, 3], 2);
+    }
+
+    #[test]
+    fn iterator_write_rejects_overflowing_length_atomically() {
+        assert_cardinality_error_is_atomic(std::iter::empty(), usize::MAX);
+    }
+
+    #[test]
+    fn iterator_write_checks_non_exact_size_iterators() {
+        let comm = ZipPlusCommitment::default();
+        let payload = [7u64, 8, 9];
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+        transcript
+            .write_const_many_iter::<u64, _>(payload.into_iter().filter(|_| true), payload.len())
+            .expect("exact non-ExactSizeIterator write should succeed");
+
+        let mut verifier = transcript.into_verification_transcript();
+        verifier.fs_transcript.absorb_bytes(&comm.root);
+        assert_eq!(
+            verifier
+                .read_const_many::<u64>(payload.len())
+                .expect("written values should round-trip"),
+            payload
+        );
+        verifier
+            .check_eof()
+            .expect("stream should be fully consumed");
+
+        assert_cardinality_error_is_atomic([1u64, 2].into_iter().filter(|_| true), 3);
+        assert_cardinality_error_is_atomic([1u64, 2, 3].into_iter().filter(|_| true), 2);
     }
 }
