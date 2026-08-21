@@ -49,3 +49,7 @@ iprs-rate-1-16 = []
 [[bench]]
 name = "e2e"
 harness = false
+
+[[bench]]
+name = "limber_multiswap"
+harness = false
