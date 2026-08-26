@@ -203,35 +203,39 @@ pub fn split_int_columns<const H: usize, const HALF_H: usize>(
 
 /// 4× int fold counterpart of [`split_int_column`]: decompose each
 /// `Int<H>` cell into four `Int<Q>` quarters via
-/// `v = q_0 + 2^64 · q_1 + 2^128 · q_2 + 2^192 · q_3` (signed
-/// integer arithmetic), and lay them out as a length-`4n` column
-/// matching the binary 4× chained-split layout
-/// (`bot_lo || bot_hi || top_lo || top_hi`):
+/// `v = q_0 + R · q_1 + R² · q_2 + R³ · q_3` where the radix is
+/// `R = 2^(64·(Q−1))` (signed integer arithmetic), and lay them out
+/// as a length-`4n` column matching the binary 4× chained-split
+/// layout (`bot_lo || bot_hi || top_lo || top_hi`):
 ///
-/// - `bot_lo[i] = q_0(v[i]) = v[i] mod 2^64`             (positions 0..n)
-/// - `bot_hi[i] = q_2(v[i]) = (v[i] >> 128) mod 2^64`    (positions n..2n)
-/// - `top_lo[i] = q_1(v[i]) = (v[i] >> 64) mod 2^64`     (positions 2n..3n)
-/// - `top_hi[i] = q_3(v[i]) = floor(v[i] / 2^192)`       (positions 3n..4n)
+/// - `bot_lo[i] = q_0(v[i]) = v[i] mod R`             (positions 0..n)
+/// - `bot_hi[i] = q_2(v[i]) = (v[i] >> 2·log R) mod R` (positions n..2n)
+/// - `top_lo[i] = q_1(v[i]) = (v[i] >> log R) mod R`  (positions 2n..3n)
+/// - `top_hi[i] = q_3(v[i]) = floor(v[i] / R³)`       (positions 3n..4n)
 ///
-/// Quarters `q_0, q_1, q_2` are zero-extended single limbs (always
-/// non-negative when stored as `Int<Q>`); `q_3` is the signed
-/// arithmetic shift, preserving the sign of `v` for negatives.
+/// Quarters `q_0, q_1, q_2` are zero-extended `Q−1`-word chunks
+/// (always non-negative when stored as `Int<Q>`); `q_3` is the
+/// signed arithmetic shift, preserving the sign of `v` for
+/// negatives. `Q = 2` recovers the original 64-bit quartering
+/// (`R = 2^64`) used by the 256-bit ECDSA witnesses.
 ///
-/// `Q` must be `>= 2`: `Int<1>` (signed 64-bit, range
-/// `[-2^63, 2^63)`) overflows on quarters ≥ 2^63 (common for ECDSA
-/// witnesses) and on negative `q_3`. `Int<2>` gives one limb of
-/// headroom.
+/// `Q` must be `>= 2`: each quarter needs one limb of sign-bit
+/// headroom over its `64·(Q−1)` magnitude bits. `|v|` must fit in
+/// `4·64·(Q−1)` bits or `q_3` silently truncates.
 pub fn split_int_column_4x<const H: usize, const Q: usize>(
     column: &DenseMultilinearExtension<Int<H>>,
 ) -> DenseMultilinearExtension<Int<Q>> {
     assert!(
         Q >= 2,
-        "split_int_column_4x: Q ({Q}) must be >= 2 to hold each 64-bit \
-         quarter with a sign-bit headroom"
+        "split_int_column_4x: Q ({Q}) must be >= 2 to hold each quarter \
+         with a sign-bit headroom"
     );
+    let w = Q - 1; // words per quarter; radix = 2^(64·w)
     assert!(
-        H >= 4,
-        "split_int_column_4x: H ({H}) must be >= 4 to expose 4 source limbs"
+        H > 3 * w,
+        "split_int_column_4x: H ({H}) must exceed 3·(Q−1) ({}) to expose \
+         the three low quarters",
+        3 * w
     );
 
     let n = column.evaluations.len();
@@ -240,22 +244,23 @@ pub fn split_int_column_4x<const H: usize, const Q: usize>(
     let mut top_lo: Vec<Int<Q>> = Vec::with_capacity(n);
     let mut top_hi: Vec<Int<Q>> = Vec::with_capacity(n);
 
+    let shift3: u32 = (192 * w) as u32; // 3·64·w bits
     for entry in &column.evaluations {
         let words = entry.as_uint().to_words();
-        // q_0, q_1, q_2: zero-extend single limbs into Int<Q>.
+        // q_0, q_1, q_2: zero-extend (Q−1)-word chunks into Int<Q>.
         let mut w0 = [0u64; Q];
-        w0[0] = words[0];
+        w0[..w].copy_from_slice(&words[..w]);
         let mut w1 = [0u64; Q];
-        w1[0] = words[1];
+        w1[..w].copy_from_slice(&words[w..2 * w]);
         let mut w2 = [0u64; Q];
-        w2[0] = words[2];
+        w2[..w].copy_from_slice(&words[2 * w..3 * w]);
         bot_lo.push(Int::from_words(w0));
         top_lo.push(Int::from_words(w1));
         bot_hi.push(Int::from_words(w2));
         // q_3: signed arithmetic shift of the source Int<H>, then
         // truncate to Int<Q>. Sign-extension preserves the sign for
         // negative v.
-        let q3: Int<Q> = (*entry >> 192_u32).resize();
+        let q3: Int<Q> = (*entry >> shift3).resize();
         top_hi.push(q3);
     }
 

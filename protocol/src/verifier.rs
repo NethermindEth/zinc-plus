@@ -2121,12 +2121,13 @@ where
         .collect();
 
     // open_evals: for int columns, bar_u has 4 coeffs [q_0..q_3]; the
-    // unfolded eval is c[0] + 2^64·c[1] + 2^128·c[2] + 2^192·c[3].
+    // unfolded eval is c[0] + R·c[1] + R²·c[2] + R³·c[3] with the
+    // quartering radix R = 2^(64·(INT_QUARTER_LIMBS−1)).
     let int_section_offset = num_total_bin + uair_signature.total_cols().num_arbitrary_poly_cols();
     let two_pow_64: F = {
         let one = F::one_with_cfg(&field_cfg);
         let mut acc = one.clone();
-        for _ in 0..64 {
+        for _ in 0..64 * (INT_QUARTER_LIMBS - 1) {
             let p = acc.clone();
             acc += &p;
         }

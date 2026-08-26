@@ -674,12 +674,13 @@ where
 
 /// 4× int-fold lifted-eval helper. Produces 4-coeff bar_us per int
 /// column: `[q0_eval, q1_eval, q2_eval, q3_eval]` where each coeff is
-/// the MLE eval at `point` of the corresponding 64-bit quarter.
+/// the MLE eval at `point` of the corresponding radix-`R` quarter,
+/// `R = 2^(64·(Q−1))`.
 ///
-/// `q_0, q_1, q_2` are zero-extended single source limbs (always
-/// non-negative); `q_3` is `(v >> 192).resize()` (signed). The original
-/// column's lifted eval at `point` is recoverable as
-/// `c[0] + 2^64·c[1] + 2^128·c[2] + 2^192·c[3]` in F.
+/// `q_0, q_1, q_2` are zero-extended `(Q−1)`-word source chunks (always
+/// non-negative); `q_3` is `(v >> 3·log R).resize()` (signed). The
+/// original column's lifted eval at `point` is recoverable as
+/// `c[0] + R·c[1] + R²·c[2] + R³·c[3]` in F.
 ///
 /// Two fast-paths shave most of the per-cell cost on traces with
 /// many small/zero int values (SHA carries):
@@ -703,7 +704,10 @@ where
 {
     use crypto_primitives::crypto_bigint_int::Int;
     assert!(Q >= 2);
-    assert!(H >= 4);
+    let w = Q - 1; // words per quarter; radix = 2^(64·w). w = 1 is the
+    // original 64-bit quartering with its u64 fast paths.
+    assert!(H > 3 * w);
+    let shift3: u32 = (192 * w) as u32;
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
         .expect("compute_int_fold_4x_lifted_evals: eq table build failed");
     let zero = F::zero_with_cfg(field_cfg);
@@ -718,33 +722,45 @@ where
                 let words = entry.as_uint().to_words();
                 let eq_b = &eq_table[b];
 
-                // q_0..q_2: unsigned single-limb lift via u64 fast-path,
-                // skipping the multiply when the limb is zero.
-                if words[0] != 0 {
-                    let mut t = F::from_with_cfg(words[0], field_cfg);
-                    t *= eq_b;
-                    q0_eval += &t;
-                }
-                if words[1] != 0 {
-                    let mut t = F::from_with_cfg(words[1], field_cfg);
-                    t *= eq_b;
-                    q1_eval += &t;
-                }
-                if words[2] != 0 {
-                    let mut t = F::from_with_cfg(words[2], field_cfg);
-                    t *= eq_b;
-                    q2_eval += &t;
+                if w == 1 {
+                    // q_0..q_2: unsigned single-limb lift via u64 fast-path,
+                    // skipping the multiply when the limb is zero.
+                    if words[0] != 0 {
+                        let mut t = F::from_with_cfg(words[0], field_cfg);
+                        t *= eq_b;
+                        q0_eval += &t;
+                    }
+                    if words[1] != 0 {
+                        let mut t = F::from_with_cfg(words[1], field_cfg);
+                        t *= eq_b;
+                        q1_eval += &t;
+                    }
+                    if words[2] != 0 {
+                        let mut t = F::from_with_cfg(words[2], field_cfg);
+                        t *= eq_b;
+                        q2_eval += &t;
+                    }
+                } else {
+                    // q_0..q_2: unsigned (Q−1)-word chunks, zero-skipped.
+                    for (k, acc) in
+                        [&mut q0_eval, &mut q1_eval, &mut q2_eval].into_iter().enumerate()
+                    {
+                        let chunk = &words[k * w..(k + 1) * w];
+                        if chunk.iter().any(|&x| x != 0) {
+                            let mut cw = [0u64; Q];
+                            cw[..w].copy_from_slice(chunk);
+                            let v = Int::<Q>::from_words(cw);
+                            let mut t = F::from_with_cfg(&v, field_cfg);
+                            t *= eq_b;
+                            *acc += &t;
+                        }
+                    }
                 }
 
-                // q_3: signed arithmetic shift; check zero on both
-                // limbs of the resulting Int<2> bit pattern. For
-                // non-negative source values < 2^192, both limbs are
-                // zero and we skip the multiply entirely.
-                let q3_words = (*entry >> 192_u32).as_uint().to_words();
-                let q3_lo = q3_words[0];
-                let q3_hi = if Q >= 2 { q3_words[1] } else { 0 };
-                if q3_lo != 0 || q3_hi != 0 {
-                    let q3_v: Int<Q> = (*entry >> 192_u32).resize();
+                // q_3: signed arithmetic shift; skip the lift when the
+                // shifted value is zero (non-negative v < radix³).
+                let q3_v: Int<Q> = (*entry >> shift3).resize();
+                if q3_v.as_uint().to_words().iter().any(|&x| x != 0) {
                     let mut t = F::from_with_cfg(&q3_v, field_cfg);
                     t *= eq_b;
                     q3_eval += &t;
