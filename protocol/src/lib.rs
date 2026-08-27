@@ -939,7 +939,9 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
-        BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair, IntWordLookupUair,
+        BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair,
+        IntPrescribedLookupUair, IntWordLookupUair, PRESCRIBED_OUTSIDE, PRESCRIBED_PERMUTATION,
+        PRESCRIBED_REPEAT, PRESCRIBED_SHORT,
         BitOpRotUair, BrokenPointerHopUair, EC_FP_INT_LIMBS, GenerateRandomTrace,
         POINTER_HOP_NUM_VARS, PointerHopUair, Sha256CompressionSliceUair, Sha256Ideal,
         ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
@@ -1447,6 +1449,98 @@ mod tests {
                 assert!(res.is_err(), "a tampered word lift must not verify");
             },
         );
+    }
+
+    /// End-to-end test of the prescribed lookup over integer columns:
+    /// four witness int columns, each holding a permutation of 1..=9 and
+    /// zeros, all declared as one `Prescribed` group. Exercises
+    /// prove_group_prescribed, the table side the verifier builds itself,
+    /// the int parent binding and the extra opening at the group's
+    /// r_inner, and the proof serialization round trip.
+    #[test]
+    fn test_e2e_int_prescribed_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntPrescribedLookupUair<ZtInt, PRESCRIBED_PERMUTATION>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: a nine where the eight should be. Every cell is still
+    /// in the table, so nothing but the multiplicities catches it -- and
+    /// those are the ones the verifier counts for itself.
+    #[test]
+    fn test_e2e_int_prescribed_repeat_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntPrescribedLookupUair<ZtInt, PRESCRIBED_REPEAT>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a repeated value is not the prescribed multiset, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// One value short is one pad too many: the same identity failing,
+    /// now on the pad's own multiplicity rather than a value's.
+    #[test]
+    fn test_e2e_int_prescribed_short_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntPrescribedLookupUair<ZtInt, PRESCRIBED_SHORT>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a missing value leaves a pad count that must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// A cell the table never names has nowhere to sit in it, so the
+    /// prover refuses rather than emitting a proof of something false.
+    #[test]
+    fn test_e2e_int_prescribed_outside_refused() {
+        type Uair = IntPrescribedLookupUair<ZtInt, PRESCRIBED_OUTSIDE>;
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let trace = <Uair as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+        let res = ZincPlusPiop::<TestZincTypesIprs, Uair, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn);
+        assert!(res.is_err(), "a cell outside the prescribed table must not prove");
     }
 
     /// Negative test: corrupting a lookup chunk-lift coefficient must make

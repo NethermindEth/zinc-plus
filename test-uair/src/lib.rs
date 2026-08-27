@@ -295,6 +295,106 @@ where
     }
 }
 
+/// Synthetic prescribed-lookup UAIR: four witness integer columns, all
+/// declared against one `Prescribed` table -- the values 1..=9 with pad
+/// 0 -- so a single group carries them. The algebraic constraint is
+/// trivial: the lookup is the whole claim, and that claim is that every
+/// column holds each of 1..=9 exactly once and a zero in every other row.
+///
+/// This is the shape a sudoku row takes: a permutation checked by one
+/// lookup rather than by a polynomial identity of that degree.
+///
+/// `FILL` says how the trace is laid down, so the same declaration can be
+/// handed a column that is not the multiset it names.
+#[derive(Clone, Debug)]
+pub struct IntPrescribedLookupUair<R, const FILL: u8>(PhantomData<R>);
+
+/// How many integer columns [`IntPrescribedLookupUair`] checks.
+pub const INT_PRESCRIBED_COLS: usize = 4;
+/// A permutation of 1..=9 with zero padding: the multiset the table names.
+pub const PRESCRIBED_PERMUTATION: u8 = 0;
+/// The eight becomes a second nine: still all in the table, wrong multiset.
+pub const PRESCRIBED_REPEAT: u8 = 1;
+/// The eight becomes a ten, which the table never names.
+pub const PRESCRIBED_OUTSIDE: u8 = 2;
+/// One value short, and so one pad too many.
+pub const PRESCRIBED_SHORT: u8 = 3;
+
+/// The table [`IntPrescribedLookupUair`] declares for every column.
+fn prescribed_row_table() -> LookupTableType {
+    LookupTableType::Prescribed { values: (1..=9).collect(), pad: 0 }
+}
+
+impl<R, const FILL: u8> Uair for IntPrescribedLookupUair<R, FILL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, INT_PRESCRIBED_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = (0..INT_PRESCRIBED_COLS)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: prescribed_row_table(),
+            })
+            .collect();
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the lookup carries the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8> GenerateRandomTrace<32> for IntPrescribedLookupUair<R, FILL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let cols: Vec<DenseMultilinearExtension<R>> = (0..INT_PRESCRIBED_COLS)
+            .map(|_| {
+                let mut values: Vec<u32> = (1..=9).collect();
+                match FILL {
+                    PRESCRIBED_REPEAT => values[7] = 9,
+                    PRESCRIBED_OUTSIDE => values[7] = 10,
+                    PRESCRIBED_SHORT => {
+                        values.pop();
+                    }
+                    _ => {}
+                }
+                values.shuffle(rng);
+                let mut evals: Vec<R> = values.into_iter().map(R::from).collect();
+                evals.resize(row_count, R::ZERO);
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+            })
+            .collect();
+        UairTrace {
+            int: cols.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// No-lookup control for [`BinLookup16Uair`]: identical 16-column layout
 /// and trivial constraint but **no lookup specs**. With this UAIR step 4b
 /// early-returns and the step-7 reducer is skipped, so an A/B against the
