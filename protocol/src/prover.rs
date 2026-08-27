@@ -20,7 +20,7 @@ use zinc_piop::{
         prepare_booleanity_group,
     },
     lookup::gkr_logup::{
-        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, WordLookupInstance,
+        BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, IntLookupInstance,
         combine_chunks, compute_binary_poly_lifts, prove_group, prove_group_word,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
@@ -899,7 +899,7 @@ impl_with_type_bounds!(ProverSumchecked
                         }
                         int_refs.push(&witness_trace.int[int_idx]);
                     }
-                    let instance = WordLookupInstance::<'_, F, Zt::Int> {
+                    let instance = IntLookupInstance::<'_, F, Zt::Int> {
                         parent_columns: int_refs,
                         parent_column_indices: parent_indices.clone(),
                         table_type,
