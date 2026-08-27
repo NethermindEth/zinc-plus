@@ -945,6 +945,7 @@ mod tests {
         TestUairSimpleMultiplication,
     };
     use zinc_uair::{
+        LookupTableType,
         ideal::{DegreeOneIdeal, rotation::RotationIdeal},
         ideal_collector::IdealOrZero,
     };
@@ -1444,6 +1445,67 @@ mod tests {
             },
             |res| {
                 assert!(res.is_err(), "a tampered word lift must not verify");
+            },
+        );
+    }
+
+    /// Negative test: a proof that carries no lookup group at all must
+    /// fail against a UAIR that declares one. The declared range check
+    /// is otherwise simply skipped, so every cell goes unchecked.
+    #[test]
+    fn test_e2e_int_word_lookup_omitted_group_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups.clear();
+                proof.lookup_proof.group_meta.clear();
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::GroupCountMismatch { .. }))
+                    ),
+                    "a proof omitting the declared lookup group must not verify"
+                );
+            },
+        );
+    }
+
+    /// Negative test: a proof that widens the declared table must fail.
+    /// The meta is what the verifier builds its subtable from, so a
+    /// `Word{16}` declaration proved as `Word{32}` would admit exactly
+    /// the cells the AIR forbids.
+    #[test]
+    fn test_e2e_int_word_lookup_widened_table_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.group_meta[0].table_type =
+                    LookupTableType::Word { width: 32, chunk_width: Some(8) };
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { .. }))
+                    ),
+                    "a proof widening the declared table must not verify"
+                );
             },
         );
     }
