@@ -149,4 +149,10 @@ pub enum LookupError {
 
     #[error("final evaluation check failed")]
     FinalEvaluationMismatch,
+
+    #[error("proof carries {got} lookup groups, the UAIR declares {declared}")]
+    GroupCountMismatch { declared: usize, got: usize },
+
+    #[error("lookup group {index} is not the one the UAIR declares")]
+    UndeclaredGroup { index: usize },
 }

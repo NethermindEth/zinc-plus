@@ -222,15 +222,17 @@ where
 ///
 /// This is the shape a range check takes: a slack cell committed as an
 /// integer, declared to the table, and refused when it does not fit.
+///
+/// `WIDTH` is the declared width, 16 unless a test asks for another one.
 #[derive(Clone, Debug)]
-pub struct IntWordLookupUair<R>(PhantomData<R>);
+pub struct IntWordLookupUair<R, const WIDTH: usize = INT_WORD_WIDTH>(PhantomData<R>);
 
 /// How many integer columns [`IntWordLookupUair`] range-checks.
 pub const INT_WORD_COLS: usize = 4;
 /// The width [`IntWordLookupUair`] range-checks to.
 pub const INT_WORD_WIDTH: usize = 16;
 
-impl<R> Uair for IntWordLookupUair<R>
+impl<R, const WIDTH: usize> Uair for IntWordLookupUair<R, WIDTH>
 where
     R: ConstSemiring + 'static,
 {
@@ -243,7 +245,7 @@ where
             .map(|i| LookupColumnSpec {
                 column_index: i,
                 table_type: LookupTableType::Word {
-                    width: INT_WORD_WIDTH,
+                    width: WIDTH,
                     chunk_width: Some(8),
                 },
             })
@@ -267,7 +269,7 @@ where
     }
 }
 
-impl<R> GenerateRandomTrace<32> for IntWordLookupUair<R>
+impl<R, const WIDTH: usize> GenerateRandomTrace<32> for IntWordLookupUair<R, WIDTH>
 where
     R: ConstSemiring + From<u32> + 'static,
 {
@@ -279,6 +281,7 @@ where
         rng: &mut Rng,
     ) -> UairTrace<'static, R, R, 32> {
         let row_count = 1usize << num_vars;
+        // Cells fit the narrowest declaration, so one trace serves every WIDTH.
         let bound: u32 = 1 << INT_WORD_WIDTH;
         let cols: Vec<DenseMultilinearExtension<R>> = (0..INT_WORD_COLS)
             .map(|_| {

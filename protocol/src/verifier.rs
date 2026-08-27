@@ -17,6 +17,7 @@ use zinc_piop::{
         prepare_booleanity_verifier, verify_bit_decomposition_consistency,
     },
     lookup::gkr_logup::{GkrLogupGroupSubclaim, GkrLogupLookupProof, verify_group},
+    lookup::group_lookup_specs,
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, ScalarMap, project_scalars, project_scalars_to_field,
@@ -857,12 +858,42 @@ where
     ///      non-parent witness bin cols — are bound to the bin commitment
     ///      by the step-7 bin multi-point reducer's single Zip+ open at r*.
     ///
-    /// No-op when the proof carries no lookup groups.
+    /// The groups are first held against the UAIR's own `lookup_specs`:
+    /// the same grouping the prover derives from them, column for column
+    /// and table type for table type. Everything below reads the table
+    /// type off the proof's meta, so without that the declared table is
+    /// the prover's to pick -- it could widen a `Word` past what the AIR
+    /// allows, or carry no group at all and leave its columns unchecked.
+    ///
+    /// No-op when the UAIR declares no lookup.
     #[allow(clippy::too_many_arguments)]
     pub fn step4b_lookup_verify<U: Uair>(
         mut self,
     ) -> Result<Self, ProtocolError<F, IdealOverF>> {
-        if self.proof_lookup_proof.groups.is_empty() {
+        let declared = group_lookup_specs(self.base.uair_signature.lookup_specs());
+        let got = self.proof_lookup_proof.groups.len();
+        if got != declared.len() || self.proof_lookup_proof.group_meta.len() != declared.len() {
+            return Err(ProtocolError::Lookup(
+                zinc_piop::lookup::LookupError::GroupCountMismatch {
+                    declared: declared.len(),
+                    got,
+                },
+            ));
+        }
+        for (index, (group, meta)) in
+            declared.iter().zip(self.proof_lookup_proof.group_meta.iter()).enumerate()
+        {
+            if group.table_type != meta.table_type
+                || group.column_indices != meta.parent_columns
+                || group.column_indices.len() != meta.num_lookups
+            {
+                return Err(ProtocolError::Lookup(
+                    zinc_piop::lookup::LookupError::UndeclaredGroup { index },
+                ));
+            }
+        }
+
+        if declared.is_empty() {
             return Ok(self);
         }
 
