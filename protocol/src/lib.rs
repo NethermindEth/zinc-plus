@@ -1510,6 +1510,47 @@ mod tests {
         );
     }
 
+    /// Negative test: an honest proof of the UAIR that declares
+    /// `Word{32}` must not verify against the one that declares
+    /// `Word{16}`. This is the weakening a tampered meta cannot reach --
+    /// every shape in the proof agrees with the wider table -- and the
+    /// verifier read that width off the proof, so before the groups were
+    /// held against the declaration this verified.
+    #[test]
+    fn test_e2e_int_word_lookup_wider_declaration_rejected() {
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        type Wide = IntWordLookupUair<ZtInt, 32>;
+        type Declared = IntWordLookupUair<ZtInt>;
+        type Piop<U> = ZincPlusPiop<TestZincTypesIprs, U, F, DEGREE_PLUS_ONE>;
+
+        let trace = <Wide as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+        let public_trace = trace.public(&<Declared as Uair>::signature());
+        let proof = Piop::<Wide>::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("Prover failed");
+
+        let res = Piop::<Declared>::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+        );
+        assert!(
+            matches!(res, Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { .. }))),
+            "a proof of the wider table must not verify against the narrower declaration"
+        );
+    }
+
     /// Negative test: corrupting a lookup chunk-lift coefficient must make
     /// verification fail (the step-4b GKR leaf / parent-binding check
     /// rejects it).
