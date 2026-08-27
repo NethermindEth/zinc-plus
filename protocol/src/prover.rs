@@ -21,7 +21,8 @@ use zinc_piop::{
     },
     lookup::gkr_logup::{
         BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, IntLookupInstance,
-        combine_chunks, compute_binary_poly_lifts, prove_group, prove_group_word,
+        combine_chunks, compute_binary_poly_lifts, prove_group, prove_group_prescribed,
+        prove_group_word,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -859,9 +860,9 @@ impl_with_type_bounds!(ProverSumchecked
             let pub_cols = self.base.uair_signature.public_cols();
             let num_pub_bin = pub_cols.num_binary_poly_cols();
 
-            // Witness int columns, for Word groups: a Word parent is an
-            // integer column, so its indices are counted past the binary
-            // and arbitrary groups.
+            // Witness int columns, for the groups that read them: such a
+            // parent is an integer column, so its indices are counted past
+            // the binary and arbitrary groups.
             let total_for_int = self.base.uair_signature.total_cols();
             let num_int_offset = add!(
                 add!(
@@ -872,13 +873,12 @@ impl_with_type_bounds!(ProverSumchecked
             );
 
             for (table_type, parent_indices) in grouped {
-                // A Word group reads integer columns and is discharged by
-                // an extra int opening at its own r_inner, the way the
-                // pointer query discharges r_A / r_B. Stage one takes a
-                // single Word group, which is what one width and chunk
-                // width give: every column range-checked the same way
-                // groups together.
-                if let LookupTableType::Word { .. } = table_type {
+                // A group over integer columns is discharged by an extra
+                // int opening at its own r_inner, the way the pointer
+                // query discharges r_A / r_B. Stage one takes a single
+                // such group, which is what one table gives: every column
+                // checked the same way groups together.
+                if table_type.reads_int_columns() {
                     if int_lookup_point.is_some() {
                         return Err(ProtocolError::Lookup(
                             zinc_piop::lookup::LookupError::NotImplemented,
@@ -899,6 +899,8 @@ impl_with_type_bounds!(ProverSumchecked
                         }
                         int_refs.push(&witness_trace.int[int_idx]);
                     }
+                    let prescribed =
+                        matches!(table_type, LookupTableType::Prescribed { .. });
                     let instance = IntLookupInstance::<'_, F, Zt::Int> {
                         parent_columns: int_refs,
                         parent_column_indices: parent_indices.clone(),
@@ -906,12 +908,22 @@ impl_with_type_bounds!(ProverSumchecked
                         projecting_element_f: &self.projecting_element_f,
                         n_vars: self.base.num_vars,
                     };
-                    let (group_proof, meta, sub) = prove_group_word::<F, Zt::Int>(
-                        &mut self.base.pcs_transcript.fs_transcript,
-                        &instance,
-                        &self.field_cfg,
-                    )
-                    .map_err(|_| {
+                    // A prescribed table is the multiset the column holds;
+                    // a Word table is the range each cell lies in. Same
+                    // parents, same discharge, different proof.
+                    let proved = match prescribed {
+                        true => prove_group_prescribed::<F, Zt::Int>(
+                            &mut self.base.pcs_transcript.fs_transcript,
+                            &instance,
+                            &self.field_cfg,
+                        ),
+                        false => prove_group_word::<F, Zt::Int>(
+                            &mut self.base.pcs_transcript.fs_transcript,
+                            &instance,
+                            &self.field_cfg,
+                        ),
+                    };
+                    let (group_proof, meta, sub) = proved.map_err(|_| {
                         ProtocolError::Lookup(
                             zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                         )
