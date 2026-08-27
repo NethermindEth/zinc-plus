@@ -26,6 +26,15 @@ pub enum LookupTableType {
     },
 }
 
+impl LookupTableType {
+    /// Whether a group of this type reads integer columns. A `BitPoly`
+    /// group's parents are binary polynomials; every other table is
+    /// indexed by a number, so its parents are integers.
+    pub fn reads_int_columns(&self) -> bool {
+        !matches!(self, Self::BitPoly { .. })
+    }
+}
+
 /// Specifies that a trace column should be looked up against a prescribed
 /// table.
 #[derive(Clone, Debug)]

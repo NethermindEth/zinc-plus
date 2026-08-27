@@ -33,7 +33,7 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    BitOp, LookupTableType, Uair, UairSignature, UairTrace,
+    BitOp, Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
@@ -113,8 +113,8 @@ pub struct VerifierTranscriptReconstructed<
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     proof_pointer_query: Option<PointerQueryProof<F>>,
     proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    proof_word_int_lifted: Vec<DynamicPolynomialF<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    proof_lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    int_lookup_point: Option<Vec<F>>,
     proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
@@ -144,8 +144,8 @@ pub struct VerifierPrimeProjected<
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     proof_pointer_query: Option<PointerQueryProof<F>>,
     proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    proof_word_int_lifted: Vec<DynamicPolynomialF<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    proof_lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    int_lookup_point: Option<Vec<F>>,
     proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
@@ -175,8 +175,8 @@ pub struct VerifierIdealChecked<
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     proof_pointer_query: Option<PointerQueryProof<F>>,
     proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    proof_word_int_lifted: Vec<DynamicPolynomialF<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    proof_lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    int_lookup_point: Option<Vec<F>>,
     proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
@@ -208,8 +208,8 @@ pub struct VerifierEvalProjected<
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     proof_pointer_query: Option<PointerQueryProof<F>>,
     proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    proof_word_int_lifted: Vec<DynamicPolynomialF<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    proof_lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    int_lookup_point: Option<Vec<F>>,
     proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
@@ -231,8 +231,8 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     proof_pointer_query: Option<PointerQueryProof<F>>,
     proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    proof_word_int_lifted: Vec<DynamicPolynomialF<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    proof_lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    int_lookup_point: Option<Vec<F>>,
     proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     lookup_r_inners: Vec<Vec<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
@@ -256,8 +256,8 @@ pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOv
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     proof_pointer_query: Option<PointerQueryProof<F>>,
     proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    proof_word_int_lifted: Vec<DynamicPolynomialF<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    proof_lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    int_lookup_point: Option<Vec<F>>,
     proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     lookup_r_inners: Vec<Vec<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
@@ -286,8 +286,8 @@ pub struct VerifierLiftedEvalsChecked<
     proof_bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     proof_pointer_query: Option<PointerQueryProof<F>>,
     proof_pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    proof_word_int_lifted: Vec<DynamicPolynomialF<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    proof_lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    int_lookup_point: Option<Vec<F>>,
     proof_pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
     lookup_r_inners: Vec<Vec<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
@@ -379,8 +379,8 @@ where
             proof_bin_lifts_at_r_star: proof.bin_lifts_at_r_star,
             proof_pointer_query: proof.pointer_query_proof,
             proof_pq_int_lifted_at_r_a: proof.pq_int_lifted_at_r_a,
-            proof_word_int_lifted: proof.word_int_lifted,
-            word_lookup_point: None,
+            proof_lookup_int_lifted: proof.lookup_int_lifted,
+            int_lookup_point: None,
             proof_pq_int_lifted_at_r_b: proof.pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
@@ -423,8 +423,8 @@ where
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             proof_pointer_query: self.proof_pointer_query,
             proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
-            proof_word_int_lifted: self.proof_word_int_lifted,
-            word_lookup_point: self.word_lookup_point,
+            proof_lookup_int_lifted: self.proof_lookup_int_lifted,
+            int_lookup_point: self.int_lookup_point,
             proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
@@ -485,8 +485,8 @@ where
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             proof_pointer_query: self.proof_pointer_query,
             proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
-            proof_word_int_lifted: self.proof_word_int_lifted,
-            word_lookup_point: self.word_lookup_point,
+            proof_lookup_int_lifted: self.proof_lookup_int_lifted,
+            int_lookup_point: self.int_lookup_point,
             proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
@@ -577,8 +577,8 @@ where
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             proof_pointer_query: self.proof_pointer_query,
             proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
-            proof_word_int_lifted: self.proof_word_int_lifted,
-            word_lookup_point: self.word_lookup_point,
+            proof_lookup_int_lifted: self.proof_lookup_int_lifted,
+            int_lookup_point: self.int_lookup_point,
             proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             _phantom: PhantomData,
         })
@@ -825,8 +825,8 @@ where
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             proof_pointer_query: self.proof_pointer_query,
             proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
-            proof_word_int_lifted: self.proof_word_int_lifted,
-            word_lookup_point: self.word_lookup_point,
+            proof_lookup_int_lifted: self.proof_lookup_int_lifted,
+            int_lookup_point: self.int_lookup_point,
             proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             lookup_r_inners: Vec::new(),
             pq_points: None,
@@ -918,9 +918,9 @@ where
             ));
         }
 
-        // Where the witness integer columns start, for a Word group's
-        // parents: past the binary and arbitrary groups and the public
-        // integer columns.
+        // Where the witness integer columns start, for an int-column
+        // group's parents: past the binary and arbitrary groups and the
+        // public integer columns.
         let num_int_offset = add!(
             add!(num_total_bin, total_cols.num_arbitrary_poly_cols()),
             pub_cols.num_int_cols()
@@ -932,18 +932,18 @@ where
             .zip(self.proof_lookup_proof.groups.iter())
             .zip(self.proof_lookup_proof.group_meta.iter())
         {
-            if let LookupTableType::Word { .. } = meta.table_type {
-                // A Word group's parents are integer columns, so its claim
+            if meta.table_type.reads_int_columns() {
+                // The group's parents are integer columns, so its claim
                 // binds against the witness-int lifted evaluations the
                 // proof carries at this same r_inner, discharged by the
                 // extra int opening in step 7. Its r_inner is not a bin
                 // claim and must not reach the bin reducer.
-                if self.word_lookup_point.is_some() {
+                if self.int_lookup_point.is_some() {
                     return Err(ProtocolError::Lookup(
                         zinc_piop::lookup::LookupError::NotImplemented,
                     ));
                 }
-                let lifted = &self.proof_word_int_lifted;
+                let lifted = &self.proof_lookup_int_lifted;
                 for (ell, &full_col_idx) in sub.parent_columns.iter().enumerate() {
                     if full_col_idx < num_int_offset {
                         return Err(ProtocolError::Lookup(
@@ -962,7 +962,7 @@ where
                         ));
                     }
                 }
-                self.word_lookup_point = Some(sub.r_inner.clone());
+                self.int_lookup_point = Some(sub.r_inner.clone());
                 continue;
             }
 
@@ -1107,8 +1107,8 @@ where
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             proof_pointer_query: self.proof_pointer_query,
             proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
-            proof_word_int_lifted: self.proof_word_int_lifted,
-            word_lookup_point: self.word_lookup_point,
+            proof_lookup_int_lifted: self.proof_lookup_int_lifted,
+            int_lookup_point: self.int_lookup_point,
             proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             lookup_r_inners: self.lookup_r_inners,
             pq_points: self.pq_points,
@@ -1224,11 +1224,11 @@ where
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        // Word lookup: mirror the prover's absorption of the witness-int
+        // Int-column lookup: mirror the prover's absorption of the witness-int
         // lifted evaluations at the group's r_inner. The prover absorbs
         // these before the pointer query's, so they are absorbed here in
         // the same order or every challenge after diverges.
-        for bar_u in &self.proof_word_int_lifted {
+        for bar_u in &self.proof_lookup_int_lifted {
             self.base
                 .pcs_transcript
                 .fs_transcript
@@ -1261,8 +1261,8 @@ where
             proof_bin_lifts_at_r_star: self.proof_bin_lifts_at_r_star,
             proof_pointer_query: self.proof_pointer_query,
             proof_pq_int_lifted_at_r_a: self.proof_pq_int_lifted_at_r_a,
-            proof_word_int_lifted: self.proof_word_int_lifted,
-            word_lookup_point: self.word_lookup_point,
+            proof_lookup_int_lifted: self.proof_lookup_int_lifted,
+            int_lookup_point: self.int_lookup_point,
             proof_pq_int_lifted_at_r_b: self.proof_pq_int_lifted_at_r_b,
             lookup_r_inners: self.lookup_r_inners,
             pq_points: self.pq_points,
@@ -1364,7 +1364,7 @@ where
             .proof_lookup_proof
             .group_meta
             .iter()
-            .filter(|meta| !matches!(meta.table_type, LookupTableType::Word { .. }))
+            .filter(|meta| !meta.table_type.reads_int_columns())
             .count();
         let reducer_present = self.proof_bin_reducer.is_some();
         // G >= 1 now always uses the reducer (one folded open); only the
@@ -1528,11 +1528,11 @@ where
             [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
         );
 
-        // Word lookup: the one extra int-batch opening at the group's
+        // Int-column lookup: the one extra int-batch opening at the group's
         // r_inner, against the proof's lifted evaluations there. Written
         // by the prover before the pointer query's, so it is read first.
-        if let Some(point) = &self.word_lookup_point {
-            let lifted = &self.proof_word_int_lifted;
+        if let Some(point) = &self.int_lookup_point {
+            let lifted = &self.proof_lookup_int_lifted;
             if lifted.len() != commitments.2.batch_size {
                 return Err(ProtocolError::PointerQueryLiftedShape);
             }

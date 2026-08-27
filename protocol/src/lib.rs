@@ -113,11 +113,12 @@ pub struct Proof<F: PrimeField> {
     /// Empty when `pointer_query_proof` is `None`.
     pub pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
     pub pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
-    /// Witness-int lifted evaluations at the Word lookup group's
-    /// `r_inner`, discharged by one extra int-batch opening. Empty when
-    /// the UAIR declares no Word lookup. This is what ties the group's
-    /// parent claim to the integer columns actually committed.
-    pub word_int_lifted: Vec<DynamicPolynomialF<F>>,
+    /// Witness-int lifted evaluations at the `r_inner` of the lookup
+    /// group whose parents are integer columns, discharged by one extra
+    /// int-batch opening. Empty when the UAIR declares no such lookup.
+    /// This is what ties the group's parent claim to the integer columns
+    /// actually committed.
+    pub lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -150,10 +151,10 @@ where
         let (lookup_proof, bytes) =
             GkrLogupLookupProof::<F>::read_transcription_bytes_subset(bytes);
 
-        // word_int_lifted: always present, empty when there is no Word
-        // group, so it needs no presence flag of its own.
-        let (word_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
-        let word_int_lifted = word_vec.0;
+        // lookup_int_lifted: always present, empty when no group reads
+        // integer columns, so it needs no presence flag of its own.
+        let (lifted_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        let lookup_int_lifted = lifted_vec.0;
 
         // [reducer_present: u8] [reducer_proof? : subset] [bin_lifts? : subset]
         let reducer_present = bytes[0];
@@ -198,7 +199,7 @@ where
             pointer_query_proof,
             pq_int_lifted_at_r_a,
             pq_int_lifted_at_r_b,
-            word_int_lifted,
+            lookup_int_lifted,
         }
     }
 
@@ -234,9 +235,9 @@ where
         // lookup_proof: u32 length prefix + GkrLogupLookupProof encoding
         let buf = self.lookup_proof.write_transcription_bytes_subset(buf);
 
-        // word_int_lifted: u32 length prefix + DynamicPolyVecF encoding,
-        // empty when no Word group was proved.
-        let buf = DynamicPolyVecF::reinterpret(&self.word_int_lifted)
+        // lookup_int_lifted: u32 length prefix + DynamicPolyVecF encoding,
+        // empty when no int-column group was proved.
+        let buf = DynamicPolyVecF::reinterpret(&self.lookup_int_lifted)
             .write_transcription_bytes_subset(buf);
 
         // [reducer_present: u8] then optional reducer_proof + bin_lifts.
@@ -305,7 +306,7 @@ where
             + GkrLogupLookupProof::<F>::LENGTH_NUM_BYTES
             + self.lookup_proof.get_num_bytes()
             + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
-            + DynamicPolyVecF::reinterpret(&self.word_int_lifted).get_num_bytes()
+            + DynamicPolyVecF::reinterpret(&self.lookup_int_lifted).get_num_bytes()
             + 1 // reducer_present flag
             + match &self.bin_reducer_proof {
                 None => 0,
@@ -1439,7 +1440,7 @@ mod tests {
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |proof| {
-                let c = &mut proof.word_int_lifted[0].coeffs[0];
+                let c = &mut proof.lookup_int_lifted[0].coeffs[0];
                 *c = c.clone() + c.clone();
             },
             |res| {

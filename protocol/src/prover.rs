@@ -209,7 +209,7 @@ pub struct ProverLookupProved<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    int_lookup_point: Option<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
 }
@@ -225,7 +225,7 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    int_lookup_point: Option<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
 
@@ -244,7 +244,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
-    word_lookup_point: Option<Vec<F>>,
+    int_lookup_point: Option<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
     mp_proof: MultipointEvalProof<F>,
@@ -255,7 +255,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     /// Witness-int lifted evaluations at the pointer-query points
     /// `r_A` / `r_B` (empty when no composed reads are declared).
     pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    word_int_lifted: Vec<DynamicPolynomialF<F>>,
+    lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
     pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -286,7 +286,7 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     lifted_evals: Vec<DynamicPolynomialF<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    word_int_lifted: Vec<DynamicPolynomialF<F>>,
+    lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
     pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -834,10 +834,10 @@ impl_with_type_bounds!(ProverSumchecked
         let mut groups = Vec::new();
         let mut group_meta = Vec::new();
         let mut subclaims: Vec<GkrLogupGroupSubclaim<F>> = Vec::new();
-        // The Word group's r_inner, if the UAIR range-checks anything:
-        // discharged by one extra int opening, as the pointer query
-        // discharges its endpoints.
-        let mut word_lookup_point: Option<Vec<F>> = None;
+        // The r_inner of the group whose parents are integer columns, if
+        // the UAIR declares one: discharged by one extra int opening, as
+        // the pointer query discharges its endpoints.
+        let mut int_lookup_point: Option<Vec<F>> = None;
 
         if !lookup_specs.is_empty() {
             // MVP: group all specs sharing the same BitPoly{width,chunk_width}
@@ -879,7 +879,7 @@ impl_with_type_bounds!(ProverSumchecked
                 // width give: every column range-checked the same way
                 // groups together.
                 if let LookupTableType::Word { .. } = table_type {
-                    if word_lookup_point.is_some() {
+                    if int_lookup_point.is_some() {
                         return Err(ProtocolError::Lookup(
                             zinc_piop::lookup::LookupError::NotImplemented,
                         ));
@@ -916,7 +916,7 @@ impl_with_type_bounds!(ProverSumchecked
                             zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                         )
                     })?;
-                    word_lookup_point = Some(sub.r_inner.clone());
+                    int_lookup_point = Some(sub.r_inner.clone());
                     groups.push(group_proof);
                     group_meta.push(meta);
                     subclaims.push(sub);
@@ -1038,16 +1038,17 @@ impl_with_type_bounds!(ProverSumchecked
         }
 
         // Only the binary groups' r_inners reach step 7's bin reducer: a
-        // Word group carries no bin lifts and is discharged by its own int
-        // opening, so feeding it here would claim an empty bin lift.
+        // group over integer columns carries no bin lifts and is discharged
+        // by its own int opening, so feeding it here would claim an empty
+        // bin lift.
         let lookup_r_inners: Vec<Vec<F>> = subclaims
             .iter()
             .zip(group_meta.iter())
-            .filter(|(_, meta)| !matches!(meta.table_type, LookupTableType::Word { .. }))
+            .filter(|(_, meta)| !meta.table_type.reads_int_columns())
             .map(|(s, _)| s.r_inner.clone())
             .collect();
         Ok(ProverLookupProved {
-            word_lookup_point,
+            int_lookup_point,
             base: self.base,
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
@@ -1175,7 +1176,7 @@ impl_with_type_bounds!(ProverLookupProved
         )?;
 
         Ok(ProverMultipointEvaled {
-            word_lookup_point: self.word_lookup_point,
+            int_lookup_point: self.int_lookup_point,
             base: self.base,
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
@@ -1218,11 +1219,11 @@ impl_with_type_bounds!(ProverMultipointEvaled
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        // Word lookup: witness-int lifted evaluations at the group's
+        // Int-column lookup: witness-int lifted evaluations at the group's
         // r_inner, absorbed after the r_0 evals and opened in step 7.
         // The lookup proved a claim about the parents' chunks; this is
         // what ties that claim to the columns actually committed.
-        let word_int_lifted: Vec<DynamicPolynomialF<F>> = match &self.word_lookup_point {
+        let lookup_int_lifted: Vec<DynamicPolynomialF<F>> = match &self.int_lookup_point {
             None => Vec::new(),
             Some(point) => {
                 let sig = &self.base.uair_signature;
@@ -1287,7 +1288,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
         };
 
         Ok(ProverLifted {
-            word_lookup_point: self.word_lookup_point,
+            int_lookup_point: self.int_lookup_point,
             base: self.base,
             field_cfg: self.field_cfg,
             ic_proof: self.ic_proof,
@@ -1301,7 +1302,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             r_0: self.r_0,
             lifted_evals,
             pq_int_lifted_at_r_a,
-            word_int_lifted,
+            lookup_int_lifted,
             pq_int_lifted_at_r_b,
         })
     }
@@ -1332,14 +1333,14 @@ impl_with_type_bounds!(ProverLifted
         let num_total_bin = total.num_binary_poly_cols();
         let num_wit_bin = num_total_bin - num_pub_bin;
 
-        // Only groups over binary columns want the bin reducer; a Word
-        // group is discharged by its own int opening, so a lookup set
-        // made only of Word groups leaves the bin side untouched.
+        // Only groups over binary columns want the bin reducer; a group
+        // over integer columns is discharged by its own int opening, so a
+        // lookup set made only of those leaves the bin side untouched.
         let n_groups = self
             .lookup_proof
             .group_meta
             .iter()
-            .filter(|meta| !matches!(meta.table_type, LookupTableType::Word { .. }))
+            .filter(|meta| !meta.table_type.reads_int_columns())
             .count();
         let (bin_reducer_proof, bin_lifts_at_r_star) = if n_groups == 0
             || self.base.hint_bin.is_none()
@@ -1442,15 +1443,15 @@ impl_with_type_bounds!(ProverLifted
             )?;
         }
 
-        // Word lookup: discharge the group's parent claim with one more
-        // int-batch opening at its r_inner. Same stage-one shape as the
-        // pointer query below, and the same future fold.
-        if let Some(point) = &self.word_lookup_point {
+        // Int-column lookup: discharge the group's parent claim with one
+        // more int-batch opening at its r_inner. Same stage-one shape as
+        // the pointer query below, and the same future fold.
+        if let Some(point) = &self.int_lookup_point {
             let hint_int = self
                 .base
                 .hint_int
                 .as_ref()
-                .expect("a Word lookup requires witness int columns");
+                .expect("a lookup over int columns requires witness int columns");
             let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut self.base.pcs_transcript,
                 self.base.pp_int,
@@ -1494,7 +1495,7 @@ impl_with_type_bounds!(ProverLifted
             bin_lifts_at_r_star,
             pointer_query_proof: self.pointer_query_proof,
             pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
-            word_int_lifted: self.word_int_lifted,
+            lookup_int_lifted: self.lookup_int_lifted,
             pq_int_lifted_at_r_b: self.pq_int_lifted_at_r_b,
         })
     }
@@ -1546,7 +1547,7 @@ impl_with_type_bounds!(ProverPcsOpened
             bin_lifts_at_r_star: self.bin_lifts_at_r_star,
             pointer_query_proof: self.pointer_query_proof,
             pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
-            word_int_lifted: self.word_int_lifted,
+            lookup_int_lifted: self.lookup_int_lifted,
             pq_int_lifted_at_r_b: self.pq_int_lifted_at_r_b,
         })
     }
@@ -2114,7 +2115,7 @@ where
         bin_lifts_at_r_star,
         pointer_query_proof: None,
         pq_int_lifted_at_r_a: Vec::new(),
-        word_int_lifted: Vec::new(),
+        lookup_int_lifted: Vec::new(),
         pq_int_lifted_at_r_b: Vec::new(),
     })
 }
@@ -3008,7 +3009,7 @@ where
         bin_lifts_at_r_star,
         pointer_query_proof: None,
         pq_int_lifted_at_r_a: Vec::new(),
-        word_int_lifted: Vec::new(),
+        lookup_int_lifted: Vec::new(),
         pq_int_lifted_at_r_b: Vec::new(),
     };
     if let Some(t) = timings.as_mut() {
