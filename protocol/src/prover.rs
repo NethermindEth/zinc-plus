@@ -10,6 +10,7 @@ use zinc_piop::{
     },
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    int_multipoint_reducer::IntMultipointReducer,
     pointer_query::{
         PointerQueryPoints, PointerQueryProof, prove_pointer_queries,
     },
@@ -227,6 +228,9 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
     int_lookup_points: Vec<Vec<F>>,
+    /// The ψ_α-projected witness int columns, kept only when an int
+    /// lookup group makes step 7 reduce over them.
+    witness_int_f: Vec<DenseMultilinearExtension<F::Inner>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
 
@@ -246,6 +250,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
     int_lookup_points: Vec<Vec<F>>,
+    witness_int_f: Vec<DenseMultilinearExtension<F::Inner>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
     mp_proof: MultipointEvalProof<F>,
@@ -283,6 +288,8 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     lookup_proof: GkrLogupLookupProof<F>,
     bin_reducer_proof: Option<BinReducerProof<F>>,
     bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    int_reducer_proof: Option<BinReducerProof<F>>,
+    int_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
@@ -1197,6 +1204,24 @@ impl_with_type_bounds!(ProverLookupProved
         let mut up_evals = self.cpr_proof.up_evals.clone();
         up_evals.extend(self.cpr_proof.bit_op_down_evals.iter().cloned());
 
+        // The ψ_α-projected witness int columns, kept only where step 7's
+        // int multipoint reducer needs them: they are the batch its P is
+        // built over, and `projected_trace_f` does not outlive this step.
+        let witness_int_f: Vec<DenseMultilinearExtension<F::Inner>> =
+            match self.int_lookup_points.is_empty() {
+                true => Vec::new(),
+                false => {
+                    let offset = add!(
+                        add!(
+                            sig.total_cols().num_binary_poly_cols(),
+                            sig.total_cols().num_arbitrary_poly_cols()
+                        ),
+                        sig.public_cols().num_int_cols()
+                    );
+                    self.projected_trace_f[offset..].to_vec()
+                }
+            };
+
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             &sources,
@@ -1208,6 +1233,7 @@ impl_with_type_bounds!(ProverLookupProved
         )?;
 
         Ok(ProverMultipointEvaled {
+            witness_int_f,
             int_lookup_points: self.int_lookup_points,
             base: self.base,
             field_cfg: self.field_cfg,
@@ -1321,6 +1347,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
         };
 
         Ok(ProverLifted {
+            witness_int_f: self.witness_int_f,
             int_lookup_points: self.int_lookup_points,
             base: self.base,
             field_cfg: self.field_cfg,
@@ -1353,7 +1380,11 @@ impl_with_type_bounds!(ProverLifted
     ///     small degree-2 sumcheck is far cheaper than a second full
     ///     Brakedown opening — especially on verify time and proof size.
     ///
-    /// Arbitrary-poly and int are always opened at r_0.
+    /// The int commitment branches the same way on the number of lookup
+    /// groups over integer columns: none and it is opened at r_0, one or
+    /// more and the int reducer folds every group's r_inner claim plus
+    /// the r_0 claim into ONE opene at a reduced point. Arbitrary-poly
+    /// is always opened at r_0.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
@@ -1465,41 +1496,107 @@ impl_with_type_bounds!(ProverLifted
                 &self.field_cfg,
             )?;
         }
-        if let Some(hint_int) = &self.base.hint_int {
-            let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut self.base.pcs_transcript,
-                self.base.pp_int,
-                &witness_trace.int,
-                &self.r_0,
-                hint_int,
-                &self.field_cfg,
-            )?;
-        }
+        // Int part, the bin part's shape: with no int lookup group the
+        // batch is opened at r_0 directly; with one or more, the reducer
+        // folds every group's r_inner claim together with the r_0 claim
+        // into ONE open at a reduced point r*. That beats a direct open
+        // even at a single group, which would otherwise cost two.
+        let (int_reducer_proof, int_lifts_at_r_star) = match self.int_lookup_points.is_empty() {
+            true => {
+                if let Some(hint_int) = &self.base.hint_int {
+                    let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                        &mut self.base.pcs_transcript,
+                        self.base.pp_int,
+                        &witness_trace.int,
+                        &self.r_0,
+                        hint_int,
+                        &self.field_cfg,
+                    )?;
+                }
+                (None, Vec::new())
+            }
+            false => {
+                let hint_int = self
+                    .base
+                    .hint_int
+                    .as_ref()
+                    .expect("a lookup over int columns requires witness int columns");
+                let witness_int_offset = add!(
+                    add!(num_total_bin, total.num_arbitrary_poly_cols()),
+                    pub_cols.num_int_cols()
+                );
+                let mut claims: Vec<ReducerBinClaim<F>> =
+                    Vec::with_capacity(add!(self.int_lookup_points.len(), 1));
+                for (point, lifts) in self
+                    .int_lookup_points
+                    .iter()
+                    .zip(self.lookup_int_lifted.iter())
+                {
+                    claims.push(ReducerBinClaim {
+                        point: point.clone(),
+                        lifts: lifts.clone(),
+                    });
+                }
+                claims.push(ReducerBinClaim {
+                    point: self.r_0.clone(),
+                    lifts: self.lifted_evals[witness_int_offset..].to_vec(),
+                });
 
-        // Int-column lookups: discharge each group's parent claim with one
-        // more int-batch opening at its r_inner. Same shape as the pointer
-        // query below, and the same future fold.
-        if !self.int_lookup_points.is_empty() {
-            let hint_int = self
-                .base
-                .hint_int
-                .as_ref()
-                .expect("a lookup over int columns requires witness int columns");
-            for point in &self.int_lookup_points {
-                let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                let (reducer_proof, reduced) = IntMultipointReducer::<F>::prove(
+                    &mut self.base.pcs_transcript.fs_transcript,
+                    &self.witness_int_f,
+                    &claims,
+                    self.base.num_vars,
+                    &self.field_cfg,
+                )
+                .map_err(|_| {
+                    ProtocolError::Lookup(zinc_piop::lookup::LookupError::FinalEvaluationMismatch)
+                })?;
+
+                let lifts_at_r_star: Vec<DynamicPolynomialF<F>> = self
+                    .witness_int_f
+                    .iter()
+                    .map(|col| {
+                        DynamicPolynomialF::new_trimmed(vec![
+                            col.clone()
+                                .evaluate_with_config(&reduced.point, &self.field_cfg)
+                                .expect("int col eval at r*"),
+                        ])
+                    })
+                    .collect();
+
+                #[cfg(test)]
+                crate::test_capture::put(&reduced.gammas_flat);
+
+                // One random weight per integer column, so the batch opening
+                // binds each folded lift and not merely their sum. The
+                // verifier draws the same from its transcript.
+                let per_poly_alphas: Vec<Vec<_>> = self
+                    .base
+                    .pcs_transcript
+                    .fs_transcript
+                    .get_challenges(witness_trace.int.len())
+                    .into_iter()
+                    .map(|a| vec![a])
+                    .collect();
+
+                let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f_with_alphas::<_, CHECK_FOR_OVERFLOW>(
                     &mut self.base.pcs_transcript,
                     self.base.pp_int,
                     &witness_trace.int,
-                    point,
+                    &reduced.point,
                     hint_int,
                     &self.field_cfg,
+                    &per_poly_alphas,
                 )?;
+
+                (Some(reducer_proof), lifts_at_r_star)
             }
-        }
+        };
 
         // Pointer query: discharge the endpoint claims with two more
         // int-batch openings, at r_A and r_B (stage 1 of the design;
-        // an int multipoint reducer is the symmetric future fold).
+        // the int reducer above is the fold they still want).
         if let Some(points) = &self.pq_points {
             let hint_int = self
                 .base
@@ -1528,6 +1625,8 @@ impl_with_type_bounds!(ProverLifted
             lifted_evals: self.lifted_evals,
             bin_reducer_proof,
             bin_lifts_at_r_star,
+            int_reducer_proof,
+            int_lifts_at_r_star,
             pointer_query_proof: self.pointer_query_proof,
             pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
             lookup_int_lifted: self.lookup_int_lifted,
@@ -1580,6 +1679,8 @@ impl_with_type_bounds!(ProverPcsOpened
             lookup_proof: self.lookup_proof,
             bin_reducer_proof: self.bin_reducer_proof,
             bin_lifts_at_r_star: self.bin_lifts_at_r_star,
+            int_reducer_proof: self.int_reducer_proof,
+            int_lifts_at_r_star: self.int_lifts_at_r_star,
             pointer_query_proof: self.pointer_query_proof,
             pq_int_lifted_at_r_a: self.pq_int_lifted_at_r_a,
             lookup_int_lifted: self.lookup_int_lifted,
@@ -2148,6 +2249,8 @@ where
         lookup_proof,
         bin_reducer_proof,
         bin_lifts_at_r_star,
+        int_reducer_proof: None,
+        int_lifts_at_r_star: Vec::new(),
         pointer_query_proof: None,
         pq_int_lifted_at_r_a: Vec::new(),
         lookup_int_lifted: Vec::new(),
@@ -3042,6 +3145,8 @@ where
         lookup_proof,
         bin_reducer_proof,
         bin_lifts_at_r_star,
+        int_reducer_proof: None,
+        int_lifts_at_r_star: Vec::new(),
         pointer_query_proof: None,
         pq_int_lifted_at_r_a: Vec::new(),
         lookup_int_lifted: Vec::new(),

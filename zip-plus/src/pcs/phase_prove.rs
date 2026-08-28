@@ -175,6 +175,41 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             commit_hint,
             field_cfg,
             None,
+            None,
+        )
+    }
+
+    /// Same as [`Self::prove_f`], but with caller-supplied per-poly alphas,
+    /// the prover counterpart of [`ZipPlus::verify_with_alphas`]. Used where
+    /// a single-coefficient (integer) batch is opened inside a reduction and
+    /// needs a random weight per column, which the inline draw would give as
+    /// the degenerate one.
+    pub fn prove_f_with_alphas<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point: &[F],
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+        per_poly_alphas: &[Vec<Zt::Chal>],
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        Self::prove_f_inner::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            polys,
+            point,
+            commit_hint,
+            field_cfg,
+            None,
+            Some(per_poly_alphas),
         )
     }
 
@@ -208,6 +243,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             commit_hint,
             field_cfg,
             Some(breakdown),
+            None,
         )
     }
 
@@ -220,6 +256,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         commit_hint: &ZipPlusHint<Zt::Cw>,
         field_cfg: &F::Config,
         mut breakdown: Option<&mut ZipPlusProveByteBreakdown>,
+        // Caller-supplied per-poly alphas, one entry per poly. When present
+        // they replace the inline draw, so the verifier's `verify_with_alphas`
+        // and this prover share an externally-agreed randomness.
+        external_alphas: Option<&[Vec<Zt::Chal>]>,
     ) -> Result<F, ZipError>
     where
         F: PrimeField
@@ -250,11 +290,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys
             .iter()
-            .map(|poly| {
-                let alphas = if degree_bound.is_zero() {
-                    vec![Zt::Chal::ONE]
-                } else {
-                    transcript.fs_transcript.get_challenges(degree_bound + 1)
+            .enumerate()
+            .map(|(i, poly)| {
+                let alphas = match external_alphas {
+                    Some(a) => a[i].clone(),
+                    None if degree_bound.is_zero() => vec![Zt::Chal::ONE],
+                    None => transcript.fs_transcript.get_challenges(degree_bound + 1),
                 };
 
                 cfg_iter!(poly.evaluations)

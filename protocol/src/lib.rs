@@ -21,6 +21,34 @@ pub mod fixed_prime;
 pub mod prover;
 pub mod verifier;
 
+/// Test-only capture of the int reducer's γ, so a soundness test can build
+/// a perturbation of the folded lifts that the plain-sum opening could not
+/// have caught. Set by the prover, read by a tamper closure.
+#[cfg(test)]
+pub(crate) mod test_capture {
+    use std::any::Any;
+    use std::cell::RefCell;
+
+    thread_local! {
+        pub static INT_REDUCER_GAMMAS: RefCell<Option<Box<dyn Any>>> = const { RefCell::new(None) };
+    }
+
+    pub fn put<F: 'static + Clone>(gammas: &[F]) {
+        INT_REDUCER_GAMMAS.with(|c| *c.borrow_mut() = Some(Box::new(gammas.to_vec())));
+    }
+
+    pub fn take<F: 'static + Clone>() -> Vec<F> {
+        INT_REDUCER_GAMMAS.with(|c| {
+            c.borrow()
+                .as_ref()
+                .expect("gammas not captured")
+                .downcast_ref::<Vec<F>>()
+                .expect("gamma type mismatch")
+                .clone()
+        })
+    }
+}
+
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -104,6 +132,15 @@ pub struct Proof<F: PrimeField> {
     /// computing the alpha-projected eval for the single bin Zip+
     /// open at `r*`.
     pub bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    /// Multi-point reducer proof for the integer batch — `Some` iff the
+    /// UAIR declares a lookup group over integer columns. Reduces every
+    /// such group's `r_inner` claim plus the step-7 `r_0` claim into ONE
+    /// Zip+ opening at the reduced point `r*`. `None` otherwise; step 7
+    /// then opens the int commitment at `r_0` directly.
+    pub int_reducer_proof: Option<BinReducerProof<F>>,
+    /// Polynomial-valued MLE evals at `r*` for each witness integer
+    /// column, in column order. Empty when `int_reducer_proof` is `None`.
+    pub int_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
     /// Pointer-query (composed read) proof — `Some` iff the UAIR
     /// declares composed reads. See
     /// `documentation/pointer-query-design.md`.
@@ -176,6 +213,19 @@ where
             v => panic!("invalid bin_reducer_proof presence flag: {v}"),
         };
 
+        // [int_reducer_present: u8] [reducer_proof? : subset] [int_lifts? : subset]
+        let int_reducer_present = bytes[0];
+        let bytes = &bytes[1..];
+        let (int_reducer_proof, int_lifts_at_r_star, bytes) = match int_reducer_present {
+            0 => (None, Vec::new(), bytes),
+            1 => {
+                let (rp, rest) = BinReducerProof::<F>::read_transcription_bytes_subset(bytes);
+                let (bv, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+                (Some(rp), bv.0, rest)
+            }
+            v => panic!("invalid int_reducer_proof presence flag: {v}"),
+        };
+
         // [pq_present: u8] [pointer_query_proof? + lifted evals at r_A/r_B]
         let pq_present = bytes[0];
         let bytes = &bytes[1..];
@@ -203,6 +253,8 @@ where
             lookup_proof,
             bin_reducer_proof,
             bin_lifts_at_r_star,
+            int_reducer_proof,
+            int_lifts_at_r_star,
             pointer_query_proof,
             pq_int_lifted_at_r_a,
             pq_int_lifted_at_r_b,
@@ -266,6 +318,25 @@ where
                 let buf = &mut buf[1..];
                 let buf = rp.write_transcription_bytes_subset(buf);
                 DynamicPolyVecF::reinterpret(&self.bin_lifts_at_r_star)
+                    .write_transcription_bytes_subset(buf)
+            }
+        };
+
+        // [int_reducer_present: u8] then optional reducer proof + int lifts.
+        let buf = match &self.int_reducer_proof {
+            None => {
+                assert!(
+                    self.int_lifts_at_r_star.is_empty(),
+                    "int_lifts_at_r_star must be empty when the int reducer is absent"
+                );
+                buf[0] = 0;
+                &mut buf[1..]
+            }
+            Some(rp) => {
+                buf[0] = 1;
+                let buf = &mut buf[1..];
+                let buf = rp.write_transcription_bytes_subset(buf);
+                DynamicPolyVecF::reinterpret(&self.int_lifts_at_r_star)
                     .write_transcription_bytes_subset(buf)
             }
         };
@@ -334,6 +405,17 @@ where
                         + rp.get_num_bytes()
                         + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
                         + bv.get_num_bytes()
+                }
+            }
+            + 1 // int_reducer_present flag
+            + match &self.int_reducer_proof {
+                None => 0,
+                Some(rp) => {
+                    let iv = DynamicPolyVecF::reinterpret(&self.int_lifts_at_r_star);
+                    BinReducerProof::<F>::LENGTH_NUM_BYTES
+                        + rp.get_num_bytes()
+                        + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + iv.get_num_bytes()
                 }
             }
             + 1 // pq_present flag
@@ -2161,6 +2243,116 @@ mod tests {
         );
     }
 
+    /// Negative test: the reduced point is where both groups' claims and
+    /// the r_0 claim come to rest, so corrupting the lifts the proof
+    /// carries there must not verify -- the reducer's own P(r*) no longer
+    /// agrees with them.
+    #[test]
+    fn test_e2e_two_groups_reduced_lift_tampered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert!(proof.int_reducer_proof.is_some());
+                let c = &mut proof.int_lifts_at_r_star[0].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::FinalEvaluationMismatch))
+                    ),
+                    "a tampered lift at r* must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: the folded int lifts must be bound one per column,
+    /// not merely in sum. This perturbs three lifts by `δ = (γ1−γ2, γ2−γ0,
+    /// γ0−γ1)`, which is zero-sum and γ-orthogonal for any γ, so it leaves
+    /// both `Σ L` and `Σ γ·L` (the plain-sum opening and `p_check`)
+    /// untouched. Only a per-column binding of the lifts catches it; before
+    /// the random-per-column opening it verified.
+    #[test]
+    fn test_e2e_two_groups_folded_lift_null_space_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert!(proof.int_reducer_proof.is_some());
+                let gammas = crate::test_capture::take::<F>();
+                assert!(
+                    proof.int_lifts_at_r_star.len() >= 3 && gammas.len() >= 3,
+                    "need at least three int columns to span the null space"
+                );
+                let deltas = [
+                    gammas[1].clone() - gammas[2].clone(),
+                    gammas[2].clone() - gammas[0].clone(),
+                    gammas[0].clone() - gammas[1].clone(),
+                ];
+                for (lift, delta) in proof.int_lifts_at_r_star[..3].iter_mut().zip(deltas) {
+                    // These grid cells are non-zero, so each lift carries its
+                    // one coefficient; move it by δ within the null space.
+                    let c = &mut lift.coeffs[0];
+                    *c = c.clone() + delta;
+                }
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::FinalEvaluationMismatch))
+                            | Err(ProtocolError::PcsVerification(2, _))
+                    ),
+                    "a null-space perturbation of the folded lifts must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: a proof that drops the int reducer must be refused
+    /// rather than falling back to the r_0 opening the reducer replaced.
+    #[test]
+    fn test_e2e_two_groups_dropped_int_reducer_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.int_reducer_proof = None;
+                proof.int_lifts_at_r_star.clear();
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::FinalEvaluationMismatch))
+                    ),
+                    "a proof without the int reducer must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
     /// Negative test: a proof carrying a lifted set past its last int
     /// group must be refused. Step 6 absorbs whatever the proof carries,
     /// so an unopened set would steer every challenge after it.
@@ -2196,7 +2388,8 @@ mod tests {
     /// selections over thirteen with the slack unchecked, and the two
     /// groups over those same thirteen. The middle row holds the width
     /// fixed, so the last Δ is the second group and nothing else, and
-    /// `zip` isolates its extra Zip+ opening from its GKR payload. Run:
+    /// `zip` -- where every Zip+ opening lives -- says what the group
+    /// costs in openings as against in GKR payload. Run:
     ///   cargo test -p zinc-protocol --release -- --ignored --nocapture bench_two_groups
     #[test]
     #[ignore]
@@ -2268,7 +2461,7 @@ mod tests {
                 "  13 cols, 2 groups : prove {bp:8.2} ms | verify {bv:7.2} ms | proof {bb:7} B | zip {bz:7} B"
             );
             println!(
-                "  second group      : {:+.2} / {:+.2} ms, {:+} B proof, of which {:+} B is its extra Zip+ open",
+                "  second group      : {:+.2} / {:+.2} ms, {:+} B proof, {:+} B of it in openings",
                 bp - op,
                 bv - ov,
                 bb as i64 - ob as i64,
