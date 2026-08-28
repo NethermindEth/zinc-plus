@@ -940,6 +940,9 @@ mod tests {
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
         BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair,
+        BROADCAST_OK, BROADCAST_VARYING, BROADCAST_WRONG, BroadcastTieUair, DECL_NONE, DECL_PINS,
+        DECL_PINS_LOOKUPS, DECL_PINS_SHORT, DECL_PINS_WRONG, PINNED_FREE, PINNED_SOLVED,
+        PINNED_TAMPERED, SudokuPinnedUair,
         IntPrescribedLookupUair, IntWordLookupUair, PRESCRIBED_OUTSIDE, PRESCRIBED_PERMUTATION,
         PRESCRIBED_REPEAT, PRESCRIBED_SHORT, SUDOKU_DUPLICATE, SUDOKU_SLID, SUDOKU_SOLVED,
         SUDOKU_SWAPPED, SUDOKU_UNSELECTED, SudokuSelectedUair, sudoku_selections,
@@ -1698,6 +1701,340 @@ mod tests {
                 );
             },
         );
+    }
+
+    /// A grid whose clue cells are fixed by point ties: seventeen cells
+    /// at positions the statement names, each pinned to the number it
+    /// holds. The positions are geometry, so the proof carries one
+    /// evaluation per committed column and not one more -- the tied
+    /// cells' indicators are the verifier's own.
+    #[test]
+    fn test_e2e_point_tie_pinned_grid() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert_eq!(proof.resolver.up_evals.len(), 9);
+                assert!(proof.lookup_proof.groups.is_empty());
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: a pinned cell holding a number other than the one
+    /// pinned to it.
+    #[test]
+    fn test_e2e_point_tie_tampered_cell_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_TAMPERED, DECL_PINS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a pinned cell holding another value must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The same failure from the declaration's side: the grid solves and
+    /// a pin names a value its cell does not hold.
+    #[test]
+    fn test_e2e_point_tie_wrong_value_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_WRONG>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a pin the cell does not answer must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The other half of what a tie means: a cell no tie names is
+    /// unconstrained, however the ties around it are met.
+    #[test]
+    fn test_e2e_point_tie_untied_cell_is_free() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_FREE, DECL_PINS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The ties are the verifier's own declaration, so a proof cannot
+    /// bring its own: one proved under seventeen pins, checked under a
+    /// signature declaring sixteen, is refused. Nothing in the proof
+    /// says which cells were tied, which is exactly why there is nothing
+    /// for a prover to name.
+    #[test]
+    fn test_e2e_point_tie_undeclared_pin_rejected() {
+        type Proved = SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS>;
+        type Checked = SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_SHORT>;
+        let num_vars = 6;
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let trace = Proved::generate_random_trace(num_vars, &mut rng());
+        let proof = ZincPlusPiop::<TestZincTypesIprs, Proved, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+        .expect("Prover failed");
+
+        let public_trace = trace.public(&Checked::signature());
+        let res = ZincPlusPiop::<TestZincTypesIprs, Checked, F, DEGREE_PLUS_ONE>::verify::<
+            _,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+        );
+        assert!(
+            matches!(
+                res,
+                Err(ProtocolError::Resolver(
+                    CombinedPolyResolverError::ClaimValueDoesNotMatch { .. }
+                ))
+            ),
+            "a tie set the signature does not declare must not verify, got {res:?}"
+        );
+    }
+
+    /// A broadcast tie at work: one cell's private value carried at
+    /// every row of a column of its own, and read there by an ordinary
+    /// uniform constraint. The value is in no public column and in no
+    /// proof field -- the tie says the column is constant and that its
+    /// constant is the cell.
+    #[test]
+    fn test_e2e_broadcast_tie() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BroadcastTieUair<ZtInt, BROADCAST_OK>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The constancy half, alone: the target column holds the tied
+    /// cell's value at the tied row and another value elsewhere, and
+    /// the reader column follows it, so nothing but the tie's own
+    /// second term catches it.
+    #[test]
+    fn test_e2e_broadcast_tie_varying_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BroadcastTieUair<ZtInt, BROADCAST_VARYING>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a target column that is not constant must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The cell half, alone: the target column is constant, at a value
+    /// the tied cell does not hold.
+    #[test]
+    fn test_e2e_broadcast_tie_wrong_value_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BroadcastTieUair<ZtInt, BROADCAST_WRONG>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a constant that is not the tied cell must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The sudoku's endgame shape: the twenty-seven multiset
+    /// obligations and the seventeen clues in one proof, the lookups
+    /// through the GKR and the clues through the constraint
+    /// composition.
+    #[test]
+    fn test_e2e_sudoku_pins_and_lookups() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_LOOKUPS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert_eq!(proof.lookup_proof.groups.len(), 1);
+                assert_eq!(proof.lookup_proof.group_meta[0].num_lookups, 27);
+                assert_eq!(proof.resolver.up_evals.len(), 9);
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Opt-in measurement of what a point tie costs: the same nine
+    /// columns with no ties, with seventeen pins, and with the pins
+    /// beside the twenty-seven selections. Run with:
+    ///   cargo test -p zinc-protocol --release -- --ignored --nocapture bench_point_ties
+    #[test]
+    #[ignore]
+    fn bench_point_ties() {
+        macro_rules! time_uair {
+            ($U:ty, $nv:expr, $reps:expr) => {{
+                let num_vars: usize = $nv;
+                let mut rng = rng();
+                let pp = setup_pp::<TestZincTypesIprs>(
+                    num_vars,
+                    (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+                );
+                let trace =
+                    <$U as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+                let sig = <$U as Uair>::signature();
+                let public_trace = trace.public(&sig);
+
+                let mut best_prove = f64::MAX;
+                let mut proof_bytes = 0usize;
+                let mut proof_keep: Option<Proof<F>> = None;
+                for _ in 0..$reps {
+                    let t = std::time::Instant::now();
+                    let proof = ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::prove::<
+                        false,
+                        CHECKED,
+                    >(&pp, &trace, num_vars, project_scalar_fn)
+                    .expect("prove");
+                    best_prove = best_prove.min(t.elapsed().as_secs_f64() * 1e3);
+                    proof_bytes = proof.get_num_bytes();
+                    proof_keep = Some(proof);
+                }
+
+                let mut best_verify = f64::MAX;
+                for _ in 0..$reps {
+                    let proof = proof_keep.clone().expect("proof");
+                    let t = std::time::Instant::now();
+                    ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar_fn,
+                        |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+                    )
+                    .expect("verify");
+                    best_verify = best_verify.min(t.elapsed().as_secs_f64() * 1e3);
+                }
+                (best_prove, best_verify, proof_bytes)
+            }};
+        }
+
+        println!("\n== point ties on a 9-column grid (IPRS, CHECKED, min of reps) ==");
+        for &nv in &[4usize, 6, 8] {
+            let (cp, cv, cb) =
+                time_uair!(SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_NONE>, nv, 6);
+            let (pp_, pv, pb) =
+                time_uair!(SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS>, nv, 6);
+            let (bp, bv, bb) = time_uair!(BroadcastTieUair<ZtInt, BROADCAST_OK>, nv, 6);
+            let (sp, sv, sb) = time_uair!(SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>, nv, 6);
+            let (mp, mv, mb) =
+                time_uair!(SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_LOOKUPS>, nv, 6);
+            println!("\nnv={nv}  ({} rows)", 1usize << nv);
+            println!("  no ties         : prove {cp:8.2} ms | verify {cv:7.2} ms | proof {cb:7} B");
+            println!(
+                "  17 pins         : prove {pp_:8.2} ms | verify {pv:7.2} ms | proof {pb:7} B   (Δ {:+.2} / {:+.2} ms, {:+} B)",
+                pp_ - cp,
+                pv - cv,
+                pb as i64 - cb as i64
+            );
+            println!(
+                "  1 broadcast     : prove {bp:8.2} ms | verify {bv:7.2} ms | proof {bb:7} B   (3 columns)"
+            );
+            println!("  27 lookups      : prove {sp:8.2} ms | verify {sv:7.2} ms | proof {sb:7} B");
+            println!(
+                "  27 lu + 17 pins : prove {mp:8.2} ms | verify {mv:7.2} ms | proof {mb:7} B   (Δ over lookups {:+.2} / {:+.2} ms, {:+} B)",
+                mp - sp,
+                mv - sv,
+                mb as i64 - sb as i64
+            );
+        }
     }
 
     /// Negative test: a proof that carries no lookup group at all must

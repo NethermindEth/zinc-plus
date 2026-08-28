@@ -32,7 +32,8 @@ use zinc_poly::{
 };
 use zinc_uair::{
     BitOp, BitOpSpec, ComposedReadSpec, ConstraintBuilder, LookupColumnSpec, LookupTableType,
-    PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
+    PointTie, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature,
+    UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -529,18 +530,258 @@ where
             SUDOKU_UNSELECTED => grid[3][12] = 4242,
             _ => {}
         }
-        let cols: Vec<DenseMultilinearExtension<R>> = grid
-            .into_iter()
-            .map(|cells| {
-                let evals: Vec<R> = cells.into_iter().map(R::from).collect();
-                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
-            })
-            .collect();
         UairTrace {
-            int: cols.into(),
+            int: grid_columns(grid, num_vars).into(),
             ..Default::default()
         }
     }
+}
+
+/// The same grid, with a clue's worth of its cells fixed by point ties
+/// rather than by a lookup: seventeen cells at positions the statement
+/// names, each pinned to the number it holds. A pin is verifier
+/// geometry -- the cell's `eq` is evaluated at the sumcheck point rather
+/// than read out of the proof -- so nothing about the seventeen
+/// positions is committed and nothing is sent.
+///
+/// `FILL` lays the grid down, `DECL` says what the signature declares,
+/// so the same grid can be handed a declaration that does not fit it and
+/// the same declaration a grid that does not answer it.
+#[derive(Clone, Debug)]
+pub struct SudokuPinnedUair<R, const FILL: u8, const DECL: u8>(PhantomData<R>);
+
+/// The grid solves and holds every clue.
+pub const PINNED_SOLVED: u8 = 0;
+/// A pinned cell holds a number other than the one pinned to it.
+pub const PINNED_TAMPERED: u8 = 1;
+/// A cell no tie names holds a number no table names either.
+pub const PINNED_FREE: u8 = 2;
+
+/// Seventeen pins, one per clue.
+pub const DECL_PINS: u8 = 0;
+/// Seventeen pins, one of them naming a value the solution does not hold
+/// at the cell it names.
+pub const DECL_PINS_WRONG: u8 = 1;
+/// The seventeen pins and the twenty-seven selections in one statement.
+pub const DECL_PINS_LOOKUPS: u8 = 2;
+/// Sixteen pins: a declaration one clue short of [`DECL_PINS`].
+pub const DECL_PINS_SHORT: u8 = 3;
+/// No ties and no lookups: the control the pins' cost is read against.
+pub const DECL_NONE: u8 = 4;
+
+/// The seventeen cells the pins fix, as `(grid row, position)` -- the
+/// grid's rows being the committed columns, a cell is column `row` at
+/// trace row `position`.
+pub const SUDOKU_CLUES: [(usize, usize); 17] = [
+    (0, 0),
+    (0, 4),
+    (1, 2),
+    (1, 6),
+    (2, 1),
+    (2, 8),
+    (3, 3),
+    (3, 5),
+    (4, 0),
+    (4, 7),
+    (5, 2),
+    (5, 4),
+    (6, 1),
+    (6, 6),
+    (7, 3),
+    (7, 8),
+    (8, 5),
+];
+
+/// The pins a `DECL` declares.
+fn sudoku_pins(decl: u8) -> Vec<PointTie> {
+    let clues: &[(usize, usize)] = match decl {
+        DECL_NONE => &[],
+        DECL_PINS_SHORT => &SUDOKU_CLUES[..16],
+        _ => &SUDOKU_CLUES,
+    };
+    clues
+        .iter()
+        .enumerate()
+        .map(|(i, &(row, position))| {
+            let held = u64::from(SUDOKU_SOLUTION[row][position]);
+            let value = match (decl, i) {
+                (DECL_PINS_WRONG, 0) => held + 1,
+                _ => held,
+            };
+            PointTie::pin(row, position, value)
+        })
+        .collect()
+}
+
+impl<R, const FILL: u8, const DECL: u8> Uair for SudokuPinnedUair<R, FILL, DECL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, SUDOKU_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = match DECL {
+            DECL_PINS_LOOKUPS => (0..SUDOKU_COLS)
+                .map(|i| LookupColumnSpec {
+                    column_index: i,
+                    table_type: sudoku_table(),
+                })
+                .collect(),
+            _ => vec![],
+        };
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+            .with_point_ties(sudoku_pins(DECL))
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the ties carry the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8, const DECL: u8> GenerateRandomTrace<32> for SudokuPinnedUair<R, FILL, DECL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        _rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut grid: Vec<Vec<u32>> = SUDOKU_SOLUTION
+            .iter()
+            .map(|row| {
+                let mut cells = row.to_vec();
+                cells.resize(row_count, 0);
+                cells
+            })
+            .collect();
+        match FILL {
+            PINNED_TAMPERED => {
+                let (row, position) = SUDOKU_CLUES[0];
+                grid[row][position] += 1;
+            }
+            PINNED_FREE => grid[0][9] = 4242,
+            _ => {}
+        }
+        UairTrace {
+            int: grid_columns(grid, num_vars).into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// A broadcast tie at work: one cell's private value, carried at every
+/// row of a column of its own, read by an ordinary uniform constraint.
+///
+/// Column 0 holds a row of the solution, column 1 is the tie's target,
+/// and column 2 is a column the constraint `c_2 - c_1 = 0` holds equal
+/// to it everywhere. The tied cell's value is neither public nor in the
+/// proof: the tie says column 1 is constant and that its constant is the
+/// cell, and the constraint reads it from there.
+#[derive(Clone, Debug)]
+pub struct BroadcastTieUair<R, const FILL: u8>(PhantomData<R>);
+
+/// Which cell of column 0 the broadcast carries.
+pub const BROADCAST_ROW: usize = 4;
+/// The target column is that cell's value at every row.
+pub const BROADCAST_OK: u8 = 0;
+/// The target column holds the cell's value at the tied row and another
+/// value elsewhere: constant is what it is not.
+pub const BROADCAST_VARYING: u8 = 1;
+/// The target column is constant, at a value the tied cell does not hold.
+pub const BROADCAST_WRONG: u8 = 2;
+
+impl<R, const FILL: u8> Uair for BroadcastTieUair<R, FILL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature::new(
+            TotalColumnLayout::new(0, 0, 3),
+            PublicColumnLayout::default(),
+            vec![],
+            vec![],
+            vec![],
+        )
+        .with_point_ties(vec![PointTie::broadcast(0, BROADCAST_ROW, 1)])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // The reader column equals the broadcast one at every row, which
+        // is the private value of a cell this constraint never names.
+        b.assert_zero(up.int[2].clone() - &up.int[1]);
+    }
+}
+
+impl<R, const FILL: u8> GenerateRandomTrace<32> for BroadcastTieUair<R, FILL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        _rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut source = SUDOKU_SOLUTION[0].to_vec();
+        source.resize(row_count, 0);
+        let held = SUDOKU_SOLUTION[0][BROADCAST_ROW];
+        let mut broadcast = match FILL {
+            BROADCAST_WRONG => vec![held + 1; row_count],
+            _ => vec![held; row_count],
+        };
+        if FILL == BROADCAST_VARYING {
+            broadcast[0] = held + 1;
+        }
+        let reader = broadcast.clone();
+        UairTrace {
+            int: grid_columns(vec![source, broadcast, reader], num_vars).into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The integer columns a grid of numbers commits as.
+fn grid_columns<R: ConstSemiring + From<u32>>(
+    grid: Vec<Vec<u32>>,
+    num_vars: usize,
+) -> Vec<DenseMultilinearExtension<R>> {
+    grid.into_iter()
+        .map(|cells| {
+            let evals: Vec<R> = cells.into_iter().map(R::from).collect();
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+        })
+        .collect()
 }
 
 /// No-lookup control for [`BinLookup16Uair`]: identical 16-column layout
