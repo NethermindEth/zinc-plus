@@ -170,7 +170,7 @@ where
     let agg_mults = histogram_multiplicities::<F>(&chunks_idx, subtable.len(), field_cfg);
     let FractionPhase { witness_result, table_gkr } = prove_fraction_phase(
         transcript,
-        &chunks_idx,
+        &WitnessLeaves::Indexed(&chunks_idx),
         &subtable,
         &agg_mults,
         num_lookups,
@@ -269,6 +269,26 @@ pub(super) struct FractionPhase<F: PrimeField> {
     pub table_gkr: GkrFractionProof<F>,
 }
 
+/// Where a group's witness leaves come from.
+///
+/// A whole-column lookup gives every leaf the numerator one and reads its
+/// denominator out of the table, so a cell is an index into it. A
+/// selection reads the cell's own value -- the columns hold cells the
+/// table says nothing about -- and the numerator is what says whether the
+/// selection picked the cell.
+pub(super) enum WitnessLeaves<'a, F: PrimeField> {
+    /// `chunks_idx[ell][k][i]` is the subtable position of chunk `k` of
+    /// row `i` of the `ell`-th parent column.
+    Indexed(&'a [Vec<Vec<u32>>]),
+    /// `cells` is the group's columns laid end to end, and
+    /// `selections[ell]` names the positions in it that selection reads,
+    /// once per time it reads them.
+    Selected {
+        cells: &'a [F],
+        selections: &'a [Vec<u32>],
+    },
+}
+
 /// The multiplicity of each table entry among the chunk indices: the
 /// histogram a table with nothing prescribed about it has to be told.
 #[allow(clippy::arithmetic_side_effects)]
@@ -303,7 +323,7 @@ where
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 pub(super) fn prove_fraction_phase<F>(
     transcript: &mut impl Transcript,
-    chunks_idx: &[Vec<Vec<u32>>],
+    leaves: &WitnessLeaves<'_, F>,
     subtable: &[F],
     agg_mults: &[Vec<F>],
     num_lookups: usize,
@@ -343,35 +363,54 @@ where
     let w_size = 1usize << w_num_vars;
     let leaves_already_pow2 = per_lookup_leaves == w_size;
 
-    // Pre-compute β − subtable[n] for each n ∈ [0, table_len). Per-leaf
-    // construction below becomes a single index + clone (no field op).
-    let beta_minus_subtable: Vec<F> = subtable
-        .iter()
-        .map(|s| beta.clone() - s)
-        .collect();
-
     // L witness fraction trees built in parallel — each tree's
     // construction is independent (different ell), and `build_fraction_tree`
     // itself is the heavy part (O(K·W) field ops per tree).
-    let witness_trees: Vec<_> = cfg_into_iter!(0..num_lookups)
-        .map(|ell| {
-            let mut leaf_q = Vec::with_capacity(w_size);
-            for k in 0..num_chunks {
-                for i in 0..witness_len {
-                    let n = chunks_idx[ell][k][i] as usize;
-                    leaf_q.push(beta_minus_subtable[n].clone());
-                }
-            }
-            if leaves_already_pow2 {
-                build_fraction_tree_ones_leaf(one.clone(), leaf_q)
-            } else {
-                let mut leaf_p = vec![one.clone(); per_lookup_leaves];
-                leaf_p.resize(w_size, zero.clone());
-                leaf_q.resize(w_size, one.clone());
-                build_fraction_tree(leaf_p, leaf_q)
-            }
-        })
-        .collect();
+    let witness_trees: Vec<_> = match leaves {
+        WitnessLeaves::Indexed(chunks_idx) => {
+            // Pre-compute β − subtable[n] for each n ∈ [0, table_len). Per-leaf
+            // construction below becomes a single index + clone (no field op).
+            let beta_minus_subtable: Vec<F> =
+                subtable.iter().map(|s| beta.clone() - s).collect();
+            cfg_into_iter!(0..num_lookups)
+                .map(|ell| {
+                    let mut leaf_q = Vec::with_capacity(w_size);
+                    for k in 0..num_chunks {
+                        for i in 0..witness_len {
+                            let n = chunks_idx[ell][k][i] as usize;
+                            leaf_q.push(beta_minus_subtable[n].clone());
+                        }
+                    }
+                    if leaves_already_pow2 {
+                        build_fraction_tree_ones_leaf(one.clone(), leaf_q)
+                    } else {
+                        let mut leaf_p = vec![one.clone(); per_lookup_leaves];
+                        leaf_p.resize(w_size, zero.clone());
+                        leaf_q.resize(w_size, one.clone());
+                        build_fraction_tree(leaf_p, leaf_q)
+                    }
+                })
+                .collect()
+        }
+        WitnessLeaves::Selected { cells, selections } => {
+            // Every selection reads the same cells, so the denominators are
+            // built once and only the numerator tells the trees apart. A
+            // cell nobody selected gets a zero there and contributes
+            // nothing, which is also what the padding gets -- so a selected
+            // group has no pad entry to pin and no row to slide a value into.
+            let mut leaf_q: Vec<F> = cells.iter().map(|c| beta.clone() - c).collect();
+            leaf_q.resize(w_size, one.clone());
+            cfg_into_iter!(0..num_lookups)
+                .map(|ell| {
+                    let mut leaf_p = vec![zero.clone(); w_size];
+                    for &j in &selections[ell] {
+                        leaf_p[j as usize] += &one;
+                    }
+                    build_fraction_tree(leaf_p, leaf_q.clone())
+                })
+                .collect()
+        }
+    };
 
     // ---- Step 6: Build α-batched table fraction tree ----
     let t_num_vars = zinc_utils::log2(table_len.next_power_of_two()) as usize;
@@ -522,7 +561,7 @@ where
     let agg_mults = histogram_multiplicities::<F>(&chunks_idx, subtable.len(), field_cfg);
     let FractionPhase { witness_result, table_gkr } = prove_fraction_phase(
         transcript,
-        &chunks_idx,
+        &WitnessLeaves::Indexed(&chunks_idx),
         &subtable,
         &agg_mults,
         num_lookups,
@@ -679,7 +718,7 @@ where
     let agg_mults = vec![multiplicities; num_lookups];
     let FractionPhase { witness_result, table_gkr } = prove_fraction_phase(
         transcript,
-        &chunks_idx,
+        &WitnessLeaves::Indexed(&chunks_idx),
         &subtable,
         &agg_mults,
         num_lookups,
@@ -743,6 +782,161 @@ where
     Ok((proof, meta, subclaim))
 }
 
+/// Inputs to [`prove_group_selected`] for a group whose table names the
+/// cells it speaks for.
+///
+/// The columns arrive already projected into the field: a cell no
+/// selection names still sits in a denominator, and no table says what it
+/// may be, so its value has to be the one the commitment carries rather
+/// than one a table can index.
+pub struct SelectedLookupInstance<'a, F: PrimeField> {
+    /// The C columns this group's selections reach across.
+    pub parent_columns: Vec<&'a DenseMultilinearExtension<F::Inner>>,
+    /// C flat-trace column indices, mirrored into the proof's group meta.
+    pub parent_column_indices: Vec<usize>,
+    /// Lookup table type -- must be `Selected`.
+    pub table_type: LookupTableType,
+    /// Number of MLE variables of each column (= log2(W)).
+    pub n_vars: usize,
+}
+
+/// The flat leaf position of every cell each selection names, over the
+/// group's columns laid end to end.
+///
+/// Refused when a selection names a cell the group does not have: a slot
+/// past its columns or a row past its rows indexes nothing at all.
+#[allow(clippy::arithmetic_side_effects)]
+fn selection_positions<F: PrimeField>(
+    selections: &[Vec<(u32, u32)>],
+    num_columns: usize,
+    witness_len: usize,
+) -> Result<Vec<Vec<u32>>, GkrLogupError<F>> {
+    selections
+        .iter()
+        .map(|selection| {
+            selection
+                .iter()
+                .map(|&(slot, row)| {
+                    let (slot, row) = (slot as usize, row as usize);
+                    if slot >= num_columns || row >= witness_len {
+                        return Err(GkrLogupError::MalformedSelection);
+                    }
+                    u32::try_from(slot * witness_len + row)
+                        .map_err(|_| GkrLogupError::MalformedSelection)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The selected half of [`prove_group`]: the table names its own cells.
+///
+/// Where a prescribed table speaks for a whole column and pads the rest,
+/// a selection speaks for the cells the signature names and says nothing
+/// about the others. So the group runs one tree per selection over the
+/// same columns, the numerator carrying the selection and the denominator
+/// the column's own value -- and an unselected cell, numerator zero,
+/// contributes exactly nothing to either side.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn prove_group_selected<F>(
+    transcript: &mut impl Transcript,
+    instance: &SelectedLookupInstance<'_, F>,
+    field_cfg: &F::Config,
+) -> Result<
+    (GkrLogupGroupProof<F>, GkrLogupGroupMeta, GkrLogupGroupSubclaim<F>),
+    GkrLogupError<F>,
+>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
+    F::Config: Sync,
+{
+    let (values, selections) = match &instance.table_type {
+        LookupTableType::Selected { values, selections } => (values, selections),
+        _ => return Err(GkrLogupError::WitnessNotInTable),
+    };
+    let num_columns = instance.parent_columns.len();
+    let num_lookups = selections.len();
+    let n_vars = instance.n_vars;
+    let witness_len = 1usize << n_vars;
+    let positions = selection_positions::<F>(selections, num_columns, witness_len)?;
+
+    // The cells the selections read: the group's columns end to end, in
+    // the order the specs declare them.
+    let cells: Vec<F> = instance
+        .parent_columns
+        .iter()
+        .flat_map(|column| {
+            column
+                .evaluations
+                .iter()
+                .map(|value| F::new_unchecked_with_cfg(value.clone(), field_cfg))
+        })
+        .collect();
+
+    // The table is the multiset itself, each entry once. Nothing here
+    // comes from the witness, so the proof carries no multiplicities.
+    let subtable: Vec<F> = values
+        .iter()
+        .map(|value| F::from_with_cfg(*value, field_cfg))
+        .collect();
+    let agg_mults = vec![vec![F::one_with_cfg(field_cfg); values.len()]; num_lookups];
+
+    let FractionPhase { witness_result, table_gkr } = prove_fraction_phase(
+        transcript,
+        &WitnessLeaves::Selected { cells: &cells, selections: &positions },
+        &subtable,
+        &agg_mults,
+        num_lookups,
+        num_columns,
+        witness_len,
+        field_cfg,
+    );
+
+    // One claim per column, shared by every selection that reaches into
+    // it: the column's own multilinear evaluation at r_inner, which is
+    // what the protocol layer binds against the commitment.
+    let r_full = &witness_result.eval_point;
+    assert!(r_full.len() >= n_vars, "GKR descent must have at least n_vars row variables");
+    let r_inner: Vec<F> = r_full[..n_vars].to_vec();
+    let eq_table = build_eq_x_r_vec(&r_inner, field_cfg)?;
+    let column_lifts: Vec<DynamicPolynomialF<F>> = cells
+        .chunks_exact(witness_len)
+        .map(|column| {
+            let mut acc = F::zero_with_cfg(field_cfg);
+            for (eq, cell) in eq_table.iter().zip(column) {
+                acc += &(eq.clone() * cell);
+            }
+            DynamicPolynomialF::new_trimmed(vec![acc])
+        })
+        .collect();
+
+    let meta = GkrLogupGroupMeta {
+        table_type: instance.table_type.clone(),
+        num_lookups,
+        num_chunks: num_columns,
+        chunk_width: PRESCRIBED_CHUNK_WIDTH,
+        witness_len,
+        parent_columns: instance.parent_column_indices.clone(),
+    };
+    let proof = GkrLogupGroupProof {
+        // Every selection reads the same columns, so the group's lifts are
+        // one row rather than one per selection.
+        chunk_lifts: vec![column_lifts.clone()],
+        aggregated_multiplicities: Vec::new(),
+        witness_gkr: witness_result.proof,
+        table_gkr,
+        bin_lifts_at_r_inner: Vec::new(),
+    };
+    let subclaim = GkrLogupGroupSubclaim {
+        r_inner,
+        combined_polynomial: column_lifts,
+        parent_columns: meta.parent_columns.clone(),
+    };
+    Ok((proof, meta, subclaim))
+}
+
 // ---------------------------------------------------------------------------
 // Verifier
 // ---------------------------------------------------------------------------
@@ -770,17 +964,37 @@ where
         LookupTableType::BitPoly { width, chunk_width: None } => (*width, *width),
         LookupTableType::Word { width, chunk_width: Some(cw) } => (*width, *cw),
         LookupTableType::Word { width, chunk_width: None } => (*width, *width),
-        LookupTableType::Prescribed { .. } => (PRESCRIBED_CHUNK_WIDTH, PRESCRIBED_CHUNK_WIDTH),
+        LookupTableType::Prescribed { .. } | LookupTableType::Selected { .. } => {
+            (PRESCRIBED_CHUNK_WIDTH, PRESCRIBED_CHUNK_WIDTH)
+        }
     };
     assert!(chunk_width > 0 && width % chunk_width == 0);
 
+    // Every selection reads the group's columns, so the group carries one
+    // row of lifts; a whole-column lookup reads only its own parent, so it
+    // carries one row per parent.
+    let selections = match &meta.table_type {
+        LookupTableType::Selected { selections, .. } => Some(selections.as_slice()),
+        _ => None,
+    };
     let num_lookups = meta.num_lookups;
     let num_chunks = meta.num_chunks;
     let witness_len = meta.witness_len;
     let n_vars = (witness_len as f64).log2() as usize;
     assert_eq!(1usize << n_vars, witness_len, "witness_len must be a power of 2");
-    assert_eq!(num_chunks, width / chunk_width);
-    assert_eq!(proof.chunk_lifts.len(), num_lookups);
+    match selections {
+        // A selection's leaves run over the group's own columns, a block
+        // each; every other table decomposes a cell into chunks.
+        Some(sels) => {
+            assert_eq!(num_chunks, meta.parent_columns.len());
+            assert_eq!(num_lookups, sels.len());
+        }
+        None => assert_eq!(num_chunks, width / chunk_width),
+    }
+    let lift_rows = if selections.is_some() { 1 } else { num_lookups };
+    if proof.chunk_lifts.len() != lift_rows {
+        return Err(GkrLogupError::GkrLeafMismatch);
+    }
 
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
@@ -788,14 +1002,24 @@ where
     // ---- Reconstruct subtable + shifts ----
     // The subtable a chunk index reads against. For Word it is the
     // integers themselves, so psi_a is the identity there and the leaf
-    // check below needs no case of its own. A prescribed table is its
-    // values, and its multiplicities come with them: the verifier builds
-    // that whole side and takes none of it from the proof.
+    // check below needs no case of its own. A prescribed or selected
+    // table is its values, and its multiplicities come with them: the
+    // verifier builds that whole side and takes none of it from the proof.
     let (subtable, prescribed_mults) = match &meta.table_type {
         LookupTableType::Word { .. } => (generate_word_table::<F>(chunk_width, field_cfg), None),
         LookupTableType::Prescribed { values, pad } => {
             let (table, multiplicities) =
                 prescribed_table_side::<F>(values, *pad, witness_len, field_cfg)?;
+            (table, Some(vec![multiplicities; num_lookups]))
+        }
+        LookupTableType::Selected { values, .. } => {
+            // No pad: a cell no selection names is not looked up at all,
+            // so there is no row left over for the table to account for.
+            let table: Vec<F> = values
+                .iter()
+                .map(|value| F::from_with_cfg(*value, field_cfg))
+                .collect();
+            let multiplicities = vec![one.clone(); values.len()];
             (table, Some(vec![multiplicities; num_lookups]))
         }
         _ => (
@@ -865,7 +1089,14 @@ where
     }
 
     // ---- Step 4: Multiplicity sums + table-side leaf check ----
-    let expected_mult_sum = F::from_with_cfg((num_chunks * witness_len) as u64, field_cfg);
+    //
+    // How many leaves each tree's numerators turn on: a whole-column
+    // lookup turns on every leaf it has, a selection only the cells it
+    // names. The table side has to account for exactly that many.
+    let leaves_read = |ell: usize| match selections {
+        Some(sels) => sels[ell].len(),
+        None => num_chunks * witness_len,
+    };
     let combined_mults: Vec<F> = {
         let mut combined = vec![zero.clone(); table_len];
         for ell in 0..num_lookups {
@@ -876,11 +1107,9 @@ where
                 combined[j] = combined[j].clone() + &scaled;
                 m_sum = m_sum + &aggregated_multiplicities[ell][j];
             }
-            if m_sum != expected_mult_sum {
-                return Err(GkrLogupError::MultiplicitySumMismatch {
-                    expected: (num_chunks * witness_len) as u64,
-                    got: 0,
-                });
+            let expected = leaves_read(ell) as u64;
+            if m_sum != F::from_with_cfg(expected, field_cfg) {
+                return Err(GkrLogupError::MultiplicitySumMismatch { expected, got: 0 });
             }
         }
         combined
@@ -917,78 +1146,85 @@ where
     // and r_outer of length log2(K) (high bits).
     let r_full = &witness_result.point;
     assert_eq!(r_full.len(), w_num_vars);
-    assert_eq!(w_num_vars, n_vars + zinc_utils::log2(num_chunks) as usize);
+    assert_eq!(
+        w_num_vars,
+        n_vars + zinc_utils::log2(num_chunks.next_power_of_two()) as usize
+    );
     let r_inner: Vec<F> = r_full[..n_vars].to_vec();
     let r_outer: Vec<F> = r_full[n_vars..].to_vec();
 
-    // expected_p^(ell)(r) should equal Σ_{j<K·W} eq(j, r) — but K·W is
-    // a power of 2 in MVP, so this is simply 1 (the all-ones MLE over
-    // the full hypercube evaluates to 1 at any point).
-    //
-    // (For non-power-of-2 case we'd call compute_witness_ones_p_eval.)
-    let expected_p_value = if per_lookup_leaves == (1usize << w_num_vars) {
-        one.clone()
-    } else {
-        let eq_at_r = build_eq_x_r_vec(r_full, field_cfg)?;
-        let mut s = zero.clone();
-        for j in 0..per_lookup_leaves {
-            s = s + &eq_at_r[j];
-        }
-        s
-    };
-    for ell in 0..num_lookups {
-        if witness_result.expected_ps[ell] != expected_p_value {
-            return Err(GkrLogupError::GkrLeafMismatch);
-        }
-    }
-
-    // For q^(ell), reconstruct from chunk lifts:
-    //   expected_qs[ell] = β - Σ_k eq_outer(k, r_outer) · ψ_a(c_k'^(ell))
-    //                       + padding_correction
-    // (no padding when K·W is a power of 2)
     // A single chunk descends on no outer variables at all, and the empty
     // product is one.
     let eq_at_outer = match r_outer.is_empty() {
         true => vec![one.clone()],
         false => build_eq_x_r_vec(&r_outer, field_cfg)?,
     };
+    // How much of the outer cube the group's leaves cover. The rest is
+    // padding, whose numerator is zero and denominator one, so it adds
+    // `1 - covered` to every q and nothing to any p. Whenever the leaf
+    // count is a power of two this is one and both corrections vanish.
+    let covered: F = eq_at_outer[..num_chunks]
+        .iter()
+        .cloned()
+        .fold(zero.clone(), |acc, eq| acc + &eq);
+    let padding = one.clone() - &covered;
+
+    // expected_p^(ell)(r) is the numerator MLE at the descent point: the
+    // covered mass where every leaf is read, and Σ eq over the named cells
+    // where a selection says which. The selection is declared, so the
+    // verifier sums those eq terms itself -- nothing about it is
+    // committed, and it costs the cells it names rather than the trace.
     for ell in 0..num_lookups {
-        if proof.chunk_lifts[ell].len() != num_chunks {
+        let expected_p = match selections {
+            Some(sels) => sels[ell].iter().fold(zero.clone(), |acc, &(slot, row)| {
+                let eq_row = eq_at_index(row as usize, &r_inner, &one);
+                acc + &(eq_at_outer[slot as usize].clone() * &eq_row)
+            }),
+            None => covered.clone(),
+        };
+        if witness_result.expected_ps[ell] != expected_p {
+            return Err(GkrLogupError::GkrLeafMismatch);
+        }
+    }
+
+    // For q^(ell), reconstruct from the lifts of the columns the tree's
+    // denominators read:
+    //   expected_qs[ell] = β·covered - Σ_k eq_outer(k, r_outer) · ψ_a(c_k')
+    //                       + padding
+    for ell in 0..num_lookups {
+        let lifts = &proof.chunk_lifts[if selections.is_some() { 0 } else { ell }];
+        if lifts.len() != num_chunks {
             return Err(GkrLogupError::GkrLeafMismatch);
         }
         let mut psi_combined = zero.clone();
         for k in 0..num_chunks {
-            let psi = eval_at_projecting_element::<F>(
-                &proof.chunk_lifts[ell][k],
-                projecting_element_f,
-                field_cfg,
-            );
+            let psi =
+                eval_at_projecting_element::<F>(&lifts[k], projecting_element_f, field_cfg);
             psi_combined = psi_combined + &(eq_at_outer[k].clone() * &psi);
         }
-        let mut padding_correction = zero.clone();
-        if per_lookup_leaves != (1usize << w_num_vars) {
-            let eq_at_full = build_eq_x_r_vec(r_full, field_cfg)?;
-            for j in per_lookup_leaves..eq_at_full.len() {
-                padding_correction = padding_correction + &eq_at_full[j];
-            }
-        }
-        let expected_q_local = beta.clone() - &psi_combined + &padding_correction;
+        let expected_q_local = beta.clone() * &covered - &psi_combined + &padding;
         if expected_q_local != witness_result.expected_qs[ell] {
             return Err(GkrLogupError::GkrLeafMismatch);
         }
     }
 
     // ---- Step 6: Combine chunk lifts into parent polynomial claim ----
-    let combined_polynomial: Vec<DynamicPolynomialF<F>> = (0..num_lookups)
-        .map(|ell| match &meta.table_type {
-            // A cell read as a number recombines to one field element by
-            // place value; BitPoly chunks are coefficient blocks.
-            LookupTableType::BitPoly { .. } => {
-                combine_chunks::<F>(&proof.chunk_lifts[ell], chunk_width, width, &zero)
-            }
-            _ => combine_chunks_word::<F>(&proof.chunk_lifts[ell], chunk_width, field_cfg),
-        })
-        .collect();
+    let combined_polynomial: Vec<DynamicPolynomialF<F>> = match &meta.table_type {
+        // A selection's chunks are whole columns, each standing for
+        // itself, so the group's claim is one lift per column and there
+        // is nothing to recombine.
+        LookupTableType::Selected { .. } => proof.chunk_lifts[0].clone(),
+        // A cell read as a number recombines to one field element by
+        // place value; BitPoly chunks are coefficient blocks.
+        LookupTableType::BitPoly { .. } => (0..num_lookups)
+            .map(|ell| combine_chunks::<F>(&proof.chunk_lifts[ell], chunk_width, width, &zero))
+            .collect(),
+        _ => (0..num_lookups)
+            .map(|ell| {
+                combine_chunks_word::<F>(&proof.chunk_lifts[ell], chunk_width, field_cfg)
+            })
+            .collect(),
+    };
 
     Ok(GkrLogupGroupSubclaim {
         r_inner,
@@ -1115,6 +1351,20 @@ pub fn combine_chunks_word<F: PrimeField + FromPrimitiveWithConfig>(
     DynamicPolynomialF::new_trimmed(vec![acc])
 }
 
+/// `eq(index, r)` read off the index's bits rather than out of a table:
+/// a verifier wanting a handful of these pays for those and not for the
+/// whole cube. Agrees with `build_eq_x_r_vec`, whose entry `j` pairs
+/// `r[nu]` with bit `nu` of `j`.
+#[allow(clippy::arithmetic_side_effects)]
+fn eq_at_index<F: PrimeField>(index: usize, r: &[F], one: &F) -> F {
+    r.iter().enumerate().fold(one.clone(), |acc, (nu, r_nu)| {
+        acc * &match (index >> nu) & 1 {
+            1 => r_nu.clone(),
+            _ => one.clone() - r_nu,
+        }
+    })
+}
+
 /// Evaluate a `DynamicPolynomialF<F>` at the projecting element `a`
 /// (`ψ_a` on a polynomial of degree < some bound). Horner from the
 /// highest coefficient down.
@@ -1145,6 +1395,7 @@ mod tests {
 
     const_monty_params!(TestParams, U128, "00000000b933426489189cb5b47d567f");
     type F = ConstMontyField<TestParams, { U128::LIMBS }>;
+    type Inner = <F as Field>::Inner;
 
     fn rand_binary_poly_col(
         n_vars: usize,
@@ -1245,6 +1496,132 @@ mod tests {
             verifier_sub.combined_polynomial[0],
             DynamicPolynomialF::new_trimmed(vec![expected])
         );
+    }
+
+    /// A 3x3 latin square laid down one row per column, over `rows` rows
+    /// so every column has cells no selection names.
+    fn latin_square(square: [[u32; 3]; 3], rows: usize) -> Vec<DenseMultilinearExtension<Inner>> {
+        let n_vars = zinc_utils::log2(rows) as usize;
+        let zero = F::from(0u32).inner().clone();
+        square
+            .iter()
+            .map(|row| {
+                let mut evals: Vec<Inner> =
+                    row.iter().map(|v| F::from(*v).inner().clone()).collect();
+                evals.resize(rows, zero.clone());
+                DenseMultilinearExtension::from_evaluations_vec(n_vars, evals, zero.clone())
+            })
+            .collect()
+    }
+
+    /// Three row selections and three column selections over the three
+    /// columns: the shape a sudoku's obligations take, at the size a unit
+    /// test can read.
+    fn latin_selections() -> Vec<Vec<(u32, u32)>> {
+        let rows = (0..3u32).map(|r| (0..3u32).map(|p| (r, p)).collect());
+        let columns = (0..3u32).map(|p| (0..3u32).map(|r| (r, p)).collect());
+        rows.chain(columns).collect()
+    }
+
+    fn latin_table(selections: Vec<Vec<(u32, u32)>>) -> LookupTableType {
+        LookupTableType::Selected { values: (1..=3).collect(), selections }
+    }
+
+    fn prove_latin(
+        columns: &[DenseMultilinearExtension<Inner>],
+        table_type: LookupTableType,
+    ) -> Result<
+        (GkrLogupGroupProof<F>, GkrLogupGroupMeta, GkrLogupGroupSubclaim<F>),
+        GkrLogupError<F>,
+    > {
+        let instance = SelectedLookupInstance::<'_, F> {
+            parent_columns: columns.iter().collect(),
+            parent_column_indices: (0..columns.len()).collect(),
+            table_type,
+            n_vars: zinc_utils::log2(columns[0].evaluations.len()) as usize,
+        };
+        prove_group_selected::<F>(&mut Blake3Transcript::new(), &instance, &())
+    }
+
+    /// Six selections over three columns -- neither count a power of two --
+    /// prove and verify as one group, and the claim the verifier is left
+    /// holding is one lift per column rather than one per selection.
+    #[test]
+    fn round_trip_selected_latin_square() {
+        let a: F = F::from(7u64);
+        let columns = latin_square([[1, 2, 3], [2, 3, 1], [3, 1, 2]], 8);
+        let (proof, meta, prover_sub) =
+            prove_latin(&columns, latin_table(latin_selections())).expect("prove");
+        assert_eq!(meta.num_lookups, 6);
+        assert_eq!(proof.chunk_lifts.len(), 1, "every selection reads the same columns");
+        assert!(proof.aggregated_multiplicities.is_empty());
+
+        let mut v_ts = Blake3Transcript::new();
+        let sub = verify_group::<F>(&mut v_ts, &proof, &meta, &a, &()).expect("verify");
+        assert_eq!(prover_sub.combined_polynomial, sub.combined_polynomial);
+
+        let eq = build_eq_x_r_vec(&sub.r_inner, &()).expect("eq");
+        for (slot, column) in columns.iter().enumerate() {
+            let expected = column.evaluations.iter().zip(eq.iter()).fold(
+                F::from(0u64),
+                |acc, (cell, eq_i)| {
+                    acc + &(eq_i.clone() * &F::new_unchecked_with_cfg(cell.clone(), &()))
+                },
+            );
+            assert_eq!(
+                sub.combined_polynomial[slot],
+                DynamicPolynomialF::new_trimmed(vec![expected])
+            );
+        }
+    }
+
+    /// A cell no selection names is genuinely unconstrained: the lookup
+    /// says nothing about it, so a column carrying anything at all in its
+    /// unnamed rows still proves and verifies.
+    #[test]
+    fn an_unnamed_cell_is_unconstrained() {
+        let a: F = F::from(7u64);
+        let mut columns = latin_square([[1, 2, 3], [2, 3, 1], [3, 1, 2]], 8);
+        columns[0].evaluations[5] = F::from(4242u64).inner().clone();
+        let (proof, meta, _) =
+            prove_latin(&columns, latin_table(latin_selections())).expect("prove");
+        let mut v_ts = Blake3Transcript::new();
+        verify_group::<F>(&mut v_ts, &proof, &meta, &a, &()).expect("verify");
+    }
+
+    /// The teeth: a value slid out of a named cell into an unnamed one of
+    /// the same column. Every cell of the column is still a value of the
+    /// table, and the selection is simply one short -- there is no pad
+    /// entry for the missing one to hide behind.
+    #[test]
+    fn a_value_slid_out_of_a_selection_is_refused() {
+        let a: F = F::from(7u64);
+        let mut columns = latin_square([[1, 2, 3], [2, 3, 1], [3, 1, 2]], 8);
+        columns[0].evaluations[5] = columns[0].evaluations[2].clone();
+        columns[0].evaluations[2] = F::from(0u64).inner().clone();
+        let (proof, meta, _) =
+            prove_latin(&columns, latin_table(latin_selections())).expect("prove");
+        let mut v_ts = Blake3Transcript::new();
+        let res = verify_group::<F>(&mut v_ts, &proof, &meta, &a, &());
+        assert!(
+            matches!(res, Err(GkrLogupError::GkrRootMismatch)),
+            "a selection one value short must fail the LogUp identity, got {res:?}"
+        );
+    }
+
+    /// A selection naming a cell the group's columns do not have indexes
+    /// nothing at all, so it is refused where the reason is legible.
+    #[test]
+    fn a_selection_outside_the_columns_is_refused() {
+        let a: F = F::from(7u64);
+        let columns = latin_square([[1, 2, 3], [2, 3, 1], [3, 1, 2]], 8);
+        for bad in [(3u32, 0u32), (0, 8)] {
+            let table = latin_table(vec![vec![(0, 0), (0, 1), bad]]);
+            assert!(matches!(
+                prove_latin(&columns, table),
+                Err(GkrLogupError::MalformedSelection)
+            ));
+        }
     }
 
     /// The teeth: every cell is in the table and the column is still the

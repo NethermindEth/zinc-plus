@@ -199,6 +199,9 @@ pub enum GkrLogupError<F: PrimeField> {
     /// values, or it names more values than the column has rows.
     #[error("prescribed table is not a multiset a column could hold")]
     MalformedPrescribedTable,
+    /// A selection names a cell the group's columns do not have.
+    #[error("selection names a cell outside the group's columns")]
+    MalformedSelection,
     /// Multiplicity sum does not match the expected witness count.
     #[error("multiplicity sum mismatch: expected {expected}, got {got}")]
     MultiplicitySumMismatch { expected: u64, got: u64 },
