@@ -698,9 +698,10 @@ where
 /// and neither is a reason to refuse the other.
 ///
 /// `FILL` says how the columns are laid down, so either side can be
-/// broken while the other stands.
+/// broken while the other stands; `DECL` says which tables the signature
+/// names, so the same thirteen columns price one group against two.
 #[derive(Clone, Debug)]
-pub struct SudokuRangedUair<R, const FILL: u8>(PhantomData<R>);
+pub struct SudokuRangedUair<R, const FILL: u8, const DECL: u8 = RANGED_BOTH>(PhantomData<R>);
 
 /// The grid's nine columns and the four range-checked ones after them.
 pub const RANGED_COLS: usize = SUDOKU_COLS + INT_WORD_COLS;
@@ -713,6 +714,13 @@ pub const RANGED_OVER_WIDTH: u8 = 1;
 /// range stands.
 pub const RANGED_DUPLICATE: u8 = 2;
 
+/// The grid's selections and the slack's range, two groups.
+pub const RANGED_BOTH: u8 = 0;
+/// The grid's selections alone: the same thirteen columns, one group,
+/// the slack unchecked. The control the second group's cost is read
+/// against.
+pub const RANGED_GRID_ONLY: u8 = 1;
+
 /// The four clues [`SudokuRangedUair`] pins.
 fn ranged_pins() -> Vec<PointTie> {
     SUDOKU_CLUES[..4]
@@ -723,7 +731,7 @@ fn ranged_pins() -> Vec<PointTie> {
         .collect()
 }
 
-impl<R, const FILL: u8> Uair for SudokuRangedUair<R, FILL>
+impl<R, const FILL: u8, const DECL: u8> Uair for SudokuRangedUair<R, FILL, DECL>
 where
     R: ConstSemiring + 'static,
 {
@@ -736,13 +744,18 @@ where
             column_index: i,
             table_type: sudoku_table(),
         });
-        let slack = (SUDOKU_COLS..RANGED_COLS).map(|i| LookupColumnSpec {
-            column_index: i,
-            table_type: LookupTableType::Word {
-                width: INT_WORD_WIDTH,
-                chunk_width: Some(8),
-            },
-        });
+        let slack: Vec<LookupColumnSpec> = match DECL {
+            RANGED_GRID_ONLY => vec![],
+            _ => (SUDOKU_COLS..RANGED_COLS)
+                .map(|i| LookupColumnSpec {
+                    column_index: i,
+                    table_type: LookupTableType::Word {
+                        width: INT_WORD_WIDTH,
+                        chunk_width: Some(8),
+                    },
+                })
+                .collect(),
+        };
         UairSignature::new(
             total,
             PublicColumnLayout::default(),
@@ -769,7 +782,7 @@ where
     }
 }
 
-impl<R, const FILL: u8> GenerateRandomTrace<32> for SudokuRangedUair<R, FILL>
+impl<R, const FILL: u8, const DECL: u8> GenerateRandomTrace<32> for SudokuRangedUair<R, FILL, DECL>
 where
     R: ConstSemiring + From<u32> + 'static,
 {

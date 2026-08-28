@@ -964,7 +964,8 @@ mod tests {
         IntPrescribedLookupUair, IntWordLookupUair, PRESCRIBED_OUTSIDE, PRESCRIBED_PERMUTATION,
         PRESCRIBED_REPEAT, PRESCRIBED_SHORT, SUDOKU_DUPLICATE, SUDOKU_SLID, SUDOKU_SOLVED,
         SUDOKU_SWAPPED, SUDOKU_UNSELECTED, SudokuSelectedUair, sudoku_selections,
-        RANGED_DUPLICATE, RANGED_OVER_WIDTH, RANGED_SOLVED, SUDOKU_COLS, SudokuRangedUair,
+        RANGED_BOTH, RANGED_DUPLICATE, RANGED_GRID_ONLY, RANGED_OVER_WIDTH, RANGED_SOLVED,
+        SUDOKU_COLS, SudokuRangedUair,
         BitOpRotUair, BrokenPointerHopUair, EC_FP_INT_LIMBS, GenerateRandomTrace,
         POINTER_HOP_NUM_VARS, PointerHopUair, Sha256CompressionSliceUair, Sha256Ideal,
         ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
@@ -2190,9 +2191,12 @@ mod tests {
         );
     }
 
-    /// Opt-in measurement of what a second int lookup group costs: the
-    /// grid's selections alone, and the same selections beside a `Word`
-    /// range over four more columns. Run with:
+    /// Opt-in measurement of what a second int lookup group costs. Three
+    /// statements: the grid's selections over nine columns, the same
+    /// selections over thirteen with the slack unchecked, and the two
+    /// groups over those same thirteen. The middle row holds the width
+    /// fixed, so the last Δ is the second group and nothing else, and
+    /// `zip` isolates its extra Zip+ opening from its GKR payload. Run:
     ///   cargo test -p zinc-protocol --release -- --ignored --nocapture bench_two_groups
     #[test]
     #[ignore]
@@ -2212,6 +2216,7 @@ mod tests {
 
                 let mut best_prove = f64::MAX;
                 let mut proof_bytes = 0usize;
+                let mut zip_bytes = 0usize;
                 let mut proof_keep: Option<Proof<F>> = None;
                 for _ in 0..$reps {
                     let t = std::time::Instant::now();
@@ -2222,6 +2227,7 @@ mod tests {
                     .expect("prove");
                     best_prove = best_prove.min(t.elapsed().as_secs_f64() * 1e3);
                     proof_bytes = proof.get_num_bytes();
+                    zip_bytes = proof.zip.len();
                     proof_keep = Some(proof);
                 }
 
@@ -2240,23 +2246,33 @@ mod tests {
                     .expect("verify");
                     best_verify = best_verify.min(t.elapsed().as_secs_f64() * 1e3);
                 }
-                (best_prove, best_verify, proof_bytes)
+                (best_prove, best_verify, proof_bytes, zip_bytes)
             }};
         }
 
         println!("\n== a second int lookup group (IPRS, CHECKED, min of reps) ==");
         for &nv in &[4usize, 6, 8] {
-            let (sp, sv, sb) = time_uair!(SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>, nv, 6);
-            let (rp, rv, rb) = time_uair!(SudokuRangedUair<ZtInt, RANGED_SOLVED>, nv, 6);
+            let (np, nv_, nb, nz) = time_uair!(SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>, nv, 6);
+            let (op, ov, ob, oz) =
+                time_uair!(SudokuRangedUair<ZtInt, RANGED_SOLVED, RANGED_GRID_ONLY>, nv, 6);
+            let (bp, bv, bb, bz) =
+                time_uair!(SudokuRangedUair<ZtInt, RANGED_SOLVED, RANGED_BOTH>, nv, 6);
             println!("\nnv={nv}  ({} rows)", 1usize << nv);
             println!(
-                "  27 selections            : prove {sp:8.2} ms | verify {sv:7.2} ms | proof {sb:7} B   (9 int cols)"
+                "   9 cols, 1 group  : prove {np:8.2} ms | verify {nv_:7.2} ms | proof {nb:7} B | zip {nz:7} B"
             );
             println!(
-                "  + word range + 4 pins    : prove {rp:8.2} ms | verify {rv:7.2} ms | proof {rb:7} B   (13 int cols, Δ {:+.2} / {:+.2} ms, {:+} B)",
-                rp - sp,
-                rv - sv,
-                rb as i64 - sb as i64
+                "  13 cols, 1 group  : prove {op:8.2} ms | verify {ov:7.2} ms | proof {ob:7} B | zip {oz:7} B"
+            );
+            println!(
+                "  13 cols, 2 groups : prove {bp:8.2} ms | verify {bv:7.2} ms | proof {bb:7} B | zip {bz:7} B"
+            );
+            println!(
+                "  second group      : {:+.2} / {:+.2} ms, {:+} B proof, of which {:+} B is its extra Zip+ open",
+                bp - op,
+                bv - ov,
+                bb as i64 - ob as i64,
+                bz as i64 - oz as i64
             );
         }
     }
