@@ -398,6 +398,151 @@ where
     }
 }
 
+/// Synthetic selected-lookup UAIR: a solved 9x9 sudoku committed as nine
+/// witness integer columns, one per grid row, and one `Selected` group
+/// carrying all twenty-seven of the grid's obligations -- nine rows, nine
+/// strides down a position, nine three-by-three blocks -- each declared
+/// to be a permutation of 1..=9. The algebraic constraint is trivial: the
+/// lookups are the whole claim, and one proof carries every one of them.
+///
+/// Rows past the ninth belong to no selection at all, so they are exactly
+/// as unconstrained as the mechanism says they are.
+///
+/// `FILL` says how the grid is laid down, so the same declaration can be
+/// handed a grid that does not solve it.
+#[derive(Clone, Debug)]
+pub struct SudokuSelectedUair<R, const FILL: u8>(PhantomData<R>);
+
+/// How many integer columns [`SudokuSelectedUair`] commits: one per row.
+pub const SUDOKU_COLS: usize = 9;
+/// The grid solves: every row, stride and block a permutation of 1..=9.
+pub const SUDOKU_SOLVED: u8 = 0;
+/// A value repeated inside one row, and so one value missing from it.
+pub const SUDOKU_DUPLICATE: u8 = 1;
+/// A value slid out of its row into a cell no selection names.
+pub const SUDOKU_SLID: u8 = 2;
+/// Two cells traded between two rows, breaking the multiset of both.
+pub const SUDOKU_SWAPPED: u8 = 3;
+/// A cell past the ninth row, which no selection names, holding a number
+/// no table does either.
+pub const SUDOKU_UNSELECTED: u8 = 4;
+
+/// A solved grid, one row per committed column.
+pub const SUDOKU_SOLUTION: [[u32; 9]; 9] = [
+    [5, 3, 4, 6, 7, 8, 9, 1, 2],
+    [6, 7, 2, 1, 9, 5, 3, 4, 8],
+    [1, 9, 8, 3, 4, 2, 5, 6, 7],
+    [8, 5, 9, 7, 6, 1, 4, 2, 3],
+    [4, 2, 6, 8, 5, 3, 7, 9, 1],
+    [7, 1, 3, 9, 2, 4, 8, 5, 6],
+    [9, 6, 1, 5, 3, 7, 2, 8, 4],
+    [2, 8, 7, 4, 1, 9, 6, 3, 5],
+    [3, 4, 5, 2, 8, 6, 1, 7, 9],
+];
+
+/// The twenty-seven cell sets a sudoku grid must each hold 1..=9 in, as
+/// `(column slot, row)` over the nine columns holding the grid's rows.
+pub fn sudoku_selections() -> Vec<Vec<(u32, u32)>> {
+    let rows = (0..9u32).map(|r| (0..9u32).map(|p| (r, p)).collect());
+    let strides = (0..9u32).map(|p| (0..9u32).map(|r| (r, p)).collect());
+    let blocks = (0..9u32).map(|b| {
+        (0..9u32)
+            .map(|c| (b / 3 * 3 + c / 3, b % 3 * 3 + c % 3))
+            .collect()
+    });
+    rows.chain(strides).chain(blocks).collect()
+}
+
+/// The table [`SudokuSelectedUair`] declares for every column.
+fn sudoku_table() -> LookupTableType {
+    LookupTableType::Selected {
+        values: (1..=9).collect(),
+        selections: sudoku_selections(),
+    }
+}
+
+impl<R, const FILL: u8> Uair for SudokuSelectedUair<R, FILL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, SUDOKU_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = (0..SUDOKU_COLS)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: sudoku_table(),
+            })
+            .collect();
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the lookups carry the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8> GenerateRandomTrace<32> for SudokuSelectedUair<R, FILL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        _rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut grid: Vec<Vec<u32>> = SUDOKU_SOLUTION
+            .iter()
+            .map(|row| {
+                let mut cells = row.to_vec();
+                cells.resize(row_count, 0);
+                cells
+            })
+            .collect();
+        match FILL {
+            SUDOKU_DUPLICATE => grid[0][1] = grid[0][0],
+            SUDOKU_SLID => {
+                grid[0][9] = grid[0][0];
+                grid[0][0] = 0;
+            }
+            SUDOKU_SWAPPED => {
+                let held = grid[0][0];
+                grid[0][0] = grid[1][1];
+                grid[1][1] = held;
+            }
+            SUDOKU_UNSELECTED => grid[3][12] = 4242,
+            _ => {}
+        }
+        let cols: Vec<DenseMultilinearExtension<R>> = grid
+            .into_iter()
+            .map(|cells| {
+                let evals: Vec<R> = cells.into_iter().map(R::from).collect();
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+            })
+            .collect();
+        UairTrace {
+            int: cols.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// No-lookup control for [`BinLookup16Uair`]: identical 16-column layout
 /// and trivial constraint but **no lookup specs**. With this UAIR step 4b
 /// early-returns and the step-7 reducer is skipped, so an A/B against the

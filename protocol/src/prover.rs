@@ -21,8 +21,8 @@ use zinc_piop::{
     },
     lookup::gkr_logup::{
         BinaryPolyLookupInstance, GkrLogupGroupSubclaim, GkrLogupLookupProof, IntLookupInstance,
-        combine_chunks, compute_binary_poly_lifts, prove_group, prove_group_prescribed,
-        prove_group_word,
+        SelectedLookupInstance, combine_chunks, compute_binary_poly_lifts, prove_group,
+        prove_group_prescribed, prove_group_selected, prove_group_word,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -899,29 +899,55 @@ impl_with_type_bounds!(ProverSumchecked
                         }
                         int_refs.push(&witness_trace.int[int_idx]);
                     }
-                    let prescribed =
-                        matches!(table_type, LookupTableType::Prescribed { .. });
-                    let instance = IntLookupInstance::<'_, F, Zt::Int> {
-                        parent_columns: int_refs,
-                        parent_column_indices: parent_indices.clone(),
-                        table_type,
-                        projecting_element_f: &self.projecting_element_f,
-                        n_vars: self.base.num_vars,
-                    };
-                    // A prescribed table is the multiset the column holds;
-                    // a Word table is the range each cell lies in. Same
-                    // parents, same discharge, different proof.
-                    let proved = match prescribed {
-                        true => prove_group_prescribed::<F, Zt::Int>(
-                            &mut self.base.pcs_transcript.fs_transcript,
-                            &instance,
-                            &self.field_cfg,
-                        ),
-                        false => prove_group_word::<F, Zt::Int>(
-                            &mut self.base.pcs_transcript.fs_transcript,
-                            &instance,
-                            &self.field_cfg,
-                        ),
+                    // A prescribed table is the multiset a column holds, a
+                    // selected one the multiset a declared set of cells
+                    // holds, and a Word table the range each cell lies in.
+                    // Same parents, same discharge, different proof.
+                    //
+                    // A selection reads its columns already projected: a
+                    // cell it does not name still sits in a denominator,
+                    // and no table says what that cell may be, so the value
+                    // has to be the one the commitment carries.
+                    let proved = match &table_type {
+                        LookupTableType::Selected { .. } => {
+                            let instance = SelectedLookupInstance::<'_, F> {
+                                parent_columns: parent_indices
+                                    .iter()
+                                    .map(|&idx| &self.projected_trace_f[idx])
+                                    .collect(),
+                                parent_column_indices: parent_indices.clone(),
+                                table_type: table_type.clone(),
+                                n_vars: self.base.num_vars,
+                            };
+                            prove_group_selected::<F>(
+                                &mut self.base.pcs_transcript.fs_transcript,
+                                &instance,
+                                &self.field_cfg,
+                            )
+                        }
+                        _ => {
+                            let prescribed =
+                                matches!(table_type, LookupTableType::Prescribed { .. });
+                            let instance = IntLookupInstance::<'_, F, Zt::Int> {
+                                parent_columns: int_refs,
+                                parent_column_indices: parent_indices.clone(),
+                                table_type: table_type.clone(),
+                                projecting_element_f: &self.projecting_element_f,
+                                n_vars: self.base.num_vars,
+                            };
+                            match prescribed {
+                                true => prove_group_prescribed::<F, Zt::Int>(
+                                    &mut self.base.pcs_transcript.fs_transcript,
+                                    &instance,
+                                    &self.field_cfg,
+                                ),
+                                false => prove_group_word::<F, Zt::Int>(
+                                    &mut self.base.pcs_transcript.fs_transcript,
+                                    &instance,
+                                    &self.field_cfg,
+                                ),
+                            }
+                        }
                     };
                     let (group_proof, meta, sub) = proved.map_err(|_| {
                         ProtocolError::Lookup(

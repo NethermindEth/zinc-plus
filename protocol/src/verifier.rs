@@ -885,7 +885,7 @@ where
         {
             if group.table_type != meta.table_type
                 || group.column_indices != meta.parent_columns
-                || group.column_indices.len() != meta.num_lookups
+                || group.table_type.num_claims(group.column_indices.len()) != meta.num_lookups
             {
                 return Err(ProtocolError::Lookup(
                     zinc_piop::lookup::LookupError::UndeclaredGroup { index },

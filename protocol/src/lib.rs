@@ -941,7 +941,8 @@ mod tests {
         BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
         BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair,
         IntPrescribedLookupUair, IntWordLookupUair, PRESCRIBED_OUTSIDE, PRESCRIBED_PERMUTATION,
-        PRESCRIBED_REPEAT, PRESCRIBED_SHORT,
+        PRESCRIBED_REPEAT, PRESCRIBED_SHORT, SUDOKU_DUPLICATE, SUDOKU_SLID, SUDOKU_SOLVED,
+        SUDOKU_SWAPPED, SUDOKU_UNSELECTED, SudokuSelectedUair, sudoku_selections,
         BitOpRotUair, BrokenPointerHopUair, EC_FP_INT_LIMBS, GenerateRandomTrace,
         POINTER_HOP_NUM_VARS, PointerHopUair, Sha256CompressionSliceUair, Sha256Ideal,
         ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
@@ -1542,6 +1543,161 @@ mod tests {
             CHECKED,
         >(&pp, &trace, num_vars, project_scalar_fn);
         assert!(res.is_err(), "a cell outside the prescribed table must not prove");
+    }
+
+    /// End-to-end test of the selected lookup: a solved 9x9 sudoku
+    /// committed as nine int columns, and one group carrying all
+    /// twenty-seven of the grid's obligations -- nine rows, nine strides,
+    /// nine blocks -- as selections over those same nine columns. Twenty-
+    /// seven multiset claims, one proof.
+    #[test]
+    fn test_e2e_sudoku_selected_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                // One table is one group, however many claims it makes:
+                // the twenty-seven selections are twenty-seven trees of
+                // one batched GKR, not twenty-seven groups.
+                assert_eq!(proof.lookup_proof.groups.len(), 1);
+                assert_eq!(proof.lookup_proof.group_meta[0].num_lookups, 27);
+                assert_eq!(proof.lookup_proof.group_meta[0].parent_columns.len(), 9);
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: a value repeated inside one row, so that row holds eight
+    /// of the nine values the table names and one of them twice. Every
+    /// cell is still a value of the table.
+    #[test]
+    fn test_e2e_sudoku_duplicate_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_DUPLICATE>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a repeated value is not a permutation of 1..=9, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The pad's absence, tested: a value slid out of its row into a cell
+    /// of the same column that no selection names. A prescribed column
+    /// would take this -- the value is still somewhere in the column --
+    /// but a selection is simply one short, and there is no pad entry for
+    /// the shortfall to be absorbed by.
+    #[test]
+    fn test_e2e_sudoku_slid_value_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SLID>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a selection one value short must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Two cells traded between two rows of the same table: each row keeps
+    /// its nine cells and loses its multiset, so nothing but the identity
+    /// itself catches it -- and it must catch it in both trees at once.
+    #[test]
+    fn test_e2e_sudoku_swapped_cells_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SWAPPED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "two broken multisets must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The other half of what selection means: a cell no selection names
+    /// is genuinely unconstrained. The grid still solves, a row past the
+    /// ninth holds a number the table never names, and the proof verifies.
+    #[test]
+    fn test_e2e_sudoku_unselected_cell_is_free() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_UNSELECTED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Negative test: a proof declaring a geometry the signature does not.
+    /// The verifier builds the selection's whole side from the meta -- the
+    /// cells it sums eq over, the multiplicities it counts -- so a proof
+    /// free to name its own cells could drop the strides and the blocks
+    /// and prove nine rows instead of twenty-seven claims.
+    #[test]
+    fn test_e2e_sudoku_undeclared_selection_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.group_meta[0].table_type = LookupTableType::Selected {
+                    values: (1..=9).collect(),
+                    selections: sudoku_selections().into_iter().take(9).collect(),
+                };
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { .. }))
+                    ),
+                    "a proof naming its own cells must not verify, got {res:?}"
+                );
+            },
+        );
     }
 
     /// Negative test: a proof that carries no lookup group at all must
