@@ -686,6 +686,126 @@ where
     }
 }
 
+/// Two tables in one statement: the solved grid of [`SudokuSelectedUair`]
+/// in the first nine integer columns, declared against a `Selected` table,
+/// and four range-checked columns after it declared against a `Word` one,
+/// with four of the clues pinned besides. A statement that owes both a
+/// multiset and a range owes a lookup group for each, and each group is
+/// discharged at its own point.
+///
+/// This is the shape a sudoku with slack takes: the grid's obligations
+/// and the slack cells' widths are separate tables over separate columns,
+/// and neither is a reason to refuse the other.
+///
+/// `FILL` says how the columns are laid down, so either side can be
+/// broken while the other stands.
+#[derive(Clone, Debug)]
+pub struct SudokuRangedUair<R, const FILL: u8>(PhantomData<R>);
+
+/// The grid's nine columns and the four range-checked ones after them.
+pub const RANGED_COLS: usize = SUDOKU_COLS + INT_WORD_COLS;
+/// Both tables hold, and so does every pin.
+pub const RANGED_SOLVED: u8 = 0;
+/// A slack cell wider than the `Word` table names: the range side breaks
+/// and the grid stands.
+pub const RANGED_OVER_WIDTH: u8 = 1;
+/// A value repeated inside a grid row: the multiset side breaks and the
+/// range stands.
+pub const RANGED_DUPLICATE: u8 = 2;
+
+/// The four clues [`SudokuRangedUair`] pins.
+fn ranged_pins() -> Vec<PointTie> {
+    SUDOKU_CLUES[..4]
+        .iter()
+        .map(|&(row, position)| {
+            PointTie::pin(row, position, u64::from(SUDOKU_SOLUTION[row][position]))
+        })
+        .collect()
+}
+
+impl<R, const FILL: u8> Uair for SudokuRangedUair<R, FILL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, RANGED_COLS);
+        let grid = (0..SUDOKU_COLS).map(|i| LookupColumnSpec {
+            column_index: i,
+            table_type: sudoku_table(),
+        });
+        let slack = (SUDOKU_COLS..RANGED_COLS).map(|i| LookupColumnSpec {
+            column_index: i,
+            table_type: LookupTableType::Word {
+                width: INT_WORD_WIDTH,
+                chunk_width: Some(8),
+            },
+        });
+        UairSignature::new(
+            total,
+            PublicColumnLayout::default(),
+            vec![],
+            grid.chain(slack).collect(),
+            vec![],
+        )
+        .with_point_ties(ranged_pins())
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the tables and the ties carry the claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8> GenerateRandomTrace<32> for SudokuRangedUair<R, FILL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut grid: Vec<Vec<u32>> = SUDOKU_SOLUTION
+            .iter()
+            .map(|row| {
+                let mut cells = row.to_vec();
+                cells.resize(row_count, 0);
+                cells
+            })
+            .collect();
+        let bound: u32 = 1 << INT_WORD_WIDTH;
+        let mut slack: Vec<Vec<u32>> = (0..INT_WORD_COLS)
+            .map(|_| (0..row_count).map(|_| rng.next_u32() % bound).collect())
+            .collect();
+        match FILL {
+            RANGED_OVER_WIDTH => slack[0][0] = bound,
+            RANGED_DUPLICATE => grid[0][1] = grid[0][0],
+            _ => {}
+        }
+        grid.append(&mut slack);
+        UairTrace {
+            int: grid_columns(grid, num_vars).into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// A broadcast tie at work: one cell's private value, carried at every
 /// row of a column of its own, read by an ordinary uniform constraint.
 ///

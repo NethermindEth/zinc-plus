@@ -210,7 +210,7 @@ pub struct ProverLookupProved<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
-    int_lookup_point: Option<Vec<F>>,
+    int_lookup_points: Vec<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
 }
@@ -226,7 +226,7 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
-    int_lookup_point: Option<Vec<F>>,
+    int_lookup_points: Vec<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
 
@@ -245,7 +245,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: GkrLogupLookupProof<F>,
     lookup_r_inners: Vec<Vec<F>>,
-    int_lookup_point: Option<Vec<F>>,
+    int_lookup_points: Vec<Vec<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_points: Option<PointerQueryPoints<F>>,
     mp_proof: MultipointEvalProof<F>,
@@ -256,7 +256,7 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     /// Witness-int lifted evaluations at the pointer-query points
     /// `r_A` / `r_B` (empty when no composed reads are declared).
     pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    lookup_int_lifted: Vec<Vec<DynamicPolynomialF<F>>>,
     pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -287,7 +287,7 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     lifted_evals: Vec<DynamicPolynomialF<F>>,
     pointer_query_proof: Option<PointerQueryProof<F>>,
     pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
-    lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    lookup_int_lifted: Vec<Vec<DynamicPolynomialF<F>>>,
     pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -835,10 +835,10 @@ impl_with_type_bounds!(ProverSumchecked
         let mut groups = Vec::new();
         let mut group_meta = Vec::new();
         let mut subclaims: Vec<GkrLogupGroupSubclaim<F>> = Vec::new();
-        // The r_inner of the group whose parents are integer columns, if
-        // the UAIR declares one: discharged by one extra int opening, as
-        // the pointer query discharges its endpoints.
-        let mut int_lookup_point: Option<Vec<F>> = None;
+        // The r_inner of each group whose parents are integer columns, in
+        // group order: one extra int opening apiece, as the pointer query
+        // discharges its endpoints.
+        let mut int_lookup_points: Vec<Vec<F>> = Vec::new();
 
         if !lookup_specs.is_empty() {
             // MVP: group all specs sharing the same BitPoly{width,chunk_width}
@@ -875,15 +875,9 @@ impl_with_type_bounds!(ProverSumchecked
             for (table_type, parent_indices) in grouped {
                 // A group over integer columns is discharged by an extra
                 // int opening at its own r_inner, the way the pointer
-                // query discharges r_A / r_B. Stage one takes a single
-                // such group, which is what one table gives: every column
-                // checked the same way groups together.
+                // query discharges r_A / r_B. One table is one group, and
+                // a statement owing several tables owes several openings.
                 if table_type.reads_int_columns() {
-                    if int_lookup_point.is_some() {
-                        return Err(ProtocolError::Lookup(
-                            zinc_piop::lookup::LookupError::NotImplemented,
-                        ));
-                    }
                     let mut int_refs = Vec::with_capacity(parent_indices.len());
                     for &idx in &parent_indices {
                         if idx < num_int_offset {
@@ -954,7 +948,7 @@ impl_with_type_bounds!(ProverSumchecked
                             zinc_piop::lookup::LookupError::FinalEvaluationMismatch,
                         )
                     })?;
-                    int_lookup_point = Some(sub.r_inner.clone());
+                    int_lookup_points.push(sub.r_inner.clone());
                     groups.push(group_proof);
                     group_meta.push(meta);
                     subclaims.push(sub);
@@ -1086,7 +1080,7 @@ impl_with_type_bounds!(ProverSumchecked
             .map(|(s, _)| s.r_inner.clone())
             .collect();
         Ok(ProverLookupProved {
-            int_lookup_point,
+            int_lookup_points,
             base: self.base,
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
@@ -1214,7 +1208,7 @@ impl_with_type_bounds!(ProverLookupProved
         )?;
 
         Ok(ProverMultipointEvaled {
-            int_lookup_point: self.int_lookup_point,
+            int_lookup_points: self.int_lookup_points,
             base: self.base,
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
@@ -1257,21 +1251,21 @@ impl_with_type_bounds!(ProverMultipointEvaled
                 .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
-        // Int-column lookup: witness-int lifted evaluations at the group's
-        // r_inner, absorbed after the r_0 evals and opened in step 7.
-        // The lookup proved a claim about the parents' chunks; this is
-        // what ties that claim to the columns actually committed.
-        let lookup_int_lifted: Vec<DynamicPolynomialF<F>> = match &self.int_lookup_point {
-            None => Vec::new(),
-            Some(point) => {
-                let sig = &self.base.uair_signature;
-                let witness_int_offset = add!(
-                    add!(
-                        sig.total_cols().num_binary_poly_cols(),
-                        sig.total_cols().num_arbitrary_poly_cols()
-                    ),
-                    sig.public_cols().num_int_cols()
-                );
+        // Int-column lookups: witness-int lifted evaluations at each
+        // group's r_inner, absorbed after the r_0 evals and opened in
+        // step 7. The lookup proved a claim about the parents' chunks;
+        // this is what ties that claim to the columns actually committed.
+        let lookup_int_lifted: Vec<Vec<DynamicPolynomialF<F>>> = {
+            let sig = &self.base.uair_signature;
+            let witness_int_offset = add!(
+                add!(
+                    sig.total_cols().num_binary_poly_cols(),
+                    sig.total_cols().num_arbitrary_poly_cols()
+                ),
+                sig.public_cols().num_int_cols()
+            );
+            let mut per_group = Vec::with_capacity(self.int_lookup_points.len());
+            for point in &self.int_lookup_points {
                 let lifted = compute_lifted_evals::<F, D>(
                     point,
                     &self.base.trace.binary_poly,
@@ -1285,8 +1279,9 @@ impl_with_type_bounds!(ProverMultipointEvaled
                         .fs_transcript
                         .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
                 }
-                witness_int
+                per_group.push(witness_int);
             }
+            per_group
         };
 
         // Pointer query: witness-int lifted evaluations at r_A / r_B,
@@ -1326,7 +1321,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
         };
 
         Ok(ProverLifted {
-            int_lookup_point: self.int_lookup_point,
+            int_lookup_points: self.int_lookup_points,
             base: self.base,
             field_cfg: self.field_cfg,
             ic_proof: self.ic_proof,
@@ -1481,23 +1476,25 @@ impl_with_type_bounds!(ProverLifted
             )?;
         }
 
-        // Int-column lookup: discharge the group's parent claim with one
-        // more int-batch opening at its r_inner. Same stage-one shape as
-        // the pointer query below, and the same future fold.
-        if let Some(point) = &self.int_lookup_point {
+        // Int-column lookups: discharge each group's parent claim with one
+        // more int-batch opening at its r_inner. Same shape as the pointer
+        // query below, and the same future fold.
+        if !self.int_lookup_points.is_empty() {
             let hint_int = self
                 .base
                 .hint_int
                 .as_ref()
                 .expect("a lookup over int columns requires witness int columns");
-            let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut self.base.pcs_transcript,
-                self.base.pp_int,
-                &witness_trace.int,
-                point,
-                hint_int,
-                &self.field_cfg,
-            )?;
+            for point in &self.int_lookup_points {
+                let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    &mut self.base.pcs_transcript,
+                    self.base.pp_int,
+                    &witness_trace.int,
+                    point,
+                    hint_int,
+                    &self.field_cfg,
+                )?;
+            }
         }
 
         // Pointer query: discharge the endpoint claims with two more

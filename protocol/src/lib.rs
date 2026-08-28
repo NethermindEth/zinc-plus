@@ -113,12 +113,12 @@ pub struct Proof<F: PrimeField> {
     /// Empty when `pointer_query_proof` is `None`.
     pub pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
     pub pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
-    /// Witness-int lifted evaluations at the `r_inner` of the lookup
-    /// group whose parents are integer columns, discharged by one extra
-    /// int-batch opening. Empty when the UAIR declares no such lookup.
-    /// This is what ties the group's parent claim to the integer columns
-    /// actually committed.
-    pub lookup_int_lifted: Vec<DynamicPolynomialF<F>>,
+    /// Witness-int lifted evaluations at the `r_inner` of each lookup
+    /// group whose parents are integer columns, in group order, each
+    /// discharged by one extra int-batch opening. Empty when the UAIR
+    /// declares no such lookup. This is what ties a group's parent claim
+    /// to the integer columns actually committed.
+    pub lookup_int_lifted: Vec<Vec<DynamicPolynomialF<F>>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -151,10 +151,17 @@ where
         let (lookup_proof, bytes) =
             GkrLogupLookupProof::<F>::read_transcription_bytes_subset(bytes);
 
-        // lookup_int_lifted: always present, empty when no group reads
-        // integer columns, so it needs no presence flag of its own.
-        let (lifted_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
-        let lookup_int_lifted = lifted_vec.0;
+        // lookup_int_lifted: [groups: u32] then one length-prefixed
+        // DynamicPolyVecF per group. Always present, zero groups when
+        // none reads integer columns, so it needs no presence flag.
+        let (int_groups, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let mut lookup_int_lifted =
+            Vec::with_capacity(usize::try_from(int_groups).expect("group count fits in usize"));
+        for _ in 0..int_groups {
+            let (lifted_vec, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+            lookup_int_lifted.push(lifted_vec.0);
+            bytes = rest;
+        }
 
         // [reducer_present: u8] [reducer_proof? : subset] [bin_lifts? : subset]
         let reducer_present = bytes[0];
@@ -235,10 +242,14 @@ where
         // lookup_proof: u32 length prefix + GkrLogupLookupProof encoding
         let buf = self.lookup_proof.write_transcription_bytes_subset(buf);
 
-        // lookup_int_lifted: u32 length prefix + DynamicPolyVecF encoding,
-        // empty when no int-column group was proved.
-        let buf = DynamicPolyVecF::reinterpret(&self.lookup_int_lifted)
-            .write_transcription_bytes_subset(buf);
+        // lookup_int_lifted: [groups: u32] then one length-prefixed
+        // DynamicPolyVecF per int-column group.
+        let int_groups =
+            u32::try_from(self.lookup_int_lifted.len()).expect("group count fits in u32");
+        let mut buf = int_groups.write_transcription_bytes_subset(buf);
+        for lifted in &self.lookup_int_lifted {
+            buf = DynamicPolyVecF::reinterpret(lifted).write_transcription_bytes_subset(buf);
+        }
 
         // [reducer_present: u8] then optional reducer_proof + bin_lifts.
         let buf = match &self.bin_reducer_proof {
@@ -305,8 +316,15 @@ where
             + witness_vec.get_num_bytes()
             + GkrLogupLookupProof::<F>::LENGTH_NUM_BYTES
             + self.lookup_proof.get_num_bytes()
-            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
-            + DynamicPolyVecF::reinterpret(&self.lookup_int_lifted).get_num_bytes()
+            + u32::NUM_BYTES // int lookup group count
+            + self
+                .lookup_int_lifted
+                .iter()
+                .map(|lifted| {
+                    DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + DynamicPolyVecF::reinterpret(lifted).get_num_bytes()
+                })
+                .sum::<usize>()
             + 1 // reducer_present flag
             + match &self.bin_reducer_proof {
                 None => 0,
@@ -946,6 +964,7 @@ mod tests {
         IntPrescribedLookupUair, IntWordLookupUair, PRESCRIBED_OUTSIDE, PRESCRIBED_PERMUTATION,
         PRESCRIBED_REPEAT, PRESCRIBED_SHORT, SUDOKU_DUPLICATE, SUDOKU_SLID, SUDOKU_SOLVED,
         SUDOKU_SWAPPED, SUDOKU_UNSELECTED, SudokuSelectedUair, sudoku_selections,
+        RANGED_DUPLICATE, RANGED_OVER_WIDTH, RANGED_SOLVED, SUDOKU_COLS, SudokuRangedUair,
         BitOpRotUair, BrokenPointerHopUair, EC_FP_INT_LIMBS, GenerateRandomTrace,
         POINTER_HOP_NUM_VARS, PointerHopUair, Sha256CompressionSliceUair, Sha256Ideal,
         ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
@@ -1447,7 +1466,7 @@ mod tests {
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |proof| {
-                let c = &mut proof.lookup_int_lifted[0].coeffs[0];
+                let c = &mut proof.lookup_int_lifted[0][0].coeffs[0];
                 *c = c.clone() + c.clone();
             },
             |res| {
@@ -1950,6 +1969,296 @@ mod tests {
             },
             |res| res.unwrap(),
         );
+    }
+
+    /// Two tables in one proof: the grid's twenty-seven selections over
+    /// the first nine integer columns, a `Word` range over the four
+    /// after them, and four pins besides. Each group is discharged at
+    /// its own r_inner, so the proof carries one lifted set per group,
+    /// in the order the specs group them -- `Word` before `Selected`.
+    #[test]
+    fn test_e2e_two_int_lookup_groups() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert_eq!(proof.lookup_proof.groups.len(), 2);
+                assert!(matches!(
+                    proof.lookup_proof.group_meta[0].table_type,
+                    LookupTableType::Word { .. }
+                ));
+                assert!(matches!(
+                    proof.lookup_proof.group_meta[1].table_type,
+                    LookupTableType::Selected { .. }
+                ));
+                assert_eq!(proof.lookup_proof.group_meta[1].num_lookups, 27);
+                assert_eq!(proof.lookup_int_lifted.len(), 2);
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Each group's lifted set binds that group's parents and no other:
+    /// corrupting the `Word` group's lift at one of its own parent
+    /// columns -- the tenth, the first the range covers -- must not
+    /// verify, with the grid's side of the proof untouched.
+    #[test]
+    fn test_e2e_two_groups_word_lift_tampered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let c = &mut proof.lookup_int_lifted[0][SUDOKU_COLS].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(res.is_err(), "a tampered word lift must not verify");
+            },
+        );
+    }
+
+    /// The same for the `Selected` group's own lift, at the first grid
+    /// column, with the range side of the proof untouched.
+    #[test]
+    fn test_e2e_two_groups_selected_lift_tampered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let c = &mut proof.lookup_int_lifted[1][0].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(res.is_err(), "a tampered selected lift must not verify");
+            },
+        );
+    }
+
+    /// A slack cell wider than the `Word` table names has nowhere to sit
+    /// in it, so the prover refuses rather than emitting a proof of
+    /// something false -- the grid's twenty-seven selections beside it
+    /// notwithstanding.
+    #[test]
+    fn test_e2e_two_groups_over_width_refused() {
+        type Uair = SudokuRangedUair<ZtInt, RANGED_OVER_WIDTH>;
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let trace = <Uair as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+        let res = ZincPlusPiop::<TestZincTypesIprs, Uair, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn);
+        assert!(res.is_err(), "an over-wide slack cell must not prove");
+    }
+
+    /// The multiset side breaks and the range side stands: a value
+    /// repeated inside a grid row must not verify.
+    #[test]
+    fn test_e2e_two_groups_selected_side_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_DUPLICATE>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(res.is_err(), "a repeated value in a row must not verify");
+            },
+        );
+    }
+
+    /// Negative test: a proof carrying only one of the two declared
+    /// groups must be refused by the declared check, not quietly
+    /// verified with the other table's obligations dropped.
+    #[test]
+    fn test_e2e_two_groups_one_omitted_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups.truncate(1);
+                proof.lookup_proof.group_meta.truncate(1);
+                proof.lookup_int_lifted.truncate(1);
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::GroupCountMismatch { .. }))
+                    ),
+                    "a proof carrying one of two declared groups must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: the groups are canonically ordered -- the verifier
+    /// derives the same table-type order the prover does -- so a proof
+    /// whose groups are swapped no longer matches the declaration at
+    /// either index.
+    #[test]
+    fn test_e2e_two_groups_reordered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups.swap(0, 1);
+                proof.lookup_proof.group_meta.swap(0, 1);
+                proof.lookup_int_lifted.swap(0, 1);
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { index: 0 }))
+                    ),
+                    "swapped groups must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: a proof carrying a lifted set past its last int
+    /// group must be refused. Step 6 absorbs whatever the proof carries,
+    /// so an unopened set would steer every challenge after it.
+    #[test]
+    fn test_e2e_two_groups_extra_lift_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let extra = proof.lookup_int_lifted[0].clone();
+                proof.lookup_int_lifted.push(extra);
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::GroupCountMismatch { .. }))
+                    ),
+                    "an unopened lifted set must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Opt-in measurement of what a second int lookup group costs: the
+    /// grid's selections alone, and the same selections beside a `Word`
+    /// range over four more columns. Run with:
+    ///   cargo test -p zinc-protocol --release -- --ignored --nocapture bench_two_groups
+    #[test]
+    #[ignore]
+    fn bench_two_groups() {
+        macro_rules! time_uair {
+            ($U:ty, $nv:expr, $reps:expr) => {{
+                let num_vars: usize = $nv;
+                let mut rng = rng();
+                let pp = setup_pp::<TestZincTypesIprs>(
+                    num_vars,
+                    (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+                );
+                let trace =
+                    <$U as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+                let sig = <$U as Uair>::signature();
+                let public_trace = trace.public(&sig);
+
+                let mut best_prove = f64::MAX;
+                let mut proof_bytes = 0usize;
+                let mut proof_keep: Option<Proof<F>> = None;
+                for _ in 0..$reps {
+                    let t = std::time::Instant::now();
+                    let proof = ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::prove::<
+                        false,
+                        CHECKED,
+                    >(&pp, &trace, num_vars, project_scalar_fn)
+                    .expect("prove");
+                    best_prove = best_prove.min(t.elapsed().as_secs_f64() * 1e3);
+                    proof_bytes = proof.get_num_bytes();
+                    proof_keep = Some(proof);
+                }
+
+                let mut best_verify = f64::MAX;
+                for _ in 0..$reps {
+                    let proof = proof_keep.clone().expect("proof");
+                    let t = std::time::Instant::now();
+                    ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar_fn,
+                        |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+                    )
+                    .expect("verify");
+                    best_verify = best_verify.min(t.elapsed().as_secs_f64() * 1e3);
+                }
+                (best_prove, best_verify, proof_bytes)
+            }};
+        }
+
+        println!("\n== a second int lookup group (IPRS, CHECKED, min of reps) ==");
+        for &nv in &[4usize, 6, 8] {
+            let (sp, sv, sb) = time_uair!(SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>, nv, 6);
+            let (rp, rv, rb) = time_uair!(SudokuRangedUair<ZtInt, RANGED_SOLVED>, nv, 6);
+            println!("\nnv={nv}  ({} rows)", 1usize << nv);
+            println!(
+                "  27 selections            : prove {sp:8.2} ms | verify {sv:7.2} ms | proof {sb:7} B   (9 int cols)"
+            );
+            println!(
+                "  + word range + 4 pins    : prove {rp:8.2} ms | verify {rv:7.2} ms | proof {rb:7} B   (13 int cols, Δ {:+.2} / {:+.2} ms, {:+} B)",
+                rp - sp,
+                rv - sv,
+                rb as i64 - sb as i64
+            );
+        }
     }
 
     /// Opt-in measurement of what a point tie costs: the same nine
