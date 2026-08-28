@@ -9,6 +9,7 @@ pub mod dummy_semiring;
 pub mod ideal;
 pub mod ideal_collector;
 pub mod lookup_types;
+pub mod point_tie;
 
 use crypto_primitives::Semiring;
 use std::borrow::Cow;
@@ -22,6 +23,7 @@ use crate::ideal::{Ideal, IdealCheck};
 
 pub use composed_read::ComposedReadSpec;
 pub use lookup_types::{LookupColumnSpec, LookupTableType};
+pub use point_tie::{PointTie, PointTieTarget};
 
 /// The abstract interface to constraint building logic.
 /// In essence it allows to create constraints modulo ideals.
@@ -405,6 +407,10 @@ pub struct UairSignature {
     /// at the cube position spelled by `bit_cols` at `x`. See
     /// `documentation/pointer-query-design.md`.
     composed_read_specs: Vec<ComposedReadSpec>,
+    /// Point ties: the cells the statement fixes, by value or by
+    /// broadcast into a column of their own. Statement geometry, so the
+    /// verifier reads them here and evaluates their `eq` itself.
+    point_ties: Vec<PointTie>,
 }
 
 impl UairSignature {
@@ -488,6 +494,7 @@ impl UairSignature {
             virtual_booleanity_cols: Vec::new(),
             virtual_binary_poly_cols: Vec::new(),
             composed_read_specs: Vec::new(),
+            point_ties: Vec::new(),
         }
     }
 
@@ -748,6 +755,45 @@ impl UairSignature {
 
     pub fn composed_read_specs(&self) -> &[ComposedReadSpec] {
         &self.composed_read_specs
+    }
+
+    /// Declare point ties: the cells the statement fixes, each by a
+    /// public value or by broadcast into a column of its own. Columns
+    /// are flat (`binary_poly || arbitrary_poly || int`) and must be
+    /// integer columns — a binary_poly cell reads as a ψ_α projection,
+    /// which no publicly-stated number can name. The row is checked
+    /// against the trace length at proving time, where it is known.
+    #[must_use]
+    pub fn with_point_ties(mut self, ties: Vec<PointTie>) -> Self {
+        let int_start = add!(
+            self.total_cols.num_binary_poly_cols(),
+            self.total_cols.num_arbitrary_poly_cols()
+        );
+        let num_cols = self.total_cols.cols();
+        for (idx, tie) in ties.iter().enumerate() {
+            for col in tie.columns() {
+                assert!(
+                    col >= int_start && col < num_cols,
+                    "PointTie[{idx}] column {col} is not an int column \
+                     (int columns are flat indices [{int_start}, {num_cols}))."
+                );
+            }
+        }
+        self.point_ties = ties;
+        self
+    }
+
+    /// The cells the statement fixes.
+    pub fn point_ties(&self) -> &[PointTie] {
+        &self.point_ties
+    }
+
+    /// How many terms the ties add to the constraint composition — the
+    /// count of extra folding-challenge powers both sides need.
+    pub fn point_tie_terms(&self) -> usize {
+        self.point_ties
+            .iter()
+            .fold(0, |total, tie| add!(total, tie.num_terms()))
     }
 
     fn compute_down_layout(

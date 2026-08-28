@@ -33,10 +33,10 @@ use zinc_poly::{
         binary::BinaryPoly,
         dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
     },
-    utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
+    utils::{ArithErrors, build_eq_x_r_inner, eq_eval, eq_eval_at_index},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{BitOp, TraceRow, Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{BitOp, PointTie, PointTieTarget, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
     UNCHECKED, add, cfg_iter, from_ref::FromRef, inner_product::InnerProduct,
     inner_transparent_field::InnerTransparentField, powers,
@@ -139,6 +139,80 @@ where
             }
         })
         .collect()
+}
+
+/// A signature's point ties with each pin's public value already in the
+/// field. The composition reads these at every point of the sumcheck,
+/// so the reading off the signature happens once.
+enum TieFold<F> {
+    /// `eq_c(x) · (col(x) − v)`.
+    Pin { column: usize, value: F },
+    /// `eq_c(x) · (col(x) − into(x))` and `(eq_c(x) − eq_r(x)) · into(x)`.
+    Broadcast { column: usize, into: usize },
+}
+
+/// Read the ties off the signature, projecting each pin's value once,
+/// and refuse a row the trace does not have.
+fn tie_folds<F: PrimeField + FromPrimitiveWithConfig>(
+    ties: &[PointTie],
+    num_vars: usize,
+    field_cfg: &F::Config,
+) -> Result<Vec<TieFold<F>>, CombinedPolyResolverError<F>> {
+    ties.iter()
+        .map(|tie| match tie.row >> num_vars {
+            0 => Ok(match tie.target {
+                PointTieTarget::Value(value) => TieFold::Pin {
+                    column: tie.column,
+                    value: F::from_with_cfg(value, field_cfg),
+                },
+                PointTieTarget::Broadcast(into) => TieFold::Broadcast {
+                    column: tie.column,
+                    into,
+                },
+            }),
+            _ => Err(CombinedPolyResolverError::PointTieRowOutOfRange {
+                row: tie.row,
+                num_vars,
+            }),
+        })
+        .collect()
+}
+
+/// The ties' contribution to the constraint composition at one point.
+///
+/// A pin's term sums over the cube to `col(c) − v`: the indicator makes
+/// the sum the cell itself, so claiming zero *is* the cell holding the
+/// value — no `eq_r` weighting, and no soundness slack. A broadcast ties
+/// the cell to its own column the same way and adds `(eq_c − eq_r)·into`,
+/// whose sum is `into(c) − into(ρ)` at the ideal check's random point:
+/// zero there says the column agrees with itself at a point it could not
+/// have known, so it is the constant the first term names.
+#[allow(clippy::arithmetic_side_effects)]
+fn fold_tie_terms<F: PrimeField>(
+    folds: &[TieFold<F>],
+    tie_eqs: &[F],
+    columns: &[F],
+    eq_r: &F,
+    alphas: &[F],
+    zero: &F,
+) -> F {
+    let mut acc = zero.clone();
+    let mut term = 0usize;
+    for (fold, eq_c) in folds.iter().zip(tie_eqs) {
+        match fold {
+            TieFold::Pin { column, value } => {
+                acc += eq_c.clone() * &(columns[*column].clone() - value) * &alphas[term];
+                term += 1;
+            }
+            TieFold::Broadcast { column, into } => {
+                acc += eq_c.clone() * &(columns[*column].clone() - &columns[*into])
+                    * &alphas[term];
+                acc += (eq_c.clone() - eq_r) * &columns[*into] * &alphas[add!(term, 1)];
+                term += 2;
+            }
+        }
+    }
+    acc
 }
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
@@ -244,17 +318,38 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             },
         };
 
+        // The tied cells' indicators. Both sides read the cells off the
+        // signature, so these are built here and never sent: the
+        // verifier evaluates each at r* itself.
+        let folds = tie_folds::<F>(uair_sig.point_ties(), num_vars, field_cfg)?;
+        let tie_eq: Vec<DenseMultilinearExtension<F::Inner>> = uair_sig
+            .point_ties()
+            .iter()
+            .map(|tie| {
+                let mut evals = vec![zero_inner.clone(); n];
+                evals[tie.row] = one.inner().clone();
+                DenseMultilinearExtension {
+                    evaluations: evals,
+                    num_vars,
+                }
+            })
+            .collect();
+
         // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
-        let folding_challenge_powers: Vec<F> =
-            powers(folding_challenge, one.clone(), num_constraints);
+        let folding_challenge_powers: Vec<F> = powers(
+            folding_challenge,
+            one.clone(),
+            num_constraints + uair_sig.point_tie_terms(),
+        );
 
         let num_cols = trace_matrix.len();
         let num_down_cols = down.len();
         let num_bit_op_cols = bit_op_down.len();
+        let tie_offset = 2 + num_cols + num_down_cols + num_bit_op_cols;
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
-            let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols + num_bit_op_cols);
+            let mut mles = Vec::with_capacity(tie_offset + tie_eq.len());
 
             mles.push(last_row_selector);
             mles.push(eq_r);
@@ -262,6 +357,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             mles.extend(trace_matrix);
             mles.extend(down);
             mles.extend(bit_op_down);
+            mles.extend(tie_eq);
 
             mles
         };
@@ -314,9 +410,20 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             );
 
             folder.folded_constraints * (one.clone() - selector) * eq_r
+                + fold_tie_terms(
+                    &folds,
+                    &mle_values[tie_offset..],
+                    &mle_values[2..num_cols + 2],
+                    eq_r,
+                    &folding_challenge_powers[num_constraints..],
+                    &zero,
+                )
         });
 
         Ok((
+            // A tie's terms are a product of two multilinears, so they
+            // sit under the constraints' own `max_degree + 2` wall
+            // rather than raising it.
             MultiDegreeSumcheckGroup::new(max_degree + 2, mles, comb_fn),
             CprProverAncillary {
                 num_cols,
@@ -364,9 +471,14 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             .last()
             .expect("sumcheck could not have had 0 rounds");
 
+        // The tied cells' indicators trail the trace columns and stay
+        // where they are: the verifier evaluates them itself, so they
+        // are the one group of MLEs whose evals are not sent.
+        let sent =
+            ancillary.num_cols + ancillary.num_down_cols + ancillary.num_bit_op_cols;
         let mut mles = sumcheck_prover_state.mles;
         let evals: Vec<F> = mles
-            .drain(2..)
+            .drain(2..2 + sent)
             .map(|mle| {
                 mle.evaluate_with_config(slice::from_ref(last_sumcheck_challenge), field_cfg)
             })
@@ -460,8 +572,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
-        let folding_challenge_powers: Vec<F> =
-            powers(folding_challenge, one.clone(), num_constraints);
+        let folding_challenge_powers: Vec<F> = powers(
+            folding_challenge,
+            one.clone(),
+            add!(num_constraints, uair_sig.point_tie_terms()),
+        );
 
         // TODO(Alex): investigate if parallelising this is beneficial.
         // Compute v_0 + \alpha * v_1 + ... + \alpha ^ k * v_k.
@@ -491,6 +606,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         Ok(CprVerifierAncillary {
             folding_challenge_powers,
             ic_evaluation_point: ic_check_subclaim.evaluation_point.clone(),
+            num_constraints,
             num_vars,
         })
     }
@@ -583,7 +699,27 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             ImpossibleIdeal::from_ref,
         );
 
-        let expected_claim_value = eq_r_value * (one - selector_value) * folder.folded_constraints;
+        // The ties' side of the composition: the cells are the
+        // statement's, so their indicators are evaluated here rather
+        // than read out of the proof.
+        let folds = tie_folds::<F>(uair_sig.point_ties(), ancillary.num_vars, field_cfg)?;
+        let tie_eqs: Vec<F> = uair_sig
+            .point_ties()
+            .iter()
+            .map(|tie| eq_eval_at_index(&shared_point, tie.row, &one))
+            .collect();
+
+        let expected_claim_value = eq_r_value.clone()
+            * (one - selector_value)
+            * folder.folded_constraints
+            + fold_tie_terms(
+                &folds,
+                &tie_eqs,
+                &proof.up_evals,
+                &eq_r_value,
+                &ancillary.folding_challenge_powers[ancillary.num_constraints..],
+                &zero,
+            );
 
         if expected_claim_value != expected_evaluation {
             return Err(CombinedPolyResolverError::ClaimValueDoesNotMatch {
@@ -634,6 +770,8 @@ pub enum CombinedPolyResolverError<F: PrimeField> {
     WrongShiftedBitSliceEvalsNumber { got: usize, expected: usize },
     #[error("sumcheck verification failed: {0}")]
     SumcheckError(SumCheckError<F>),
+    #[error("point tie names row {row}, past a trace of {num_vars} variables")]
+    PointTieRowOutOfRange { row: usize, num_vars: usize },
     #[error("wrong sumcheck claimed sum: received {got}, expected {expected}")]
     WrongSumcheckSum { got: F, expected: F },
     #[error("resulting claim value does not match: received {got}, expected {expected}")]

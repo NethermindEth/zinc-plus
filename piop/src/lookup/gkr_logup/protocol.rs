@@ -28,7 +28,7 @@ use rayon::prelude::*;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
-    utils::build_eq_x_r_vec,
+    utils::{build_eq_x_r_vec, eq_eval_at_index},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::LookupTableType;
@@ -1177,7 +1177,7 @@ where
     for ell in 0..num_lookups {
         let expected_p = match selections {
             Some(sels) => sels[ell].iter().fold(zero.clone(), |acc, &(slot, row)| {
-                let eq_row = eq_at_index(row as usize, &r_inner, &one);
+                let eq_row = eq_eval_at_index(&r_inner, row as usize, &one);
                 acc + &(eq_at_outer[slot as usize].clone() * &eq_row)
             }),
             None => covered.clone(),
@@ -1356,15 +1356,6 @@ pub fn combine_chunks_word<F: PrimeField + FromPrimitiveWithConfig>(
 /// whole cube. Agrees with `build_eq_x_r_vec`, whose entry `j` pairs
 /// `r[nu]` with bit `nu` of `j`.
 #[allow(clippy::arithmetic_side_effects)]
-fn eq_at_index<F: PrimeField>(index: usize, r: &[F], one: &F) -> F {
-    r.iter().enumerate().fold(one.clone(), |acc, (nu, r_nu)| {
-        acc * &match (index >> nu) & 1 {
-            1 => r_nu.clone(),
-            _ => one.clone() - r_nu,
-        }
-    })
-}
-
 /// Evaluate a `DynamicPolynomialF<F>` at the projecting element `a`
 /// (`ψ_a` on a polynomial of degree < some bound). Horner from the
 /// highest coefficient down.

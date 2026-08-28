@@ -407,6 +407,16 @@ where
 
         let combined_mle_values = proof.combined_mle_values;
 
+        // The fold downstream weighs one value per constraint against a power
+        // vector sized for the constraints and the ties both, so a longer list
+        // lands its tail on the ties' powers. One value per constraint, exactly.
+        if combined_mle_values.len() != num_constraints {
+            return Err(IdealCheckError::ClaimCountMismatch {
+                expected: num_constraints,
+                got: combined_mle_values.len(),
+            });
+        }
+
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
         for mle_value in &combined_mle_values {
@@ -446,6 +456,8 @@ pub enum IdealCheckError<F: PrimeField, I> {
     IdealCollectorError(#[from] BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
     #[error("`eq` polynomial construction failure: {0}")]
     EqPolyConstructionError(#[from] PolyArithErrors),
+    #[error("proof carries {got} combined values, the UAIR encodes {expected} constraints")]
+    ClaimCountMismatch { expected: usize, got: usize },
 }
 
 #[cfg(test)]
