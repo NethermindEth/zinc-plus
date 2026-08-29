@@ -1728,10 +1728,16 @@ where
                 if lifted.len() != commitments.2.batch_size {
                     return Err(ProtocolError::PointerQueryLiftedShape);
                 }
-                let per_poly_alphas = ZipPlus::<Zt::IntZt, Zt::IntLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    commitments.2.batch_size,
-                );
+                // An integer column is one coefficient, so `sample_alphas`
+                // would weight every column by one and bind only their sum,
+                // leaving each pointer-query lift free. Draw a random weight
+                // per column, matching the prover's `prove_f_with_alphas`.
+                let per_poly_alphas: Vec<Vec<_>> = pcs_transcript
+                    .fs_transcript
+                    .get_challenges(commitments.2.batch_size)
+                    .into_iter()
+                    .map(|a| vec![a])
+                    .collect();
                 let mut eval_f = F::zero_with_cfg(field_cfg);
                 for (bar_u, alphas) in lifted.iter().zip(per_poly_alphas.iter()) {
                     for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {

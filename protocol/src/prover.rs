@@ -1604,13 +1604,26 @@ impl_with_type_bounds!(ProverLifted
                 .as_ref()
                 .expect("composed reads require witness int columns");
             for point in [&points.r_a, &points.r_b] {
-                let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                // One random weight per integer column, so each opening binds
+                // every lift the pointer query reads and not merely their sum.
+                // The verifier draws the same from its transcript.
+                let per_poly_alphas: Vec<Vec<_>> = self
+                    .base
+                    .pcs_transcript
+                    .fs_transcript
+                    .get_challenges(witness_trace.int.len())
+                    .into_iter()
+                    .map(|a| vec![a])
+                    .collect();
+
+                let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f_with_alphas::<_, CHECK_FOR_OVERFLOW>(
                     &mut self.base.pcs_transcript,
                     self.base.pp_int,
                     &witness_trace.int,
                     point,
                     hint_int,
                     &self.field_cfg,
+                    &per_poly_alphas,
                 )?;
             }
         }
