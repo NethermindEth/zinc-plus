@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use zinc_utils::cfg_into_iter;
+use zinc_utils::{cfg_into_iter, sub};
 
 /// A precomputed table index mapping byte representations of table entries
 /// to their position. Build once with [`build_table_index`] and reuse
@@ -76,6 +76,36 @@ where
     cfg_into_iter!(0..size)
         .map(|i| F::from_with_cfg(i as u64, field_cfg))
         .collect()
+}
+
+/// Generate the prescribed table over F_q: each value in turn, then the
+/// pad that stands for every row the values do not fill.
+pub fn generate_prescribed_table<F: PrimeField + FromPrimitiveWithConfig>(
+    values: &[u64],
+    pad: u64,
+    field_cfg: &F::Config,
+) -> Vec<F> {
+    values
+        .iter()
+        .chain(std::iter::once(&pad))
+        .map(|value| F::from_with_cfg(*value, field_cfg))
+        .collect()
+}
+
+/// The multiplicity of every entry of a prescribed table: one for each
+/// value, and every row the values do not fill for the pad.
+///
+/// Nothing here comes from the witness, which is why a prescribed lookup
+/// commits no multiplicities -- the verifier builds this side itself.
+pub fn prescribed_multiplicities<F: PrimeField + FromPrimitiveWithConfig>(
+    num_values: usize,
+    witness_len: usize,
+    field_cfg: &F::Config,
+) -> Vec<F> {
+    let padding = u64::try_from(sub!(witness_len, num_values)).expect("row count fits in u64");
+    let mut multiplicities = vec![F::one_with_cfg(field_cfg); num_values];
+    multiplicities.push(F::from_with_cfg(padding, field_cfg));
+    multiplicities
 }
 
 /// Generate the projected `BitPoly(half_width)` sub-table for

@@ -1,6 +1,7 @@
 //! UAIR description tools.
 
 pub mod collect_scalars;
+pub mod composed_read;
 pub mod constraint_counter;
 pub mod degree_counter;
 pub mod do_nothing_builder;
@@ -8,6 +9,7 @@ pub mod dummy_semiring;
 pub mod ideal;
 pub mod ideal_collector;
 pub mod lookup_types;
+pub mod point_tie;
 
 use crypto_primitives::Semiring;
 use std::borrow::Cow;
@@ -19,7 +21,9 @@ use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, 
 
 use crate::ideal::{Ideal, IdealCheck};
 
+pub use composed_read::ComposedReadSpec;
 pub use lookup_types::{LookupColumnSpec, LookupTableType};
+pub use point_tie::{PointTie, PointTieTarget};
 
 /// The abstract interface to constraint building logic.
 /// In essence it allows to create constraints modulo ideals.
@@ -399,6 +403,14 @@ pub struct UairSignature {
     /// cols (one XOR per row pair); per-bit closing overrides bind
     /// them to the spec residual.
     virtual_binary_poly_cols: Vec<VirtualBinaryPolySpec>,
+    /// Composed reads (pointer queries): `result_col(x) = value_col`
+    /// at the cube position spelled by `bit_cols` at `x`. See
+    /// `documentation/pointer-query-design.md`.
+    composed_read_specs: Vec<ComposedReadSpec>,
+    /// Point ties: the cells the statement fixes, by value or by
+    /// broadcast into a column of their own. Statement geometry, so the
+    /// verifier reads them here and evaluates their `eq` itself.
+    point_ties: Vec<PointTie>,
 }
 
 impl UairSignature {
@@ -481,6 +493,8 @@ impl UairSignature {
             shifted_bit_slice_specs: Vec::new(),
             virtual_booleanity_cols: Vec::new(),
             virtual_binary_poly_cols: Vec::new(),
+            composed_read_specs: Vec::new(),
+            point_ties: Vec::new(),
         }
     }
 
@@ -702,6 +716,84 @@ impl UairSignature {
 
     pub fn lookup_specs(&self) -> &[LookupColumnSpec] {
         &self.lookup_specs
+    }
+
+    /// Declare composed reads (pointer queries): each spec asserts
+    /// `result_col(x) = value_col` at the cube position the `bit_cols`
+    /// spell at `x`. All indices are flat (binary_poly ||
+    /// arbitrary_poly || int) and must point at *witness int* columns;
+    /// `bit_cols.len()` is checked against the trace's `num_vars` at
+    /// proving time. Out-of-range or non-int indices panic so the
+    /// misuse is caught at signature construction.
+    pub fn with_composed_reads(mut self, reads: Vec<ComposedReadSpec>) -> Self {
+        let int_start = add!(
+            self.total_cols.num_binary_poly_cols(),
+            self.total_cols.num_arbitrary_poly_cols()
+        );
+        let int_witness_start = add!(int_start, self.public_cols.num_int_cols());
+        let num_cols = self.total_cols.cols();
+        for spec in &reads {
+            for (name, col) in [("value_col", spec.value_col), ("result_col", spec.result_col)]
+                .into_iter()
+                .chain(spec.bit_cols.iter().map(|&b| ("bit_col", b)))
+            {
+                assert!(
+                    col < num_cols,
+                    "ComposedReadSpec {name} {col} out of range (total_cols = {num_cols}). \
+                     Flat indexing: binary_poly || arbitrary_poly || int."
+                );
+                assert!(
+                    col >= int_witness_start,
+                    "ComposedReadSpec {name} {col} must be a witness int column \
+                     (witness int columns start at flat index {int_witness_start})."
+                );
+            }
+        }
+        self.composed_read_specs = reads;
+        self
+    }
+
+    pub fn composed_read_specs(&self) -> &[ComposedReadSpec] {
+        &self.composed_read_specs
+    }
+
+    /// Declare point ties: the cells the statement fixes, each by a
+    /// public value or by broadcast into a column of its own. Columns
+    /// are flat (`binary_poly || arbitrary_poly || int`) and must be
+    /// integer columns — a binary_poly cell reads as a ψ_α projection,
+    /// which no publicly-stated number can name. The row is checked
+    /// against the trace length at proving time, where it is known.
+    #[must_use]
+    pub fn with_point_ties(mut self, ties: Vec<PointTie>) -> Self {
+        let int_start = add!(
+            self.total_cols.num_binary_poly_cols(),
+            self.total_cols.num_arbitrary_poly_cols()
+        );
+        let num_cols = self.total_cols.cols();
+        for (idx, tie) in ties.iter().enumerate() {
+            for col in tie.columns() {
+                assert!(
+                    col >= int_start && col < num_cols,
+                    "PointTie[{idx}] column {col} is not an int column \
+                     (int columns are flat indices [{int_start}, {num_cols}))."
+                );
+            }
+        }
+        self.point_ties = ties;
+        self
+    }
+
+    /// The cells the statement fixes.
+    pub fn point_ties(&self) -> &[PointTie] {
+        &self.point_ties
+    }
+
+    /// How many terms the ties add to the constraint composition — the
+    /// count of extra folding-challenge powers both sides need.
+    pub fn point_tie_terms(&self) -> usize {
+        self.point_ties
+            .iter()
+            .fold(0, |total, tie| add!(total, tie.num_terms()))
     }
 
     fn compute_down_layout(

@@ -266,6 +266,21 @@ pub fn eq_eval<R: Semiring>(x: &[R], y: &[R], one: R) -> Result<R, ArithErrors> 
     Ok(res)
 }
 
+/// Evaluate `eq(r, ·)` at a cube point given by its index, whose bit
+/// `nu` is variable `nu` — the ordering [`build_eq_x_r_vec`] lays its
+/// table out in. This is [`eq_eval`] against a `{0, 1}` point, spelled
+/// so that the point never has to be materialized.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn eq_eval_at_index<R: Semiring>(r: &[R], index: usize, one: &R) -> R {
+    r.iter().enumerate().fold(one.clone(), |mut acc, (nu, r_nu)| {
+        acc *= match (index >> nu) & 1 {
+            1 => r_nu.clone(),
+            _ => one.clone() - r_nu,
+        };
+        acc
+    })
+}
+
 /// Evaluate an MLE at a point using a precomputed eq table.
 ///
 /// Given `evaluations[b]` (in `F::Inner` form) and `eq_table[b] = eq(b, r)`

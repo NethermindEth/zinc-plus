@@ -21,6 +21,34 @@ pub mod fixed_prime;
 pub mod prover;
 pub mod verifier;
 
+/// Test-only capture of the int reducer's γ, so a soundness test can build
+/// a perturbation of the folded lifts that the plain-sum opening could not
+/// have caught. Set by the prover, read by a tamper closure.
+#[cfg(test)]
+pub(crate) mod test_capture {
+    use std::any::Any;
+    use std::cell::RefCell;
+
+    thread_local! {
+        pub static INT_REDUCER_GAMMAS: RefCell<Option<Box<dyn Any>>> = const { RefCell::new(None) };
+    }
+
+    pub fn put<F: 'static + Clone>(gammas: &[F]) {
+        INT_REDUCER_GAMMAS.with(|c| *c.borrow_mut() = Some(Box::new(gammas.to_vec())));
+    }
+
+    pub fn take<F: 'static + Clone>() -> Vec<F> {
+        INT_REDUCER_GAMMAS.with(|c| {
+            c.borrow()
+                .as_ref()
+                .expect("gammas not captured")
+                .downcast_ref::<Vec<F>>()
+                .expect("gamma type mismatch")
+                .clone()
+        })
+    }
+}
+
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -33,6 +61,7 @@ use zinc_piop::{
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
     lookup::{LookupError, gkr_logup::GkrLogupLookupProof},
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
+    pointer_query::PointerQueryProof,
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
 };
@@ -103,6 +132,30 @@ pub struct Proof<F: PrimeField> {
     /// computing the alpha-projected eval for the single bin Zip+
     /// open at `r*`.
     pub bin_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    /// Multi-point reducer proof for the integer batch — `Some` iff the
+    /// UAIR declares a lookup group over integer columns. Reduces every
+    /// such group's `r_inner` claim plus the step-7 `r_0` claim into ONE
+    /// Zip+ opening at the reduced point `r*`. `None` otherwise; step 7
+    /// then opens the int commitment at `r_0` directly.
+    pub int_reducer_proof: Option<BinReducerProof<F>>,
+    /// Polynomial-valued MLE evals at `r*` for each witness integer
+    /// column, in column order. Empty when `int_reducer_proof` is `None`.
+    pub int_lifts_at_r_star: Vec<DynamicPolynomialF<F>>,
+    /// Pointer-query (composed read) proof — `Some` iff the UAIR
+    /// declares composed reads. See
+    /// `documentation/pointer-query-design.md`.
+    pub pointer_query_proof: Option<PointerQueryProof<F>>,
+    /// Witness-int lifted evaluations at the pointer query's `r_A` /
+    /// `r_B` points, discharged by the two extra int-batch openings.
+    /// Empty when `pointer_query_proof` is `None`.
+    pub pq_int_lifted_at_r_a: Vec<DynamicPolynomialF<F>>,
+    pub pq_int_lifted_at_r_b: Vec<DynamicPolynomialF<F>>,
+    /// Witness-int lifted evaluations at the `r_inner` of each lookup
+    /// group whose parents are integer columns, in group order, each
+    /// discharged by one extra int-batch opening. Empty when the UAIR
+    /// declares no such lookup. This is what ties a group's parent claim
+    /// to the integer columns actually committed.
+    pub lookup_int_lifted: Vec<Vec<DynamicPolynomialF<F>>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -135,6 +188,18 @@ where
         let (lookup_proof, bytes) =
             GkrLogupLookupProof::<F>::read_transcription_bytes_subset(bytes);
 
+        // lookup_int_lifted: [groups: u32] then one length-prefixed
+        // DynamicPolyVecF per group. Always present, zero groups when
+        // none reads integer columns, so it needs no presence flag.
+        let (int_groups, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let mut lookup_int_lifted =
+            Vec::with_capacity(usize::try_from(int_groups).expect("group count fits in usize"));
+        for _ in 0..int_groups {
+            let (lifted_vec, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+            lookup_int_lifted.push(lifted_vec.0);
+            bytes = rest;
+        }
+
         // [reducer_present: u8] [reducer_proof? : subset] [bin_lifts? : subset]
         let reducer_present = bytes[0];
         let bytes = &bytes[1..];
@@ -147,6 +212,34 @@ where
             }
             v => panic!("invalid bin_reducer_proof presence flag: {v}"),
         };
+
+        // [int_reducer_present: u8] [reducer_proof? : subset] [int_lifts? : subset]
+        let int_reducer_present = bytes[0];
+        let bytes = &bytes[1..];
+        let (int_reducer_proof, int_lifts_at_r_star, bytes) = match int_reducer_present {
+            0 => (None, Vec::new(), bytes),
+            1 => {
+                let (rp, rest) = BinReducerProof::<F>::read_transcription_bytes_subset(bytes);
+                let (bv, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+                (Some(rp), bv.0, rest)
+            }
+            v => panic!("invalid int_reducer_proof presence flag: {v}"),
+        };
+
+        // [pq_present: u8] [pointer_query_proof? + lifted evals at r_A/r_B]
+        let pq_present = bytes[0];
+        let bytes = &bytes[1..];
+        let (pointer_query_proof, pq_int_lifted_at_r_a, pq_int_lifted_at_r_b, bytes) =
+            match pq_present {
+                0 => (None, Vec::new(), Vec::new(), bytes),
+                1 => {
+                    let (pq, rest) = PointerQueryProof::<F>::read_transcription_bytes_subset(bytes);
+                    let (la, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+                    let (lb, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(rest);
+                    (Some(pq), la.0, lb.0, rest)
+                }
+                v => panic!("invalid pointer_query_proof presence flag: {v}"),
+            };
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
@@ -160,6 +253,12 @@ where
             lookup_proof,
             bin_reducer_proof,
             bin_lifts_at_r_star,
+            int_reducer_proof,
+            int_lifts_at_r_star,
+            pointer_query_proof,
+            pq_int_lifted_at_r_a,
+            pq_int_lifted_at_r_b,
+            lookup_int_lifted,
         }
     }
 
@@ -195,20 +294,69 @@ where
         // lookup_proof: u32 length prefix + GkrLogupLookupProof encoding
         let buf = self.lookup_proof.write_transcription_bytes_subset(buf);
 
+        // lookup_int_lifted: [groups: u32] then one length-prefixed
+        // DynamicPolyVecF per int-column group.
+        let int_groups =
+            u32::try_from(self.lookup_int_lifted.len()).expect("group count fits in u32");
+        let mut buf = int_groups.write_transcription_bytes_subset(buf);
+        for lifted in &self.lookup_int_lifted {
+            buf = DynamicPolyVecF::reinterpret(lifted).write_transcription_bytes_subset(buf);
+        }
+
         // [reducer_present: u8] then optional reducer_proof + bin_lifts.
-        match &self.bin_reducer_proof {
+        let buf = match &self.bin_reducer_proof {
             None => {
                 assert!(
                     self.bin_lifts_at_r_star.is_empty(),
                     "bin_lifts_at_r_star must be empty when reducer is absent"
                 );
                 buf[0] = 0;
+                &mut buf[1..]
             }
             Some(rp) => {
                 buf[0] = 1;
                 let buf = &mut buf[1..];
                 let buf = rp.write_transcription_bytes_subset(buf);
                 DynamicPolyVecF::reinterpret(&self.bin_lifts_at_r_star)
+                    .write_transcription_bytes_subset(buf)
+            }
+        };
+
+        // [int_reducer_present: u8] then optional reducer proof + int lifts.
+        let buf = match &self.int_reducer_proof {
+            None => {
+                assert!(
+                    self.int_lifts_at_r_star.is_empty(),
+                    "int_lifts_at_r_star must be empty when the int reducer is absent"
+                );
+                buf[0] = 0;
+                &mut buf[1..]
+            }
+            Some(rp) => {
+                buf[0] = 1;
+                let buf = &mut buf[1..];
+                let buf = rp.write_transcription_bytes_subset(buf);
+                DynamicPolyVecF::reinterpret(&self.int_lifts_at_r_star)
+                    .write_transcription_bytes_subset(buf)
+            }
+        };
+
+        // [pq_present: u8] then optional pointer-query proof + lifted evals.
+        match &self.pointer_query_proof {
+            None => {
+                assert!(
+                    self.pq_int_lifted_at_r_a.is_empty() && self.pq_int_lifted_at_r_b.is_empty(),
+                    "pq lifted evals must be empty when the pointer query is absent"
+                );
+                buf[0] = 0;
+            }
+            Some(pq) => {
+                buf[0] = 1;
+                let buf = &mut buf[1..];
+                let buf = pq.write_transcription_bytes_subset(buf);
+                let buf = DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_a)
+                    .write_transcription_bytes_subset(buf);
+                DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_b)
                     .write_transcription_bytes_subset(buf);
             }
         }
@@ -239,6 +387,15 @@ where
             + witness_vec.get_num_bytes()
             + GkrLogupLookupProof::<F>::LENGTH_NUM_BYTES
             + self.lookup_proof.get_num_bytes()
+            + u32::NUM_BYTES // int lookup group count
+            + self
+                .lookup_int_lifted
+                .iter()
+                .map(|lifted| {
+                    DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + DynamicPolyVecF::reinterpret(lifted).get_num_bytes()
+                })
+                .sum::<usize>()
             + 1 // reducer_present flag
             + match &self.bin_reducer_proof {
                 None => 0,
@@ -248,6 +405,31 @@ where
                         + rp.get_num_bytes()
                         + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
                         + bv.get_num_bytes()
+                }
+            }
+            + 1 // int_reducer_present flag
+            + match &self.int_reducer_proof {
+                None => 0,
+                Some(rp) => {
+                    let iv = DynamicPolyVecF::reinterpret(&self.int_lifts_at_r_star);
+                    BinReducerProof::<F>::LENGTH_NUM_BYTES
+                        + rp.get_num_bytes()
+                        + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + iv.get_num_bytes()
+                }
+            }
+            + 1 // pq_present flag
+            + match &self.pointer_query_proof {
+                None => 0,
+                Some(pq) => {
+                    let la = DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_a);
+                    let lb = DynamicPolyVecF::reinterpret(&self.pq_int_lifted_at_r_b);
+                    PointerQueryProof::<F>::LENGTH_NUM_BYTES
+                        + pq.get_num_bytes()
+                        + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + la.get_num_bytes()
+                        + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                        + lb.get_num_bytes()
                 }
             }
     }
@@ -532,6 +714,14 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+    #[error("assert_zero constraint {0} does not vanish at the projecting element")]
+    AssertZero(usize),
+    #[error("pointer query failed: {0}")]
+    PointerQuery(#[from] zinc_piop::pointer_query::PointerQueryError<F>),
+    #[error("composed reads are declared but the proof carries no pointer query")]
+    PointerQueryMissing,
+    #[error("pointer-query lifted evaluations have the wrong shape")]
+    PointerQueryLiftedShape,
 }
 
 //
@@ -850,11 +1040,21 @@ mod tests {
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinLookup16MultiGroupUair,
         BinLookup16NoLookupUair, BinLookup16Uair, BinaryDecompositionUair,
-        BitOpRotUair, EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair,
-        Sha256Ideal, ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts,
-        TestUairNoMultiplication, TestUairSimpleMultiplication,
+        BROADCAST_OK, BROADCAST_VARYING, BROADCAST_WRONG, BroadcastTieUair, DECL_NONE, DECL_PINS,
+        DECL_PINS_LOOKUPS, DECL_PINS_SHORT, DECL_PINS_WRONG, PINNED_FREE, PINNED_SOLVED,
+        PINNED_TAMPERED, SudokuPinnedUair,
+        IntPrescribedLookupUair, IntWordLookupUair, PRESCRIBED_OUTSIDE, PRESCRIBED_PERMUTATION,
+        PRESCRIBED_REPEAT, PRESCRIBED_SHORT, SUDOKU_DUPLICATE, SUDOKU_SLID, SUDOKU_SOLVED,
+        SUDOKU_SWAPPED, SUDOKU_UNSELECTED, SudokuSelectedUair, sudoku_selections,
+        RANGED_BOTH, RANGED_DUPLICATE, RANGED_GRID_ONLY, RANGED_OVER_WIDTH, RANGED_SOLVED,
+        SUDOKU_COLS, SudokuRangedUair,
+        BitOpRotUair, BrokenPointerHopUair, EC_FP_INT_LIMBS, GenerateRandomTrace,
+        POINTER_HOP_NUM_VARS, PointerHopUair, Sha256CompressionSliceUair, Sha256Ideal,
+        ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
     use zinc_uair::{
+        LookupTableType,
         ideal::{DegreeOneIdeal, rotation::RotationIdeal},
         ideal_collector::IdealOrZero,
     };
@@ -1180,6 +1380,96 @@ mod tests {
         );
     }
 
+    /// End-to-end test of the composed-read (pointer query) path: int
+    /// columns [V, b_0..b_7, R], one declared read, honest trace. See
+    /// documentation/pointer-query-design.md.
+    #[test]
+    fn test_e2e_pointer_hop() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, PointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: the same UAIR with one result entry forged off its
+    /// dereference must be rejected — by the pointer query itself, not
+    /// by an accident elsewhere. A verifier that accepts this trace is
+    /// not checking the pointer query at all.
+    #[test]
+    fn test_e2e_pointer_hop_forged_result_rejected() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, BrokenPointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::PointerQuery(_))),
+                    "forged dereference must be rejected by the pointer query, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Tampering the bridge evaluations must be rejected: they tie
+    /// sumcheck A's endpoint to sumcheck B's claimed sum.
+    #[test]
+    fn test_e2e_pointer_hop_tampered_u_eval_rejected() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, PointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let pq = proof
+                    .pointer_query_proof
+                    .as_mut()
+                    .expect("pointer hop carries a pointer-query proof");
+                let bumped = pq.u_evals_at_r_a[0].clone() + pq.u_evals_at_r_a[0].clone();
+                pq.u_evals_at_r_a[0] = bumped;
+            },
+            |res| assert!(res.is_err(), "tampered u-eval must be rejected"),
+        );
+    }
+
+    /// Tampering a lifted evaluation at r_A must be rejected: either
+    /// the pointer-query endpoint or the extra int opening catches it.
+    #[test]
+    fn test_e2e_pointer_hop_tampered_lifted_rejected() {
+        let num_vars = POINTER_HOP_NUM_VARS;
+        do_test::<TestZincTypesIprs, PointerHopUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let bar_u = &mut proof.pq_int_lifted_at_r_a[0];
+                bar_u.coeffs[0] = bar_u.coeffs[0].clone() + bar_u.coeffs[0].clone();
+            },
+            |res| assert!(res.is_err(), "tampered lifted eval must be rejected"),
+        );
+    }
+
     /// End-to-end test of the wired GKR-LogUp lookup path: 16 binary_poly
     /// columns, all declared as a single BitPoly{32,8} lookup group
     /// (n_groups = 1 → step-7 two-open fast path). Exercises step4b_lookup
@@ -1219,6 +1509,1151 @@ mod tests {
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |_| {},
             |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test of the Word lookup over integer columns: four
+    /// witness int columns, all declared as one `Word{16, 8}` group.
+    /// Exercises prove_group_word, the int parent binding against the
+    /// witness-int lifted evaluations, the extra int opening at the
+    /// group's r_inner, and the proof serialization round trip.
+    #[test]
+    fn test_e2e_int_word_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Negative test: corrupting the witness-int lifted evaluation the
+    /// Word group's parent claim binds against must make verification
+    /// fail. Without that binding the lookup would prove a range for
+    /// numbers unrelated to the committed columns.
+    #[test]
+    fn test_e2e_int_word_lookup_tampered_lift_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let c = &mut proof.lookup_int_lifted[0][0].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(res.is_err(), "a tampered word lift must not verify");
+            },
+        );
+    }
+
+    /// End-to-end test of the prescribed lookup over integer columns:
+    /// four witness int columns, each holding a permutation of 1..=9 and
+    /// zeros, all declared as one `Prescribed` group. Exercises
+    /// prove_group_prescribed, the table side the verifier builds itself,
+    /// the int parent binding and the extra opening at the group's
+    /// r_inner, and the proof serialization round trip.
+    #[test]
+    fn test_e2e_int_prescribed_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntPrescribedLookupUair<ZtInt, PRESCRIBED_PERMUTATION>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: a nine where the eight should be. Every cell is still
+    /// in the table, so nothing but the multiplicities catches it -- and
+    /// those are the ones the verifier counts for itself.
+    #[test]
+    fn test_e2e_int_prescribed_repeat_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntPrescribedLookupUair<ZtInt, PRESCRIBED_REPEAT>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a repeated value is not the prescribed multiset, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// One value short is one pad too many: the same identity failing,
+    /// now on the pad's own multiplicity rather than a value's.
+    #[test]
+    fn test_e2e_int_prescribed_short_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntPrescribedLookupUair<ZtInt, PRESCRIBED_SHORT>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a missing value leaves a pad count that must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// A cell the table never names has nowhere to sit in it, so the
+    /// prover refuses rather than emitting a proof of something false.
+    #[test]
+    fn test_e2e_int_prescribed_outside_refused() {
+        type Uair = IntPrescribedLookupUair<ZtInt, PRESCRIBED_OUTSIDE>;
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let trace = <Uair as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+        let res = ZincPlusPiop::<TestZincTypesIprs, Uair, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn);
+        assert!(res.is_err(), "a cell outside the prescribed table must not prove");
+    }
+
+    /// End-to-end test of the selected lookup: a solved 9x9 sudoku
+    /// committed as nine int columns, and one group carrying all
+    /// twenty-seven of the grid's obligations -- nine rows, nine strides,
+    /// nine blocks -- as selections over those same nine columns. Twenty-
+    /// seven multiset claims, one proof.
+    #[test]
+    fn test_e2e_sudoku_selected_lookup() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                // One table is one group, however many claims it makes:
+                // the twenty-seven selections are twenty-seven trees of
+                // one batched GKR, not twenty-seven groups.
+                assert_eq!(proof.lookup_proof.groups.len(), 1);
+                assert_eq!(proof.lookup_proof.group_meta[0].num_lookups, 27);
+                assert_eq!(proof.lookup_proof.group_meta[0].parent_columns.len(), 9);
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: a value repeated inside one row, so that row holds eight
+    /// of the nine values the table names and one of them twice. Every
+    /// cell is still a value of the table.
+    #[test]
+    fn test_e2e_sudoku_duplicate_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_DUPLICATE>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a repeated value is not a permutation of 1..=9, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The pad's absence, tested: a value slid out of its row into a cell
+    /// of the same column that no selection names. A prescribed column
+    /// would take this -- the value is still somewhere in the column --
+    /// but a selection is simply one short, and there is no pad entry for
+    /// the shortfall to be absorbed by.
+    #[test]
+    fn test_e2e_sudoku_slid_value_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SLID>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "a selection one value short must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Two cells traded between two rows of the same table: each row keeps
+    /// its nine cells and loses its multiset, so nothing but the identity
+    /// itself catches it -- and it must catch it in both trees at once.
+    #[test]
+    fn test_e2e_sudoku_swapped_cells_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SWAPPED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(res, Err(ProtocolError::Lookup(_))),
+                    "two broken multisets must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The other half of what selection means: a cell no selection names
+    /// is genuinely unconstrained. The grid still solves, a row past the
+    /// ninth holds a number the table never names, and the proof verifies.
+    #[test]
+    fn test_e2e_sudoku_unselected_cell_is_free() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_UNSELECTED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Negative test: a proof declaring a geometry the signature does not.
+    /// The verifier builds the selection's whole side from the meta -- the
+    /// cells it sums eq over, the multiplicities it counts -- so a proof
+    /// free to name its own cells could drop the strides and the blocks
+    /// and prove nine rows instead of twenty-seven claims.
+    #[test]
+    fn test_e2e_sudoku_undeclared_selection_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.group_meta[0].table_type = LookupTableType::Selected {
+                    values: (1..=9).collect(),
+                    selections: sudoku_selections().into_iter().take(9).collect(),
+                };
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { .. }))
+                    ),
+                    "a proof naming its own cells must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// A grid whose clue cells are fixed by point ties: seventeen cells
+    /// at positions the statement names, each pinned to the number it
+    /// holds. The positions are geometry, so the proof carries one
+    /// evaluation per committed column and not one more -- the tied
+    /// cells' indicators are the verifier's own.
+    #[test]
+    fn test_e2e_point_tie_pinned_grid() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert_eq!(proof.resolver.up_evals.len(), 9);
+                assert!(proof.lookup_proof.groups.is_empty());
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The teeth: a pinned cell holding a number other than the one
+    /// pinned to it.
+    #[test]
+    fn test_e2e_point_tie_tampered_cell_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_TAMPERED, DECL_PINS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a pinned cell holding another value must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The same failure from the declaration's side: the grid solves and
+    /// a pin names a value its cell does not hold.
+    #[test]
+    fn test_e2e_point_tie_wrong_value_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_WRONG>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a pin the cell does not answer must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The other half of what a tie means: a cell no tie names is
+    /// unconstrained, however the ties around it are met.
+    #[test]
+    fn test_e2e_point_tie_untied_cell_is_free() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_FREE, DECL_PINS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The ties are the verifier's own declaration, so a proof cannot
+    /// bring its own: one proved under seventeen pins, checked under a
+    /// signature declaring sixteen, is refused. Nothing in the proof
+    /// says which cells were tied, which is exactly why there is nothing
+    /// for a prover to name.
+    #[test]
+    fn test_e2e_point_tie_undeclared_pin_rejected() {
+        type Proved = SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS>;
+        type Checked = SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_SHORT>;
+        let num_vars = 6;
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let trace = Proved::generate_random_trace(num_vars, &mut rng());
+        let proof = ZincPlusPiop::<TestZincTypesIprs, Proved, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+        .expect("Prover failed");
+
+        let public_trace = trace.public(&Checked::signature());
+        let res = ZincPlusPiop::<TestZincTypesIprs, Checked, F, DEGREE_PLUS_ONE>::verify::<
+            _,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+        );
+        assert!(
+            matches!(
+                res,
+                Err(ProtocolError::Resolver(
+                    CombinedPolyResolverError::ClaimValueDoesNotMatch { .. }
+                ))
+            ),
+            "a tie set the signature does not declare must not verify, got {res:?}"
+        );
+    }
+
+    /// A broadcast tie at work: one cell's private value carried at
+    /// every row of a column of its own, and read there by an ordinary
+    /// uniform constraint. The value is in no public column and in no
+    /// proof field -- the tie says the column is constant and that its
+    /// constant is the cell.
+    #[test]
+    fn test_e2e_broadcast_tie() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BroadcastTieUair<ZtInt, BROADCAST_OK>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// The constancy half, alone: the target column holds the tied
+    /// cell's value at the tied row and another value elsewhere, and
+    /// the reader column follows it, so nothing but the tie's own
+    /// second term catches it.
+    #[test]
+    fn test_e2e_broadcast_tie_varying_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BroadcastTieUair<ZtInt, BROADCAST_VARYING>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a target column that is not constant must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The cell half, alone: the target column is constant, at a value
+    /// the tied cell does not hold.
+    #[test]
+    fn test_e2e_broadcast_tie_wrong_value_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BroadcastTieUair<ZtInt, BROADCAST_WRONG>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Resolver(
+                            CombinedPolyResolverError::WrongSumcheckSum { .. }
+                        ))
+                    ),
+                    "a constant that is not the tied cell must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// The sudoku's endgame shape: the twenty-seven multiset
+    /// obligations and the seventeen clues in one proof, the lookups
+    /// through the GKR and the clues through the constraint
+    /// composition.
+    #[test]
+    fn test_e2e_sudoku_pins_and_lookups() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_LOOKUPS>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert_eq!(proof.lookup_proof.groups.len(), 1);
+                assert_eq!(proof.lookup_proof.group_meta[0].num_lookups, 27);
+                assert_eq!(proof.resolver.up_evals.len(), 9);
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Two tables in one proof: the grid's twenty-seven selections over
+    /// the first nine integer columns, a `Word` range over the four
+    /// after them, and four pins besides. Each group is discharged at
+    /// its own r_inner, so the proof carries one lifted set per group,
+    /// in the order the specs group them -- `Word` before `Selected`.
+    #[test]
+    fn test_e2e_two_int_lookup_groups() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert_eq!(proof.lookup_proof.groups.len(), 2);
+                assert!(matches!(
+                    proof.lookup_proof.group_meta[0].table_type,
+                    LookupTableType::Word { .. }
+                ));
+                assert!(matches!(
+                    proof.lookup_proof.group_meta[1].table_type,
+                    LookupTableType::Selected { .. }
+                ));
+                assert_eq!(proof.lookup_proof.group_meta[1].num_lookups, 27);
+                assert_eq!(proof.lookup_int_lifted.len(), 2);
+            },
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Each group's lifted set binds that group's parents and no other:
+    /// corrupting the `Word` group's lift at one of its own parent
+    /// columns -- the tenth, the first the range covers -- must not
+    /// verify, with the grid's side of the proof untouched.
+    #[test]
+    fn test_e2e_two_groups_word_lift_tampered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let c = &mut proof.lookup_int_lifted[0][SUDOKU_COLS].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(res.is_err(), "a tampered word lift must not verify");
+            },
+        );
+    }
+
+    /// The same for the `Selected` group's own lift, at the first grid
+    /// column, with the range side of the proof untouched.
+    #[test]
+    fn test_e2e_two_groups_selected_lift_tampered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let c = &mut proof.lookup_int_lifted[1][0].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(res.is_err(), "a tampered selected lift must not verify");
+            },
+        );
+    }
+
+    /// A slack cell wider than the `Word` table names has nowhere to sit
+    /// in it, so the prover refuses rather than emitting a proof of
+    /// something false -- the grid's twenty-seven selections beside it
+    /// notwithstanding.
+    #[test]
+    fn test_e2e_two_groups_over_width_refused() {
+        type Uair = SudokuRangedUair<ZtInt, RANGED_OVER_WIDTH>;
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let trace = <Uair as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+        let res = ZincPlusPiop::<TestZincTypesIprs, Uair, F, DEGREE_PLUS_ONE>::prove::<
+            false,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn);
+        assert!(res.is_err(), "an over-wide slack cell must not prove");
+    }
+
+    /// The multiset side breaks and the range side stands: a value
+    /// repeated inside a grid row must not verify.
+    #[test]
+    fn test_e2e_two_groups_selected_side_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_DUPLICATE>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |_| {},
+            |res| {
+                assert!(res.is_err(), "a repeated value in a row must not verify");
+            },
+        );
+    }
+
+    /// Negative test: a proof carrying only one of the two declared
+    /// groups must be refused by the declared check, not quietly
+    /// verified with the other table's obligations dropped.
+    #[test]
+    fn test_e2e_two_groups_one_omitted_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups.truncate(1);
+                proof.lookup_proof.group_meta.truncate(1);
+                proof.lookup_int_lifted.truncate(1);
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::GroupCountMismatch { .. }))
+                    ),
+                    "a proof carrying one of two declared groups must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: the groups are canonically ordered -- the verifier
+    /// derives the same table-type order the prover does -- so a proof
+    /// whose groups are swapped no longer matches the declaration at
+    /// either index.
+    #[test]
+    fn test_e2e_two_groups_reordered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups.swap(0, 1);
+                proof.lookup_proof.group_meta.swap(0, 1);
+                proof.lookup_int_lifted.swap(0, 1);
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { index: 0 }))
+                    ),
+                    "swapped groups must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: the reduced point is where both groups' claims and
+    /// the r_0 claim come to rest, so corrupting the lifts the proof
+    /// carries there must not verify -- the reducer's own P(r*) no longer
+    /// agrees with them.
+    #[test]
+    fn test_e2e_two_groups_reduced_lift_tampered_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert!(proof.int_reducer_proof.is_some());
+                let c = &mut proof.int_lifts_at_r_star[0].coeffs[0];
+                *c = c.clone() + c.clone();
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::FinalEvaluationMismatch))
+                    ),
+                    "a tampered lift at r* must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: the folded int lifts must be bound one per column,
+    /// not merely in sum. This perturbs three lifts by `δ = (γ1−γ2, γ2−γ0,
+    /// γ0−γ1)`, which is zero-sum and γ-orthogonal for any γ, so it leaves
+    /// both `Σ L` and `Σ γ·L` (the plain-sum opening and `p_check`)
+    /// untouched. Only a per-column binding of the lifts catches it; before
+    /// the random-per-column opening it verified.
+    #[test]
+    fn test_e2e_two_groups_folded_lift_null_space_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                assert!(proof.int_reducer_proof.is_some());
+                let gammas = crate::test_capture::take::<F>();
+                assert!(
+                    proof.int_lifts_at_r_star.len() >= 3 && gammas.len() >= 3,
+                    "need at least three int columns to span the null space"
+                );
+                let deltas = [
+                    gammas[1].clone() - gammas[2].clone(),
+                    gammas[2].clone() - gammas[0].clone(),
+                    gammas[0].clone() - gammas[1].clone(),
+                ];
+                for (lift, delta) in proof.int_lifts_at_r_star[..3].iter_mut().zip(deltas) {
+                    // These grid cells are non-zero, so each lift carries its
+                    // one coefficient; move it by δ within the null space.
+                    let c = &mut lift.coeffs[0];
+                    *c = c.clone() + delta;
+                }
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::FinalEvaluationMismatch))
+                            | Err(ProtocolError::PcsVerification(2, _))
+                    ),
+                    "a null-space perturbation of the folded lifts must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: a proof that drops the int reducer must be refused
+    /// rather than falling back to the r_0 opening the reducer replaced.
+    #[test]
+    fn test_e2e_two_groups_dropped_int_reducer_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.int_reducer_proof = None;
+                proof.int_lifts_at_r_star.clear();
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::FinalEvaluationMismatch))
+                    ),
+                    "a proof without the int reducer must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Negative test: a proof carrying a lifted set past its last int
+    /// group must be refused. Step 6 absorbs whatever the proof carries,
+    /// so an unopened set would steer every challenge after it.
+    #[test]
+    fn test_e2e_two_groups_extra_lift_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, SudokuRangedUair<ZtInt, RANGED_SOLVED>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                let extra = proof.lookup_int_lifted[0].clone();
+                proof.lookup_int_lifted.push(extra);
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::GroupCountMismatch { .. }))
+                    ),
+                    "an unopened lifted set must not verify, got {res:?}"
+                );
+            },
+        );
+    }
+
+    /// Opt-in measurement of what a second int lookup group costs. Three
+    /// statements: the grid's selections over nine columns, the same
+    /// selections over thirteen with the slack unchecked, and the two
+    /// groups over those same thirteen. The middle row holds the width
+    /// fixed, so the last Δ is the second group and nothing else, and
+    /// `zip` -- where every Zip+ opening lives -- says what the group
+    /// costs in openings as against in GKR payload. Run:
+    ///   cargo test -p zinc-protocol --release -- --ignored --nocapture bench_two_groups
+    #[test]
+    #[ignore]
+    fn bench_two_groups() {
+        macro_rules! time_uair {
+            ($U:ty, $nv:expr, $reps:expr) => {{
+                let num_vars: usize = $nv;
+                let mut rng = rng();
+                let pp = setup_pp::<TestZincTypesIprs>(
+                    num_vars,
+                    (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+                );
+                let trace =
+                    <$U as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+                let sig = <$U as Uair>::signature();
+                let public_trace = trace.public(&sig);
+
+                let mut best_prove = f64::MAX;
+                let mut proof_bytes = 0usize;
+                let mut zip_bytes = 0usize;
+                let mut proof_keep: Option<Proof<F>> = None;
+                for _ in 0..$reps {
+                    let t = std::time::Instant::now();
+                    let proof = ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::prove::<
+                        false,
+                        CHECKED,
+                    >(&pp, &trace, num_vars, project_scalar_fn)
+                    .expect("prove");
+                    best_prove = best_prove.min(t.elapsed().as_secs_f64() * 1e3);
+                    proof_bytes = proof.get_num_bytes();
+                    zip_bytes = proof.zip.len();
+                    proof_keep = Some(proof);
+                }
+
+                let mut best_verify = f64::MAX;
+                for _ in 0..$reps {
+                    let proof = proof_keep.clone().expect("proof");
+                    let t = std::time::Instant::now();
+                    ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar_fn,
+                        |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+                    )
+                    .expect("verify");
+                    best_verify = best_verify.min(t.elapsed().as_secs_f64() * 1e3);
+                }
+                (best_prove, best_verify, proof_bytes, zip_bytes)
+            }};
+        }
+
+        println!("\n== a second int lookup group (IPRS, CHECKED, min of reps) ==");
+        for &nv in &[4usize, 6, 8] {
+            let (np, nv_, nb, nz) = time_uair!(SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>, nv, 6);
+            let (op, ov, ob, oz) =
+                time_uair!(SudokuRangedUair<ZtInt, RANGED_SOLVED, RANGED_GRID_ONLY>, nv, 6);
+            let (bp, bv, bb, bz) =
+                time_uair!(SudokuRangedUair<ZtInt, RANGED_SOLVED, RANGED_BOTH>, nv, 6);
+            println!("\nnv={nv}  ({} rows)", 1usize << nv);
+            println!(
+                "   9 cols, 1 group  : prove {np:8.2} ms | verify {nv_:7.2} ms | proof {nb:7} B | zip {nz:7} B"
+            );
+            println!(
+                "  13 cols, 1 group  : prove {op:8.2} ms | verify {ov:7.2} ms | proof {ob:7} B | zip {oz:7} B"
+            );
+            println!(
+                "  13 cols, 2 groups : prove {bp:8.2} ms | verify {bv:7.2} ms | proof {bb:7} B | zip {bz:7} B"
+            );
+            println!(
+                "  second group      : {:+.2} / {:+.2} ms, {:+} B proof, {:+} B of it in openings",
+                bp - op,
+                bv - ov,
+                bb as i64 - ob as i64,
+                bz as i64 - oz as i64
+            );
+        }
+    }
+
+    /// Opt-in measurement of what a point tie costs: the same nine
+    /// columns with no ties, with seventeen pins, and with the pins
+    /// beside the twenty-seven selections. Run with:
+    ///   cargo test -p zinc-protocol --release -- --ignored --nocapture bench_point_ties
+    #[test]
+    #[ignore]
+    fn bench_point_ties() {
+        macro_rules! time_uair {
+            ($U:ty, $nv:expr, $reps:expr) => {{
+                let num_vars: usize = $nv;
+                let mut rng = rng();
+                let pp = setup_pp::<TestZincTypesIprs>(
+                    num_vars,
+                    (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+                );
+                let trace =
+                    <$U as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+                let sig = <$U as Uair>::signature();
+                let public_trace = trace.public(&sig);
+
+                let mut best_prove = f64::MAX;
+                let mut proof_bytes = 0usize;
+                let mut proof_keep: Option<Proof<F>> = None;
+                for _ in 0..$reps {
+                    let t = std::time::Instant::now();
+                    let proof = ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::prove::<
+                        false,
+                        CHECKED,
+                    >(&pp, &trace, num_vars, project_scalar_fn)
+                    .expect("prove");
+                    best_prove = best_prove.min(t.elapsed().as_secs_f64() * 1e3);
+                    proof_bytes = proof.get_num_bytes();
+                    proof_keep = Some(proof);
+                }
+
+                let mut best_verify = f64::MAX;
+                for _ in 0..$reps {
+                    let proof = proof_keep.clone().expect("proof");
+                    let t = std::time::Instant::now();
+                    ZincPlusPiop::<TestZincTypesIprs, $U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                        &pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar_fn,
+                        |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+                    )
+                    .expect("verify");
+                    best_verify = best_verify.min(t.elapsed().as_secs_f64() * 1e3);
+                }
+                (best_prove, best_verify, proof_bytes)
+            }};
+        }
+
+        println!("\n== point ties on a 9-column grid (IPRS, CHECKED, min of reps) ==");
+        for &nv in &[4usize, 6, 8] {
+            let (cp, cv, cb) =
+                time_uair!(SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_NONE>, nv, 6);
+            let (pp_, pv, pb) =
+                time_uair!(SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS>, nv, 6);
+            let (bp, bv, bb) = time_uair!(BroadcastTieUair<ZtInt, BROADCAST_OK>, nv, 6);
+            let (sp, sv, sb) = time_uair!(SudokuSelectedUair<ZtInt, SUDOKU_SOLVED>, nv, 6);
+            let (mp, mv, mb) =
+                time_uair!(SudokuPinnedUair<ZtInt, PINNED_SOLVED, DECL_PINS_LOOKUPS>, nv, 6);
+            println!("\nnv={nv}  ({} rows)", 1usize << nv);
+            println!("  no ties         : prove {cp:8.2} ms | verify {cv:7.2} ms | proof {cb:7} B");
+            println!(
+                "  17 pins         : prove {pp_:8.2} ms | verify {pv:7.2} ms | proof {pb:7} B   (Δ {:+.2} / {:+.2} ms, {:+} B)",
+                pp_ - cp,
+                pv - cv,
+                pb as i64 - cb as i64
+            );
+            println!(
+                "  1 broadcast     : prove {bp:8.2} ms | verify {bv:7.2} ms | proof {bb:7} B   (3 columns)"
+            );
+            println!("  27 lookups      : prove {sp:8.2} ms | verify {sv:7.2} ms | proof {sb:7} B");
+            println!(
+                "  27 lu + 17 pins : prove {mp:8.2} ms | verify {mv:7.2} ms | proof {mb:7} B   (Δ over lookups {:+.2} / {:+.2} ms, {:+} B)",
+                mp - sp,
+                mv - sv,
+                mb as i64 - sb as i64
+            );
+        }
+    }
+
+    /// Negative test: a proof that carries no lookup group at all must
+    /// fail against a UAIR that declares one. The declared range check
+    /// is otherwise simply skipped, so every cell goes unchecked.
+    #[test]
+    fn test_e2e_int_word_lookup_omitted_group_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.groups.clear();
+                proof.lookup_proof.group_meta.clear();
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::GroupCountMismatch { .. }))
+                    ),
+                    "a proof omitting the declared lookup group must not verify"
+                );
+            },
+        );
+    }
+
+    /// Negative test: a proof that widens the declared table must fail.
+    /// The meta is what the verifier builds its subtable from, so a
+    /// `Word{16}` declaration proved as `Word{32}` would admit exactly
+    /// the cells the AIR forbids.
+    #[test]
+    fn test_e2e_int_word_lookup_widened_table_rejected() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, IntWordLookupUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |proof| {
+                proof.lookup_proof.group_meta[0].table_type =
+                    LookupTableType::Word { width: 32, chunk_width: Some(8) };
+            },
+            |res| {
+                assert!(
+                    matches!(
+                        res,
+                        Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { .. }))
+                    ),
+                    "a proof widening the declared table must not verify"
+                );
+            },
+        );
+    }
+
+    /// Negative test: an honest proof of the UAIR that declares
+    /// `Word{32}` must not verify against the one that declares
+    /// `Word{16}`. This is the weakening a tampered meta cannot reach --
+    /// every shape in the proof agrees with the wider table -- and the
+    /// verifier read that width off the proof, so before the groups were
+    /// held against the declaration this verified.
+    #[test]
+    fn test_e2e_int_word_lookup_wider_declaration_rejected() {
+        let num_vars = 8;
+        let mut rng = rng();
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        type Wide = IntWordLookupUair<ZtInt, 32>;
+        type Declared = IntWordLookupUair<ZtInt>;
+        type Piop<U> = ZincPlusPiop<TestZincTypesIprs, U, F, DEGREE_PLUS_ONE>;
+
+        let trace = <Wide as GenerateRandomTrace<32>>::generate_random_trace(num_vars, &mut rng);
+        let public_trace = trace.public(&<Declared as Uair>::signature());
+        let proof = Piop::<Wide>::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+            .expect("Prover failed");
+
+        let res = Piop::<Declared>::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+        );
+        assert!(
+            matches!(res, Err(ProtocolError::Lookup(LookupError::UndeclaredGroup { .. }))),
+            "a proof of the wider table must not verify against the narrower declaration"
         );
     }
 
