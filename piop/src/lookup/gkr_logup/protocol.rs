@@ -402,6 +402,10 @@ where
     // ---- Step 3: Cross-check roots ----
     {
         let roots_q = &proof.witness_gkr.roots_q;
+        // Every root enters the cross-check, but only one tree per lookup has its leaves checked.
+        if roots_q.len() != num_lookups || proof.witness_gkr.roots_p.len() != num_lookups {
+            return Err(GkrLogupError::GkrRootMismatch);
+        }
         let q_w_product: F = roots_q.iter().cloned().fold(one.clone(), |acc, q| acc * &q);
         let mut lhs = zero.clone();
         if num_lookups == 1 {
@@ -1167,6 +1171,83 @@ mod tests {
         let mut v_ts = Blake3Transcript::new();
         let sub = verify_group::<F>(&mut v_ts, &proof, &meta, &a, &cfg).expect("verify");
         assert_eq!(sub.combined_polynomial.len(), 2);
+    }
+
+    #[test]
+    fn extra_witness_tree_rejected() {
+        let cfg = ();
+        let mut rng = StdRng::seed_from_u64(5);
+        let (n_vars, rows, width, cw) = (3usize, 8usize, 32usize, 8usize);
+        let parent = rand_binary_poly_col(n_vars, &mut rng);
+        let a: F = F::from(rng.next_u64());
+        let instance = BinaryPolyLookupInstance::<'_, F, 32> {
+            parent_columns: vec![&parent],
+            parent_column_indices: vec![0],
+            table_type: LookupTableType::BitPoly { width: 32, chunk_width: Some(8) },
+            projecting_element_f: &a,
+            n_vars,
+        };
+        let (mut proof, meta, _) =
+            prove_group::<F, 32>(&mut Blake3Transcript::new(), &instance, &cfg).expect("prove");
+
+        // A coefficient 2 puts cell 5 outside the BitPoly table.
+        let (zero, one) = (F::from(0u64), F::from(1u64));
+        let mut cells: Vec<Vec<u64>> = (0..rows)
+            .map(|i| (0..width).map(|p| (((i * 37 + 11) >> p) & 1) as u64).collect())
+            .collect();
+        cells[5][3] = 2;
+        // Leaf k·W + i is chunk k of cell i.
+        let leaves: Vec<&[u64]> = (0..width / cw)
+            .flat_map(|k| cells.iter().map(move |c| &c[k * cw..(k + 1) * cw]))
+            .collect();
+        let psi = |c: &[u64]| c.iter().rev().fold(zero.clone(), |acc, x| acc * &a + &F::from(*x));
+        let table = generate_bitpoly_table::<F>(cw, &a, &cfg);
+        let mut counts = vec![0u64; table.len()];
+        for c in &leaves {
+            let n: usize = c.iter().enumerate().map(|(p, &x)| (x.min(1) as usize) << p).sum();
+            counts[n] += 1;
+        }
+        let mults: Vec<F> = counts.iter().map(|&c| F::from(c)).collect();
+
+        let mut ts = Blake3Transcript::new();
+        let mut buf = vec![0u8; <<F as Field>::Inner as ConstTranscribable>::NUM_BYTES];
+        ts.absorb_random_field_slice(&mults, &mut buf);
+        let beta: F = ts.get_field_challenge(&cfg);
+        let _alpha: F = ts.get_field_challenge(&cfg);
+        let witness_tree = build_fraction_tree(
+            vec![one.clone(); leaves.len()],
+            leaves.iter().map(|c| beta.clone() - &psi(c)).collect(),
+        );
+        let table_tree =
+            build_fraction_tree(mults.clone(), table.iter().map(|t| beta.clone() - t).collect());
+
+        // A tree of zero numerators adds only its root denominator to the cross-check.
+        let (w, t) = (witness_tree.last().unwrap(), table_tree.last().unwrap());
+        let mut extra_q = vec![one.clone(); leaves.len()];
+        extra_q[0] = w.p[0].clone() * &t.q[0] / &(t.p[0].clone() * &w.q[0]);
+        let extra = build_fraction_tree(vec![zero.clone(); leaves.len()], extra_q);
+        let witness = batched_gkr_fraction_prove(&mut ts, &[witness_tree, extra], &cfg);
+        let (table_gkr, _) = gkr_fraction_prove(&mut ts, &table_tree, &cfg);
+
+        let eq = build_eq_x_r_vec(&witness.eval_point[..n_vars], &cfg).unwrap();
+        let lift = |column: &[&[u64]]| {
+            DynamicPolynomialF::new_trimmed(
+                (0..cw)
+                    .map(|p| {
+                        column.iter().zip(&eq).fold(zero.clone(), |acc, (c, e)| {
+                            acc + &(e.clone() * &F::from(c[p]))
+                        })
+                    })
+                    .collect::<Vec<F>>(),
+            )
+        };
+        proof.chunk_lifts = vec![leaves.chunks(rows).map(lift).collect()];
+        proof.aggregated_multiplicities = vec![mults];
+        proof.witness_gkr = witness.proof;
+        proof.table_gkr = table_gkr;
+
+        let res = verify_group::<F>(&mut Blake3Transcript::new(), &proof, &meta, &a, &cfg);
+        assert!(matches!(res, Err(GkrLogupError::GkrRootMismatch)));
     }
 
     #[test]
