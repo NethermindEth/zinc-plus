@@ -1,8 +1,10 @@
 pub mod bin_multipoint_reducer;
 pub mod combined_poly_resolver;
 pub mod ideal_check;
+pub mod int_multipoint_reducer;
 pub mod lookup;
 pub mod multipoint_eval;
+pub mod pointer_query;
 pub mod projections;
 pub mod random_field_sumcheck;
 pub mod scalar_proj_cache;

@@ -31,8 +31,9 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout,
-    ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
+    BitOp, BitOpSpec, ComposedReadSpec, ConstraintBuilder, LookupColumnSpec, LookupTableType,
+    PointTie, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature,
+    UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -212,6 +213,708 @@ where
             ..Default::default()
         }
     }
+}
+
+/// Synthetic Word-lookup UAIR: four witness integer columns, all
+/// declared as a single `Word { width: 16, chunk_width: 8 }` lookup
+/// group. The algebraic constraint is trivial -- the range check is the
+/// whole point -- so a proof of this UAIR is exactly the claim that
+/// every cell of every int column lies in `[0, 2^16)`.
+///
+/// This is the shape a range check takes: a slack cell committed as an
+/// integer, declared to the table, and refused when it does not fit.
+///
+/// `WIDTH` is the declared width, 16 unless a test asks for another one.
+#[derive(Clone, Debug)]
+pub struct IntWordLookupUair<R, const WIDTH: usize = INT_WORD_WIDTH>(PhantomData<R>);
+
+/// How many integer columns [`IntWordLookupUair`] range-checks.
+pub const INT_WORD_COLS: usize = 4;
+/// The width [`IntWordLookupUair`] range-checks to.
+pub const INT_WORD_WIDTH: usize = 16;
+
+impl<R, const WIDTH: usize> Uair for IntWordLookupUair<R, WIDTH>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, INT_WORD_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = (0..INT_WORD_COLS)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: LookupTableType::Word {
+                    width: WIDTH,
+                    chunk_width: Some(8),
+                },
+            })
+            .collect();
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the lookup carries the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const WIDTH: usize> GenerateRandomTrace<32> for IntWordLookupUair<R, WIDTH>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        // Cells fit the narrowest declaration, so one trace serves every WIDTH.
+        let bound: u32 = 1 << INT_WORD_WIDTH;
+        let cols: Vec<DenseMultilinearExtension<R>> = (0..INT_WORD_COLS)
+            .map(|_| {
+                let evals: Vec<R> = (0..row_count)
+                    .map(|_| R::from(rng.next_u32() % bound))
+                    .collect();
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+            })
+            .collect();
+        UairTrace {
+            int: cols.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Synthetic prescribed-lookup UAIR: four witness integer columns, all
+/// declared against one `Prescribed` table -- the values 1..=9 with pad
+/// 0 -- so a single group carries them. The algebraic constraint is
+/// trivial: the lookup is the whole claim, and that claim is that every
+/// column holds each of 1..=9 exactly once and a zero in every other row.
+///
+/// This is the shape a sudoku row takes: a permutation checked by one
+/// lookup rather than by a polynomial identity of that degree.
+///
+/// `FILL` says how the trace is laid down, so the same declaration can be
+/// handed a column that is not the multiset it names.
+#[derive(Clone, Debug)]
+pub struct IntPrescribedLookupUair<R, const FILL: u8>(PhantomData<R>);
+
+/// How many integer columns [`IntPrescribedLookupUair`] checks.
+pub const INT_PRESCRIBED_COLS: usize = 4;
+/// A permutation of 1..=9 with zero padding: the multiset the table names.
+pub const PRESCRIBED_PERMUTATION: u8 = 0;
+/// The eight becomes a second nine: still all in the table, wrong multiset.
+pub const PRESCRIBED_REPEAT: u8 = 1;
+/// The eight becomes a ten, which the table never names.
+pub const PRESCRIBED_OUTSIDE: u8 = 2;
+/// One value short, and so one pad too many.
+pub const PRESCRIBED_SHORT: u8 = 3;
+
+/// The table [`IntPrescribedLookupUair`] declares for every column.
+fn prescribed_row_table() -> LookupTableType {
+    LookupTableType::Prescribed { values: (1..=9).collect(), pad: 0 }
+}
+
+impl<R, const FILL: u8> Uair for IntPrescribedLookupUair<R, FILL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, INT_PRESCRIBED_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = (0..INT_PRESCRIBED_COLS)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: prescribed_row_table(),
+            })
+            .collect();
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the lookup carries the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8> GenerateRandomTrace<32> for IntPrescribedLookupUair<R, FILL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let cols: Vec<DenseMultilinearExtension<R>> = (0..INT_PRESCRIBED_COLS)
+            .map(|_| {
+                let mut values: Vec<u32> = (1..=9).collect();
+                match FILL {
+                    PRESCRIBED_REPEAT => values[7] = 9,
+                    PRESCRIBED_OUTSIDE => values[7] = 10,
+                    PRESCRIBED_SHORT => {
+                        values.pop();
+                    }
+                    _ => {}
+                }
+                values.shuffle(rng);
+                let mut evals: Vec<R> = values.into_iter().map(R::from).collect();
+                evals.resize(row_count, R::ZERO);
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+            })
+            .collect();
+        UairTrace {
+            int: cols.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Synthetic selected-lookup UAIR: a solved 9x9 sudoku committed as nine
+/// witness integer columns, one per grid row, and one `Selected` group
+/// carrying all twenty-seven of the grid's obligations -- nine rows, nine
+/// strides down a position, nine three-by-three blocks -- each declared
+/// to be a permutation of 1..=9. The algebraic constraint is trivial: the
+/// lookups are the whole claim, and one proof carries every one of them.
+///
+/// Rows past the ninth belong to no selection at all, so they are exactly
+/// as unconstrained as the mechanism says they are.
+///
+/// `FILL` says how the grid is laid down, so the same declaration can be
+/// handed a grid that does not solve it.
+#[derive(Clone, Debug)]
+pub struct SudokuSelectedUair<R, const FILL: u8>(PhantomData<R>);
+
+/// How many integer columns [`SudokuSelectedUair`] commits: one per row.
+pub const SUDOKU_COLS: usize = 9;
+/// The grid solves: every row, stride and block a permutation of 1..=9.
+pub const SUDOKU_SOLVED: u8 = 0;
+/// A value repeated inside one row, and so one value missing from it.
+pub const SUDOKU_DUPLICATE: u8 = 1;
+/// A value slid out of its row into a cell no selection names.
+pub const SUDOKU_SLID: u8 = 2;
+/// Two cells traded between two rows, breaking the multiset of both.
+pub const SUDOKU_SWAPPED: u8 = 3;
+/// A cell past the ninth row, which no selection names, holding a number
+/// no table does either.
+pub const SUDOKU_UNSELECTED: u8 = 4;
+
+/// A solved grid, one row per committed column.
+pub const SUDOKU_SOLUTION: [[u32; 9]; 9] = [
+    [5, 3, 4, 6, 7, 8, 9, 1, 2],
+    [6, 7, 2, 1, 9, 5, 3, 4, 8],
+    [1, 9, 8, 3, 4, 2, 5, 6, 7],
+    [8, 5, 9, 7, 6, 1, 4, 2, 3],
+    [4, 2, 6, 8, 5, 3, 7, 9, 1],
+    [7, 1, 3, 9, 2, 4, 8, 5, 6],
+    [9, 6, 1, 5, 3, 7, 2, 8, 4],
+    [2, 8, 7, 4, 1, 9, 6, 3, 5],
+    [3, 4, 5, 2, 8, 6, 1, 7, 9],
+];
+
+/// The twenty-seven cell sets a sudoku grid must each hold 1..=9 in, as
+/// `(column slot, row)` over the nine columns holding the grid's rows.
+pub fn sudoku_selections() -> Vec<Vec<(u32, u32)>> {
+    let rows = (0..9u32).map(|r| (0..9u32).map(|p| (r, p)).collect());
+    let strides = (0..9u32).map(|p| (0..9u32).map(|r| (r, p)).collect());
+    let blocks = (0..9u32).map(|b| {
+        (0..9u32)
+            .map(|c| (b / 3 * 3 + c / 3, b % 3 * 3 + c % 3))
+            .collect()
+    });
+    rows.chain(strides).chain(blocks).collect()
+}
+
+/// The table [`SudokuSelectedUair`] declares for every column.
+fn sudoku_table() -> LookupTableType {
+    LookupTableType::Selected {
+        values: (1..=9).collect(),
+        selections: sudoku_selections(),
+    }
+}
+
+impl<R, const FILL: u8> Uair for SudokuSelectedUair<R, FILL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, SUDOKU_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = (0..SUDOKU_COLS)
+            .map(|i| LookupColumnSpec {
+                column_index: i,
+                table_type: sudoku_table(),
+            })
+            .collect();
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the lookups carry the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8> GenerateRandomTrace<32> for SudokuSelectedUair<R, FILL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        _rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut grid: Vec<Vec<u32>> = SUDOKU_SOLUTION
+            .iter()
+            .map(|row| {
+                let mut cells = row.to_vec();
+                cells.resize(row_count, 0);
+                cells
+            })
+            .collect();
+        match FILL {
+            SUDOKU_DUPLICATE => grid[0][1] = grid[0][0],
+            SUDOKU_SLID => {
+                grid[0][9] = grid[0][0];
+                grid[0][0] = 0;
+            }
+            SUDOKU_SWAPPED => {
+                let held = grid[0][0];
+                grid[0][0] = grid[1][1];
+                grid[1][1] = held;
+            }
+            SUDOKU_UNSELECTED => grid[3][12] = 4242,
+            _ => {}
+        }
+        UairTrace {
+            int: grid_columns(grid, num_vars).into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The same grid, with a clue's worth of its cells fixed by point ties
+/// rather than by a lookup: seventeen cells at positions the statement
+/// names, each pinned to the number it holds. A pin is verifier
+/// geometry -- the cell's `eq` is evaluated at the sumcheck point rather
+/// than read out of the proof -- so nothing about the seventeen
+/// positions is committed and nothing is sent.
+///
+/// `FILL` lays the grid down, `DECL` says what the signature declares,
+/// so the same grid can be handed a declaration that does not fit it and
+/// the same declaration a grid that does not answer it.
+#[derive(Clone, Debug)]
+pub struct SudokuPinnedUair<R, const FILL: u8, const DECL: u8>(PhantomData<R>);
+
+/// The grid solves and holds every clue.
+pub const PINNED_SOLVED: u8 = 0;
+/// A pinned cell holds a number other than the one pinned to it.
+pub const PINNED_TAMPERED: u8 = 1;
+/// A cell no tie names holds a number no table names either.
+pub const PINNED_FREE: u8 = 2;
+
+/// Seventeen pins, one per clue.
+pub const DECL_PINS: u8 = 0;
+/// Seventeen pins, one of them naming a value the solution does not hold
+/// at the cell it names.
+pub const DECL_PINS_WRONG: u8 = 1;
+/// The seventeen pins and the twenty-seven selections in one statement.
+pub const DECL_PINS_LOOKUPS: u8 = 2;
+/// Sixteen pins: a declaration one clue short of [`DECL_PINS`].
+pub const DECL_PINS_SHORT: u8 = 3;
+/// No ties and no lookups: the control the pins' cost is read against.
+pub const DECL_NONE: u8 = 4;
+
+/// The seventeen cells the pins fix, as `(grid row, position)` -- the
+/// grid's rows being the committed columns, a cell is column `row` at
+/// trace row `position`.
+pub const SUDOKU_CLUES: [(usize, usize); 17] = [
+    (0, 0),
+    (0, 4),
+    (1, 2),
+    (1, 6),
+    (2, 1),
+    (2, 8),
+    (3, 3),
+    (3, 5),
+    (4, 0),
+    (4, 7),
+    (5, 2),
+    (5, 4),
+    (6, 1),
+    (6, 6),
+    (7, 3),
+    (7, 8),
+    (8, 5),
+];
+
+/// The pins a `DECL` declares.
+fn sudoku_pins(decl: u8) -> Vec<PointTie> {
+    let clues: &[(usize, usize)] = match decl {
+        DECL_NONE => &[],
+        DECL_PINS_SHORT => &SUDOKU_CLUES[..16],
+        _ => &SUDOKU_CLUES,
+    };
+    clues
+        .iter()
+        .enumerate()
+        .map(|(i, &(row, position))| {
+            let held = u64::from(SUDOKU_SOLUTION[row][position]);
+            let value = match (decl, i) {
+                (DECL_PINS_WRONG, 0) => held + 1,
+                _ => held,
+            };
+            PointTie::pin(row, position, value)
+        })
+        .collect()
+}
+
+impl<R, const FILL: u8, const DECL: u8> Uair for SudokuPinnedUair<R, FILL, DECL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, SUDOKU_COLS);
+        let lookup_specs: Vec<LookupColumnSpec> = match DECL {
+            DECL_PINS_LOOKUPS => (0..SUDOKU_COLS)
+                .map(|i| LookupColumnSpec {
+                    column_index: i,
+                    table_type: sudoku_table(),
+                })
+                .collect(),
+            _ => vec![],
+        };
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], lookup_specs, vec![])
+            .with_point_ties(sudoku_pins(DECL))
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the ties carry the whole claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8, const DECL: u8> GenerateRandomTrace<32> for SudokuPinnedUair<R, FILL, DECL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        _rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut grid: Vec<Vec<u32>> = SUDOKU_SOLUTION
+            .iter()
+            .map(|row| {
+                let mut cells = row.to_vec();
+                cells.resize(row_count, 0);
+                cells
+            })
+            .collect();
+        match FILL {
+            PINNED_TAMPERED => {
+                let (row, position) = SUDOKU_CLUES[0];
+                grid[row][position] += 1;
+            }
+            PINNED_FREE => grid[0][9] = 4242,
+            _ => {}
+        }
+        UairTrace {
+            int: grid_columns(grid, num_vars).into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Two tables in one statement: the solved grid of [`SudokuSelectedUair`]
+/// in the first nine integer columns, declared against a `Selected` table,
+/// and four range-checked columns after it declared against a `Word` one,
+/// with four of the clues pinned besides. A statement that owes both a
+/// multiset and a range owes a lookup group for each, and each group is
+/// discharged at its own point.
+///
+/// This is the shape a sudoku with slack takes: the grid's obligations
+/// and the slack cells' widths are separate tables over separate columns,
+/// and neither is a reason to refuse the other.
+///
+/// `FILL` says how the columns are laid down, so either side can be
+/// broken while the other stands; `DECL` says which tables the signature
+/// names, so the same thirteen columns price one group against two.
+#[derive(Clone, Debug)]
+pub struct SudokuRangedUair<R, const FILL: u8, const DECL: u8 = RANGED_BOTH>(PhantomData<R>);
+
+/// The grid's nine columns and the four range-checked ones after them.
+pub const RANGED_COLS: usize = SUDOKU_COLS + INT_WORD_COLS;
+/// Both tables hold, and so does every pin.
+pub const RANGED_SOLVED: u8 = 0;
+/// A slack cell wider than the `Word` table names: the range side breaks
+/// and the grid stands.
+pub const RANGED_OVER_WIDTH: u8 = 1;
+/// A value repeated inside a grid row: the multiset side breaks and the
+/// range stands.
+pub const RANGED_DUPLICATE: u8 = 2;
+
+/// The grid's selections and the slack's range, two groups.
+pub const RANGED_BOTH: u8 = 0;
+/// The grid's selections alone: the same thirteen columns, one group,
+/// the slack unchecked. The control the second group's cost is read
+/// against.
+pub const RANGED_GRID_ONLY: u8 = 1;
+
+/// The four clues [`SudokuRangedUair`] pins.
+fn ranged_pins() -> Vec<PointTie> {
+    SUDOKU_CLUES[..4]
+        .iter()
+        .map(|&(row, position)| {
+            PointTie::pin(row, position, u64::from(SUDOKU_SOLUTION[row][position]))
+        })
+        .collect()
+}
+
+impl<R, const FILL: u8, const DECL: u8> Uair for SudokuRangedUair<R, FILL, DECL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(0, 0, RANGED_COLS);
+        let grid = (0..SUDOKU_COLS).map(|i| LookupColumnSpec {
+            column_index: i,
+            table_type: sudoku_table(),
+        });
+        let slack: Vec<LookupColumnSpec> = match DECL {
+            RANGED_GRID_ONLY => vec![],
+            _ => (SUDOKU_COLS..RANGED_COLS)
+                .map(|i| LookupColumnSpec {
+                    column_index: i,
+                    table_type: LookupTableType::Word {
+                        width: INT_WORD_WIDTH,
+                        chunk_width: Some(8),
+                    },
+                })
+                .collect(),
+        };
+        UairSignature::new(
+            total,
+            PublicColumnLayout::default(),
+            vec![],
+            grid.chain(slack).collect(),
+            vec![],
+        )
+        .with_point_ties(ranged_pins())
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially satisfied: the tables and the ties carry the claim.
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R, const FILL: u8, const DECL: u8> GenerateRandomTrace<32> for SudokuRangedUair<R, FILL, DECL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut grid: Vec<Vec<u32>> = SUDOKU_SOLUTION
+            .iter()
+            .map(|row| {
+                let mut cells = row.to_vec();
+                cells.resize(row_count, 0);
+                cells
+            })
+            .collect();
+        let bound: u32 = 1 << INT_WORD_WIDTH;
+        let mut slack: Vec<Vec<u32>> = (0..INT_WORD_COLS)
+            .map(|_| (0..row_count).map(|_| rng.next_u32() % bound).collect())
+            .collect();
+        match FILL {
+            RANGED_OVER_WIDTH => slack[0][0] = bound,
+            RANGED_DUPLICATE => grid[0][1] = grid[0][0],
+            _ => {}
+        }
+        grid.append(&mut slack);
+        UairTrace {
+            int: grid_columns(grid, num_vars).into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// A broadcast tie at work: one cell's private value, carried at every
+/// row of a column of its own, read by an ordinary uniform constraint.
+///
+/// Column 0 holds a row of the solution, column 1 is the tie's target,
+/// and column 2 is a column the constraint `c_2 - c_1 = 0` holds equal
+/// to it everywhere. The tied cell's value is neither public nor in the
+/// proof: the tie says column 1 is constant and that its constant is the
+/// cell, and the constraint reads it from there.
+#[derive(Clone, Debug)]
+pub struct BroadcastTieUair<R, const FILL: u8>(PhantomData<R>);
+
+/// Which cell of column 0 the broadcast carries.
+pub const BROADCAST_ROW: usize = 4;
+/// The target column is that cell's value at every row.
+pub const BROADCAST_OK: u8 = 0;
+/// The target column holds the cell's value at the tied row and another
+/// value elsewhere: constant is what it is not.
+pub const BROADCAST_VARYING: u8 = 1;
+/// The target column is constant, at a value the tied cell does not hold.
+pub const BROADCAST_WRONG: u8 = 2;
+
+impl<R, const FILL: u8> Uair for BroadcastTieUair<R, FILL>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        UairSignature::new(
+            TotalColumnLayout::new(0, 0, 3),
+            PublicColumnLayout::default(),
+            vec![],
+            vec![],
+            vec![],
+        )
+        .with_point_ties(vec![PointTie::broadcast(0, BROADCAST_ROW, 1)])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // The reader column equals the broadcast one at every row, which
+        // is the private value of a cell this constraint never names.
+        b.assert_zero(up.int[2].clone() - &up.int[1]);
+    }
+}
+
+impl<R, const FILL: u8> GenerateRandomTrace<32> for BroadcastTieUair<R, FILL>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        _rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let row_count = 1usize << num_vars;
+        let mut source = SUDOKU_SOLUTION[0].to_vec();
+        source.resize(row_count, 0);
+        let held = SUDOKU_SOLUTION[0][BROADCAST_ROW];
+        let mut broadcast = match FILL {
+            BROADCAST_WRONG => vec![held + 1; row_count],
+            _ => vec![held; row_count],
+        };
+        if FILL == BROADCAST_VARYING {
+            broadcast[0] = held + 1;
+        }
+        let reader = broadcast.clone();
+        UairTrace {
+            int: grid_columns(vec![source, broadcast, reader], num_vars).into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The integer columns a grid of numbers commits as.
+fn grid_columns<R: ConstSemiring + From<u32>>(
+    grid: Vec<Vec<u32>>,
+    num_vars: usize,
+) -> Vec<DenseMultilinearExtension<R>> {
+    grid.into_iter()
+        .map(|cells| {
+            let evals: Vec<R> = cells.into_iter().map(R::from).collect();
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+        })
+        .collect()
 }
 
 /// No-lookup control for [`BinLookup16Uair`]: identical 16-column layout
@@ -1292,5 +1995,162 @@ mod tests {
             .into_iter()
             .collect())
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PointerHopUair — composed reads (pointer query)
+// ---------------------------------------------------------------------------
+
+/// The number of address bits (= trace num_vars) the pointer-hop UAIRs
+/// are declared for; `signature()` is static, so the bit-column count
+/// must be fixed here and tests must prove at this size.
+pub const POINTER_HOP_NUM_VARS: usize = 8;
+
+/// A value-addressed read at fixture scale: int columns
+/// `[V, b_0..b_7, R]`. Every row's `R` entry must equal `V` at the cube
+/// position the bits spell at that row. The bits ride the booleanity
+/// sumcheck (`with_int_witness_bit_cols`); the read itself is declared
+/// as a `ComposedReadSpec` and carries the soundness work — the
+/// general constraint is trivially satisfied.
+/// See `documentation/pointer-query-design.md`.
+#[derive(Clone, Debug)]
+pub struct PointerHopUair<R>(PhantomData<R>);
+
+fn pointer_hop_signature() -> UairSignature {
+    let mu = POINTER_HOP_NUM_VARS;
+    let total = TotalColumnLayout::new(0, 0, mu + 2);
+    let bit_cols: Vec<usize> = (1..=mu).collect();
+    UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![], vec![])
+        .with_int_witness_bit_cols(bit_cols.clone())
+        .with_composed_reads(vec![ComposedReadSpec {
+            value_col: 0,
+            bit_cols,
+            result_col: mu + 1,
+        }])
+}
+
+/// The honest pointer-hop trace: random small values, random addresses,
+/// `R[x] = V[addr(x)]`, bit columns spelling `addr` low bit first.
+/// When `broken` is set, one result entry is bumped off its dereference.
+fn pointer_hop_trace<R, Rng>(num_vars: usize, rng: &mut Rng, broken: bool) -> UairTrace<'static, R, R, 32>
+where
+    R: ConstSemiring + From<i32> + 'static,
+    Rng: rand::RngCore + ?Sized,
+{
+    assert_eq!(
+        num_vars, POINTER_HOP_NUM_VARS,
+        "PointerHopUair is declared for {POINTER_HOP_NUM_VARS} vars"
+    );
+    let rows = 1usize << num_vars;
+    let values: Vec<i32> = (0..rows).map(|_| (rng.next_u32() % 97) as i32).collect();
+    let addrs: Vec<usize> = (0..rows).map(|_| (rng.next_u32() as usize) % rows).collect();
+    let mut results: Vec<i32> = addrs.iter().map(|&a| values[a]).collect();
+    if broken {
+        results[3] += 1;
+    }
+    let mut cols: Vec<Vec<i32>> = Vec::with_capacity(num_vars + 2);
+    cols.push(values);
+    for nu in 0..num_vars {
+        cols.push(addrs.iter().map(|&a| ((a >> nu) & 1) as i32).collect());
+    }
+    cols.push(results);
+    UairTrace {
+        int: cols
+            .into_iter()
+            .map(|col| col.into_iter().map(R::from).collect())
+            .collect::<Vec<_>>()
+            .into(),
+        ..Default::default()
+    }
+}
+
+impl<R> Uair for PointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        pointer_hop_signature()
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        // Trivially-satisfied constraint (the composed read carries the
+        // soundness work; the bits are booleanity's).
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for PointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        pointer_hop_trace::<R, Rng>(num_vars, rng, false)
+    }
+}
+
+/// PointerHopUair with one forged result entry: `R[3]` is bumped off
+/// its dereference. The composed-read check must reject this trace;
+/// a verifier that accepts it is not checking the pointer query.
+#[derive(Clone, Debug)]
+pub struct BrokenPointerHopUair<R>(PhantomData<R>);
+
+impl<R> Uair for BrokenPointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        pointer_hop_signature()
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+    {
+        let v = &up.int[0];
+        b.assert_zero(v.clone() - v);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BrokenPointerHopUair<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        pointer_hop_trace::<R, Rng>(num_vars, rng, true)
     }
 }

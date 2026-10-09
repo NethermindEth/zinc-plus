@@ -112,6 +112,8 @@ pub enum ReducerError<F: PrimeField> {
     ClaimedSumMismatch { got: F, expected: F },
     #[error("M(r*) is zero — degenerate reducer instance")]
     ZeroMSelector,
+    #[error("claim {index} is not the shape the batch takes")]
+    MalformedClaim { index: usize },
 }
 
 impl<F: PrimeField> From<SumCheckError<F>> for ReducerError<F> {

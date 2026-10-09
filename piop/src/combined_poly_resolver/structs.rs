@@ -165,6 +165,9 @@ pub struct CprVerifierAncillary<F: PrimeField> {
     pub folding_challenge_powers: Vec<F>,
     /// Evaluation point from the ideal check subclaim (for eq_r computation).
     pub ic_evaluation_point: Vec<F>,
+    /// Number of constraint polynomials — where the point ties' own
+    /// folding-challenge powers start.
+    pub num_constraints: usize,
     /// Number of variables (for selector computation).
     pub num_vars: usize,
 }

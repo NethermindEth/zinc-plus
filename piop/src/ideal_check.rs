@@ -407,6 +407,16 @@ where
 
         let combined_mle_values = proof.combined_mle_values;
 
+        // The fold downstream weighs one value per constraint against a power
+        // vector sized for the constraints and the ties both, so a longer list
+        // lands its tail on the ties' powers. One value per constraint, exactly.
+        if combined_mle_values.len() != num_constraints {
+            return Err(IdealCheckError::ClaimCountMismatch {
+                expected: num_constraints,
+                got: combined_mle_values.len(),
+            });
+        }
+
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
         for mle_value in &combined_mle_values {
@@ -415,11 +425,8 @@ where
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
 
-        // Only check non-trivial ideals. For assert_zero constraints
-        // the ideal is the zero ideal and the combined polynomial
-        // value is zero by construction; the sumcheck that follows
-        // verifies consistency of the claimed evaluations with the
-        // actual trace.
+        // Only check non-trivial ideals. An assert_zero value is its constraint's residue, which
+        // the verifier checks at the projecting element only for an all-zero-ideal UAIR.
         let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
             .ideals
             .iter()
@@ -445,6 +452,8 @@ pub enum IdealCheckError<F: PrimeField, I> {
     IdealCollectorError(#[from] BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
     #[error("`eq` polynomial construction failure: {0}")]
     EqPolyConstructionError(#[from] PolyArithErrors),
+    #[error("proof carries {got} combined values, the UAIR encodes {expected} constraints")]
+    ClaimCountMismatch { expected: usize, got: usize },
 }
 
 #[cfg(test)]

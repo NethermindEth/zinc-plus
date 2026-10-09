@@ -195,6 +195,13 @@ pub enum GkrLogupError<F: PrimeField> {
     /// A witness entry is not in the lookup table.
     #[error("witness entry not found in lookup table")]
     WitnessNotInTable,
+    /// A prescribed table cannot mean what it says: its pad is one of its
+    /// values, or it names more values than the column has rows.
+    #[error("prescribed table is not a multiset a column could hold")]
+    MalformedPrescribedTable,
+    /// A selection names a cell the group's columns do not have.
+    #[error("selection names a cell outside the group's columns")]
+    MalformedSelection,
     /// Multiplicity sum does not match the expected witness count.
     #[error("multiplicity sum mismatch: expected {expected}, got {got}")]
     MultiplicitySumMismatch { expected: u64, got: u64 },
@@ -599,7 +606,10 @@ where
 #[allow(clippy::arithmetic_side_effects)]
 fn meta_num_bytes(meta: &GkrLogupGroupMeta) -> usize {
     add!(
-        LookupTableType::NUM_BYTES,
+        add!(
+            LookupTableType::LENGTH_NUM_BYTES,
+            meta.table_type.get_num_bytes()
+        ),
         add!(
             mul!(4, u32::NUM_BYTES), // num_lookups, num_chunks, chunk_width, witness_len
             add!(u32::NUM_BYTES, mul!(meta.parent_columns.len(), u32::NUM_BYTES))
@@ -609,9 +619,7 @@ fn meta_num_bytes(meta: &GkrLogupGroupMeta) -> usize {
 
 #[allow(clippy::arithmetic_side_effects)]
 fn write_meta<'a>(buf: &'a mut [u8], meta: &GkrLogupGroupMeta) -> &'a mut [u8] {
-    meta.table_type
-        .write_transcription_bytes_exact(&mut buf[..LookupTableType::NUM_BYTES]);
-    let mut buf = &mut buf[LookupTableType::NUM_BYTES..];
+    let mut buf = meta.table_type.write_transcription_bytes_subset(buf);
     buf = write_u32_prefix(buf, meta.num_lookups);
     buf = write_u32_prefix(buf, meta.num_chunks);
     buf = write_u32_prefix(buf, meta.chunk_width);
@@ -625,9 +633,7 @@ fn write_meta<'a>(buf: &'a mut [u8], meta: &GkrLogupGroupMeta) -> &'a mut [u8] {
 
 #[allow(clippy::arithmetic_side_effects)]
 fn read_meta(bytes: &[u8]) -> (GkrLogupGroupMeta, &[u8]) {
-    let table_type =
-        LookupTableType::read_transcription_bytes_exact(&bytes[..LookupTableType::NUM_BYTES]);
-    let bytes = &bytes[LookupTableType::NUM_BYTES..];
+    let (table_type, bytes) = LookupTableType::read_transcription_bytes_subset(bytes);
     let (num_lookups, bytes) = read_u32_prefix(bytes);
     let (num_chunks, bytes) = read_u32_prefix(bytes);
     let (chunk_width, bytes) = read_u32_prefix(bytes);
