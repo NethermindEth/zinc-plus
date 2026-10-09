@@ -38,7 +38,7 @@ use zinc_uair::{
     BitOp, LookupTableType, Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     ideal::{Ideal, IdealCheck},
-    ideal_collector::IdealOrZero,
+    ideal_collector::{IdealOrZero, collect_ideals},
 };
 use zinc_utils::{
     add, sub, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -463,6 +463,31 @@ where
     }
 }
 
+/// Step 2 skips zero ideals, so each assert_zero claim must vanish at the projecting element.
+fn check_assert_zero_claims<U, F, IdealOverF>(
+    values: &[DynamicPolynomialF<F>],
+    projecting_element_f: &F,
+) -> Result<(), ProtocolError<F, IdealOverF>>
+where
+    U: Uair,
+    F: PrimeField,
+    IdealOverF: Ideal,
+{
+    let ideals = collect_ideals::<U>(count_constraints::<U>()).ideals;
+    for (i, (ideal, value)) in ideals.iter().zip(values).enumerate() {
+        if !ideal.is_zero_ideal() {
+            continue;
+        }
+        let at_psi = value
+            .evaluate_at_point(projecting_element_f)
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+        if !F::is_zero(&at_psi) {
+            return Err(ProtocolError::AssertZero(i));
+        }
+    }
+    Ok(())
+}
+
 impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D>
 where
     Zt: ZincTypes<D>,
@@ -485,6 +510,10 @@ where
     {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
+        check_assert_zero_claims::<U, F, IdealOverF>(
+            &self.ic_subclaim.values,
+            &projecting_element_f,
+        )?;
 
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &self.field_cfg));
         let projected_scalars_f =
@@ -1669,6 +1698,7 @@ where
     // ── Step 3: Eval projection ─────────────────────────────────────────
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+    check_assert_zero_claims::<U, F, IdealOverF>(&ic_subclaim.values, &projecting_element_f)?;
 
     let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
     let projected_scalars_f =
@@ -2402,6 +2432,7 @@ where
     let _t_step3 = std::time::Instant::now();
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+    check_assert_zero_claims::<U, F, IdealOverF>(&ic_subclaim.values, &projecting_element_f)?;
 
     let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
     let projected_scalars_f =

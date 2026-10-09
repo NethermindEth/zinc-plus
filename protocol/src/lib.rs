@@ -681,6 +681,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+    #[error("assert_zero constraint {0} does not vanish at the projecting element")]
+    AssertZero(usize),
 }
 
 //
@@ -1769,6 +1771,76 @@ mod tests {
             |_| {},
             |res| res.unwrap(),
         );
+    }
+
+    #[test]
+    fn test_e2e_simple_multiplication_false_witness() {
+        type Zt = TestZincTypesRaa;
+        type U = TestUairSimpleMultiplication<ZtInt>;
+        let num_vars = 2;
+        let pp = setup_pp::<Zt>(
+            num_vars,
+            (
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+            ),
+        );
+        let mut trace = U::generate_random_trace(num_vars, &mut rng());
+        trace.arbitrary_poly.to_mut()[0].evaluations[1].coeffs[0] += 1;
+        let public_trace = trace.public(&U::signature());
+
+        let proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<false, CHECKED>(
+            &pp,
+            &trace,
+            num_vars,
+            project_scalar_fn,
+        )
+        .expect("Prover failed");
+        let res = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+        );
+        assert!(matches!(res, Err(ProtocolError::AssertZero(_))));
+    }
+
+    #[test]
+    fn test_e2e_sha_ecdsa_false_witness() {
+        type Zt = TestShaEcdsaZincTypes;
+        type U = ShaEcdsaUair<ShaEcdsaInt>;
+        let pp = setup_pp::<Zt>(
+            SHA_ECDSA_NUM_VARS,
+            (
+                make_iprs(SHA_ECDSA_NUM_VARS),
+                make_iprs(SHA_ECDSA_NUM_VARS),
+                make_iprs(SHA_ECDSA_NUM_VARS),
+            ),
+        );
+        let mut trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng());
+        trace.int.to_mut()[zinc_test_uair::sha_ecdsa::cols::ECDSA_W_Z_PA].evaluations[5] +=
+            ShaEcdsaInt::from(1);
+        let public_trace = trace.public(&U::signature());
+
+        let proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<false, CHECKED>(
+            &pp,
+            &trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+        )
+        .expect("Prover failed");
+        let res = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+        );
+        assert!(matches!(res, Err(ProtocolError::AssertZero(_))));
     }
 
     /// End-to-end test: TestUairMixedDegrees.

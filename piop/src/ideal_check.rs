@@ -415,11 +415,8 @@ where
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
 
-        // Only check non-trivial ideals. For assert_zero constraints
-        // the ideal is the zero ideal and the combined polynomial
-        // value is zero by construction; the sumcheck that follows
-        // verifies consistency of the claimed evaluations with the
-        // actual trace.
+        // Only check non-trivial ideals. An assert_zero value is its constraint's residue, which
+        // the verifier checks at the projecting element.
         let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
             .ideals
             .iter()

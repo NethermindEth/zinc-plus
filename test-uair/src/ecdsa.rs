@@ -512,18 +512,9 @@ fn small_mul_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, k: u32) -> CbUint<EC_FP_INT_LIMB
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
     let mut acc = CbUint::<EC_FP_INT_LIMBS>::ZERO;
     for _ in 0..k {
-        acc = acc.wrapping_add(a);
-        if p_geq(&acc) {
-            acc = acc.rem_vartime(&p_nz);
-        }
+        acc = acc.add_mod(a, &p_nz);
     }
     acc
-}
-
-#[inline]
-fn p_geq(a: &CbUint<EC_FP_INT_LIMBS>) -> bool {
-    use crypto_bigint::CheckedSub;
-    a.checked_sub(&SECP256K1_P_UINT).is_some().into()
 }
 
 fn sub_mod_p(
@@ -850,6 +841,12 @@ mod tests {
         // Spot-checks: at least one deg-7 (Y addend constraint); 3 init deg-2.
         assert!(degrees.iter().any(|&d| d == 7), "expected at least one deg-7");
         assert_eq!(degrees.iter().filter(|&&d| d == 2).count(), 3, "init = 3 deg-2");
+    }
+
+    #[test]
+    fn small_mul_mod_p_reduces_past_2_256() {
+        let p_minus = |k: u64| SECP256K1_P_UINT.wrapping_sub(&CbUint::from_u64(k));
+        assert_eq!(small_mul_mod_p(&p_minus(1), 2), p_minus(2));
     }
 
     /// Witness gen produces a trace where every constraint vanishes

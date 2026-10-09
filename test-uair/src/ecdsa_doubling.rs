@@ -342,17 +342,9 @@ fn small_mul_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, k: u32) -> CbUint<EC_FP_INT_LIMB
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
     let mut acc = CbUint::<EC_FP_INT_LIMBS>::ZERO;
     for _ in 0..k {
-        acc = acc.wrapping_add(a);
-        if p_geq(&acc) {
-            acc = acc.rem_vartime(&p_nz);
-        }
+        acc = acc.add_mod(a, &p_nz);
     }
     acc
-}
-
-#[inline]
-fn p_geq(a: &CbUint<EC_FP_INT_LIMBS>) -> bool {
-    a.checked_sub(&SECP256K1_P_UINT).is_some().into()
 }
 
 /// `(a − b) mod p`, allowing `a < b`.
@@ -459,6 +451,12 @@ mod tests {
         //   C4: s_active * (Y_mid − 12X³S…) → 1 + 4 = 5
         assert_eq!(degrees, vec![3, 3, 5, 5]);
         assert_eq!(count_max_degree::<U>(), 5);
+    }
+
+    #[test]
+    fn small_mul_mod_p_reduces_past_2_256() {
+        let p_minus = |k: u64| SECP256K1_P_UINT.wrapping_sub(&CbUint::from_u64(k));
+        assert_eq!(small_mul_mod_p(&p_minus(1), 2), p_minus(2));
     }
 
     /// The witness generator produces a trace where every constraint
