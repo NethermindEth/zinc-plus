@@ -513,7 +513,10 @@ where
     // (no padding when K·W is a power of 2)
     let eq_at_outer = eq_table_or_unit(&r_outer, field_cfg)?;
     for ell in 0..num_lookups {
-        if proof.chunk_lifts[ell].len() != num_chunks {
+        // combine_chunks keeps only chunk_width coefficients of a lift, so ψ_a must see no more.
+        if proof.chunk_lifts[ell].len() != num_chunks
+            || proof.chunk_lifts[ell].iter().any(|c| c.coeffs.len() > chunk_width)
+        {
             return Err(GkrLogupError::GkrLeafMismatch);
         }
         let mut psi_combined = zero.clone();
@@ -1194,6 +1197,36 @@ mod tests {
         let mut v_ts = Blake3Transcript::new();
         let res = verify_group::<F>(&mut v_ts, &proof, &meta, &a, &cfg);
         assert!(res.is_err(), "verifier must reject tampered chunk lift");
+    }
+
+    #[test]
+    fn overflowing_chunk_lift_rejected() {
+        let cfg = ();
+        let mut rng = StdRng::seed_from_u64(99);
+        let n_vars = 5;
+        let parent = rand_binary_poly_col(n_vars, &mut rng);
+        let a: F = F::from(rng.next_u64());
+        let table_type = LookupTableType::BitPoly { width: 32, chunk_width: Some(8) };
+        let instance = BinaryPolyLookupInstance::<'_, F, 32> {
+            parent_columns: vec![&parent],
+            parent_column_indices: vec![0],
+            table_type,
+            projecting_element_f: &a,
+            n_vars,
+        };
+        let mut p_ts = Blake3Transcript::new();
+        let (mut proof, meta, _) = prove_group::<F, 32>(&mut p_ts, &instance, &cfg).expect("prove");
+
+        // Move the top chunk's constant term to X^8, past the chunk: ψ_a sees the same value.
+        let a_8 = (0..8).fold(F::from(1u64), |acc, _| acc * &a);
+        let chunk = &mut proof.chunk_lifts[0][3].coeffs;
+        chunk.resize(8, F::from(0u64));
+        chunk[0] = chunk[0].clone() - &a_8;
+        chunk.push(F::from(1u64));
+
+        let mut v_ts = Blake3Transcript::new();
+        let res = verify_group::<F>(&mut v_ts, &proof, &meta, &a, &cfg);
+        assert!(matches!(res, Err(GkrLogupError::GkrLeafMismatch)));
     }
 
     #[test]
