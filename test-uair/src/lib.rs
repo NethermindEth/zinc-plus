@@ -229,6 +229,71 @@ where
 }
 
 #[derive(Clone, Debug)]
+pub struct TestUairMixedZero<R, P>(PhantomData<(R, P)>);
+
+impl<R, P> Uair for TestUairMixedZero<R, P>
+where
+    R: ConstSemiring + From<i32> + 'static,
+    P: Semiring + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = ImpossibleIdeal;
+    type Scalar = DensePolynomial<R, 32>;
+    type Prime = P;
+
+    fn signature() -> UairSignature<Self::Prime> {
+        UairSignature::new(
+            TotalColumnLayout::new(0, 1, 0),
+            PublicColumnLayout::default(),
+            vec![],
+            vec![],
+        )
+    }
+
+    fn constrain_general<C, B, FromR, MulByScalar, IFromR, IFqFromR>(
+        b: &mut B,
+        expr_cfg: &C,
+        up: TraceRow<C::Element>,
+        _down: TraceRow<C::Element>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
+    ) where
+        C: SemiringConfig,
+        B: ConstraintBuilder<Expr = C::Element>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let value = up.arbitrary_poly[0].clone();
+        b.assert_in_ideal(
+            expr_cfg.sub(&value, &value),
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+        b.assert_zero(value);
+    }
+}
+
+impl<R, P> GenerateRandomTrace<32> for TestUairMixedZero<R, P>
+where
+    R: ConstSemiring + From<i32> + 'static,
+    P: Semiring + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<G: Rng + ?Sized>(
+        num_vars: usize,
+        _rng: &mut G,
+    ) -> UairTrace<'static, R, R, 32, 32> {
+        let one = DensePolynomial::new_with_zero(vec![R::ONE], R::ZERO);
+        UairTrace {
+            arbitrary_poly: vec![(0..1 << num_vars).map(|_| one.clone()).collect()].into(),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct TestUairScalarMultiplications<R, P>(PhantomData<(R, P)>);
 
 impl<R, P> Uair for TestUairScalarMultiplications<R, P>

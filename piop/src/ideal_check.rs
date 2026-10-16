@@ -44,17 +44,13 @@ impl<U: Uair> IdealCheckProtocol<U> {
     /// Prover using MLE-first evaluation (column-indexed trace).
     ///
     /// Routes each constraint through the most efficient evaluation path:
-    /// - Linear constraints with non-zero ideals are batched through
+    /// - Linear constraints are batched through
     ///   [`evaluate_combined_polynomials`], which evaluates trace column MLEs
     ///   at the challenge point and then applies the constraints to the
     ///   evaluated values.
-    /// - Non-linear constraints with non-zero ideals fall back to the row-major
+    /// - Non-linear constraints fall back to the row-major
     ///   [`evaluate_for_constraints`] path; the trace is transposed on demand
     ///   via [`column_major_to_row_major`].
-    /// - Constraints with zero ideals are short-circuited to zero (their
-    ///   combined polynomial value is zero by construction for an honest
-    ///   prover).
-    ///
     /// For $F_{q_i}[X]$ constraints, `trace_matrix` and `projected_scalars`
     /// must already be projected mod $q_i$.
     ///
@@ -85,70 +81,50 @@ impl<U: Uair> IdealCheckProtocol<U> {
         C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
         C::Integer: ConstTranscribable,
     {
-        // Classify constraints to drive dispatch below:
-        // * Linear non-zero-ideal goes through the column-major MLE-first path
-        // * Linear zero-ideal constraints need no tracking — their value is zero by
-        //   construction.
-        // * Non-linear non-zero-ideal goes through the row-major fallback
-        // * Non-linear zero-ideal entries are zeroed afterwards.
-        let ideal_collector = collect_ideals::<U>(num_constraints);
+        // Zero-ideal constraints follow the same evaluation paths: the verifier
+        // has to check that their actual combined polynomial is zero.
         let degrees = count_constraint_degrees::<U>();
 
-        let mut has_linear_nonzero: bool = false;
-        let mut nonlinear_zero: Vec<usize> = Vec::new();
-        let mut nonlinear_nonzero: Vec<usize> = Vec::new();
+        let mut has_linear = false;
+        let mut nonlinear = Vec::new();
 
-        macro_rules! categorize_ideals {
-            ($ideals:expr, $degrees:expr) => {
-                for (idx, ideal) in $ideals.iter().enumerate() {
-                    if $degrees[idx] <= 1 {
-                        has_linear_nonzero |= !ideal.is_zero_ideal();
-                    } else if ideal.is_zero_ideal() {
-                        nonlinear_zero.push(idx);
+        macro_rules! categorize_degrees {
+            ($degrees:expr) => {
+                for (idx, degree) in $degrees.iter().enumerate() {
+                    if *degree <= 1 {
+                        has_linear = true;
                     } else {
-                        nonlinear_nonzero.push(idx);
+                        nonlinear.push(idx);
                     }
                 }
             };
         }
 
         if family_idx == 0 {
-            categorize_ideals!(ideal_collector.ideals, degrees.q_degrees);
+            categorize_degrees!(degrees.q_degrees);
         } else {
             let prime_idx = family_idx - 1;
-            categorize_ideals!(
-                ideal_collector.fq_ideals[prime_idx],
-                degrees.fq_degrees[prime_idx]
-            );
+            categorize_degrees!(degrees.fq_degrees[prime_idx]);
         }
 
-        // When any linear non-zero-ideal constraint exists, run
+        // When any linear constraint exists, run
         // `evaluate_combined_polynomials` once: all linear entries (zero or not) come
         // out correct.
         // Non-linear entries are garbage and get replaced below.
-        let mut combined_mle_values: Vec<DynamicPolynomial<C::Element>> = if has_linear_nonzero {
-            let mut res =
-                combined_poly_builder::evaluate_combined_polynomials::<_, U, DEGREE_PLUS_ONE>(
-                    trace_matrix,
-                    projected_scalars,
-                    family_idx,
-                    num_constraints,
-                    evaluation_point,
-                    field_cfg,
-                )?;
-
-            // Scrub garbage left by `evaluate_combined_polynomials` at non-linear
-            // zero-ideal indices.
-            for &i in &nonlinear_zero {
-                res[i] = DynamicPolynomial::ZERO;
-            }
-
-            res
+        let mut combined_mle_values: Vec<DynamicPolynomial<C::Element>> = if has_linear {
+            combined_poly_builder::evaluate_combined_polynomials::<_, U, DEGREE_PLUS_ONE>(
+                trace_matrix,
+                projected_scalars,
+                family_idx,
+                num_constraints,
+                evaluation_point,
+                field_cfg,
+            )?
         } else {
             vec![DynamicPolynomial::ZERO; num_constraints]
         };
 
-        if !nonlinear_nonzero.is_empty() {
+        if !nonlinear.is_empty() {
             // `evaluate_for_constraints` works with row-major traces, so we have to
             // transpose here.
             // TODO(alex): Can/should we avoid the transposition?
@@ -159,10 +135,10 @@ impl<U: Uair> IdealCheckProtocol<U> {
                 family_idx,
                 num_constraints,
                 field_cfg,
-                &nonlinear_nonzero,
+                &nonlinear,
                 evaluation_point,
             )?;
-            for (&i, v) in nonlinear_nonzero.iter().zip(values) {
+            for (&i, v) in nonlinear.iter().zip(values) {
                 combined_mle_values[i] = v;
             }
         }
@@ -212,42 +188,17 @@ impl<U: Uair> IdealCheckProtocol<U> {
         C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig,
         C::Integer: ConstTranscribable,
     {
-        // Collect ideals to identify assert_zero constraints whose
-        // combined polynomial is zero by construction (for honest provers).
-        macro_rules! get_non_zero_indices {
-            ($ideals:expr) => {
-                $ideals
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, i)| !i.is_zero_ideal())
-                    .map(|(idx, _)| idx)
-                    .collect::<Vec<usize>>()
-            };
-        }
-        let ideal_collector = collect_ideals::<U>(num_constraints);
-        let non_zero_indices: Vec<usize> = if family_idx == 0 {
-            get_non_zero_indices!(ideal_collector.ideals)
-        } else {
-            let prime_idx = sub!(family_idx, 1);
-            get_non_zero_indices!(ideal_collector.fq_ideals.get(prime_idx).unwrap_or(&vec![]))
-        };
-
-        let mut combined_mle_values = vec![DynamicPolynomial::ZERO; num_constraints];
-        if !non_zero_indices.is_empty() {
-            let computed = combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
+        let constraint_indices: Vec<usize> = (0..num_constraints).collect();
+        let combined_mle_values =
+            combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
                 trace_matrix,
                 projected_scalars,
                 family_idx,
                 num_constraints,
                 field_cfg,
-                &non_zero_indices,
+                &constraint_indices,
                 evaluation_point,
             )?;
-
-            for (&ci, val) in non_zero_indices.iter().zip(computed) {
-                combined_mle_values[ci] = val;
-            }
-        };
 
         let mut transcription_buf: Vec<u8> = vec![0; <C::Integer as ConstTranscribable>::NUM_BYTES];
 
@@ -263,7 +214,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     /// The verifier part of the ideal-check subprotocol.
     ///
     /// Mirrors the prover: receives the prover's `combined_mle_values`,
-    /// absorbs them into the transcript, then checks each non-trivial
+    /// absorbs them into the transcript, then checks each
     /// constraint's value against the corresponding lifted ideal.
     ///
     /// # Parameters
@@ -314,37 +265,27 @@ impl<U: Uair> IdealCheckProtocol<U> {
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
 
-        macro_rules! collect_non_trivial {
+        macro_rules! collect_constraints {
             ($ideals:expr, $ideal_from_ref:ident) => {
                 $ideals
                     .iter()
                     .zip(combined_mle_values.iter())
-                    .filter(|(ideal, _)| !ideal.is_zero_ideal())
                     .map(|(ideal, value)| ($ideal_from_ref(ideal), value.clone()))
                     .unzip()
             };
         }
 
-        // Only check non-trivial ideals. For assert_zero constraints
-        // the ideal is the zero ideal and the combined polynomial
-        // value is zero by construction; the sumcheck that follows
-        // verifies consistency of the claimed evaluations with the
-        // actual trace.
-        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = if family_idx == 0 {
-            collect_non_trivial!(ideal_collector.ideals, ideal_over_f_from_ref)
+        let (ideals, values): (Vec<_>, Vec<_>) = if family_idx == 0 {
+            collect_constraints!(ideal_collector.ideals, ideal_over_f_from_ref)
         } else {
             let prime_idx = sub!(family_idx, 1);
-            collect_non_trivial!(
+            collect_constraints!(
                 ideal_collector.fq_ideals.get(prime_idx).unwrap_or(&vec![]),
                 ideal_over_f_from_fq_ref
             )
         };
 
-        batched_ideal_check(
-            &field_cfg.dyn_poly_cfg(),
-            &non_trivial_ideals,
-            &non_trivial_values,
-        )?;
+        batched_ideal_check(&field_cfg.dyn_poly_cfg(), &ideals, &values)?;
 
         Ok(VerifierSubclaim {
             evaluation_point: evaluation_point.to_vec(),

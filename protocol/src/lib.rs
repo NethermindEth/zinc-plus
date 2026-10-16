@@ -958,7 +958,7 @@ mod tests {
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
         ShaProxy, TestUairAffineVirtualPublicOnly, TestUairAffineVirtualUnshifted,
-        TestUairBitOpsFqFamily, TestUairFqLargePrime, TestUairMixedShifts,
+        TestUairBitOpsFqFamily, TestUairFqLargePrime, TestUairMixedShifts, TestUairMixedZero,
         TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
@@ -1257,6 +1257,23 @@ mod tests {
             default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_e2e_mixed_zero_false_witness() {
+        let num_vars = 2;
+        do_test::<TestZincTypesRaa, TestUairMixedZero<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+                RaaCode::new(num_vars),
+            ),
+            default_project_ideal!(),
+            default_project_fq_ideal!(),
+            |_| {},
+            |res| assert!(res.is_err(), "a false assert_zero witness verified"),
         );
     }
 
