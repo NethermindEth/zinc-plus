@@ -32,7 +32,7 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{
     CHECKED,
     from_ref::FromRef,
-    inner_product::{MBSInnerProduct, ScalarProduct},
+    inner_product::{MBSInnerProduct, PreparedFieldInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
 };
 
@@ -167,6 +167,7 @@ where
     C: BaseFieldConfig
         + ProjectElementWithConfig<<TestZipTypes<N, K, M> as ZipTypes>::Pt>
         + ProjectElementWithConfig<<TestZipTypes<N, K, M> as ZipTypes>::CombR>
+        + PreparedFieldInnerProduct<<TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + Sync,
     C::Integer: ConstTranscribable + FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod>,
 {
@@ -197,6 +198,7 @@ where
     C: BaseFieldConfig
         + ProjectElementWithConfig<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Pt>
         + ProjectElementWithConfig<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
+        + PreparedFieldInnerProduct<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + Sync,
     C::Integer: ConstTranscribable
         + FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod>,
@@ -224,6 +226,7 @@ where
     C: BaseFieldConfig
         + ProjectElementWithConfig<Zt::Pt>
         + ProjectElementWithConfig<Zt::CombR>
+        + PreparedFieldInnerProduct<Zt::CombR>
         + Sync,
     C::Integer: ConstTranscribable,
     C::Integer: FromRef<Zt::Fmod>,
